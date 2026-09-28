@@ -9,6 +9,7 @@ import pg from "pg";
 import ws from "ws";
 
 import { splitSqlStatements } from "./sqlMigrationStatements";
+import { assertIsolatedVerificationDatabaseUrl, isIsolatedVerificationMode, isRenderService } from "../server/bootstrap/isolatedVerification";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -215,6 +216,24 @@ export function resolveMigrationDatabaseUrl(
   }
 
   const parsed = new URL(raw);
+  if (isIsolatedVerificationMode(environment)) {
+    assertIsolatedVerificationDatabaseUrl(raw, environment);
+    if (environment.MIGRATION_DATABASE_URL) {
+      if (!environment.DATABASE_URL) {
+        throw new Error("Isolated migrations require the runtime DATABASE_URL for target matching");
+      }
+      assertIsolatedVerificationDatabaseUrl(environment.DATABASE_URL, environment);
+      const runtime = new URL(environment.DATABASE_URL);
+      const directHost = (host: string) => host.replace(/-pooler(?=\.)/i, "");
+      if (
+        directHost(parsed.hostname) !== directHost(runtime.hostname) ||
+        parsed.pathname !== runtime.pathname ||
+        parsed.port !== runtime.port
+      ) {
+        throw new Error("Isolated migration and runtime database targets differ");
+      }
+    }
+  }
   if (!environment.MIGRATION_DATABASE_URL && /\.neon\.tech$/i.test(parsed.hostname)) {
     parsed.hostname = parsed.hostname.replace(/-pooler(?=\.)/i, "");
   }
@@ -247,7 +266,7 @@ export function useLocalPostgresTransport(
       "Local migration transport requires a numeric loopback PostgreSQL address",
     );
   }
-  if (environment.RENDER_SERVICE_ID) {
+  if (isRenderService(environment)) {
     throw new Error(
       "Local migration transport is unavailable in a Render service",
     );

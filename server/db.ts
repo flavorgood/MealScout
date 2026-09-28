@@ -4,7 +4,7 @@ import { drizzle as drizzleNeon } from 'drizzle-orm/neon-serverless';
 import { drizzle as drizzleLocal } from 'drizzle-orm/node-postgres';
 import ws from "ws";
 import * as schema from "@shared/schema";
-import { useLocalPostgresRuntime } from "./bootstrap/isolatedVerification";
+import { assertIsolatedVerificationDatabaseUrl, useLocalPostgresRuntime } from "./bootstrap/isolatedVerification";
 
 const { Pool: LocalPool } = pg;
 
@@ -22,6 +22,7 @@ if (!process.env.DATABASE_URL) {
 }
 
 const databaseUrl = process.env.DATABASE_URL;
+if (databaseUrl) assertIsolatedVerificationDatabaseUrl(databaseUrl);
 const localRuntime = databaseUrl ? useLocalPostgresRuntime(databaseUrl) : false;
 const selectedPool = databaseUrl
   ? localRuntime
