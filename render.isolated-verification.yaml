@@ -4,6 +4,7 @@ services:
     name: mealscout-isolated-verification
     runtime: node
     plan: starter
+    region: virginia
     branch: codex/mealscout-hosted-isolation-20260925
     autoDeployTrigger: "off"
     buildCommand: npm ci --include=dev && npm run build:platform
