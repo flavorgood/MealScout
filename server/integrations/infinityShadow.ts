@@ -1,11 +1,5 @@
 import { createHash } from "node:crypto";
 
-import {
-  mealScoutSelectiveInheritancePolicy,
-  type MealScoutInheritanceCandidate,
-  type MealScoutInheritanceOverride,
-} from "./infinitySelectiveInheritance";
-
 type InfinityShadowResult = "sent" | "disabled" | "failed";
 
 const EMAIL_LIKE = /(^|[^a-z0-9])[^/\s@]+@[^/\s@]+\.[^/\s@]+($|[^a-z0-9])/i;
@@ -167,40 +161,4 @@ export async function mirrorInfinitySignup(input: {
     },
     `mealscout:signup:${input.partnerId}:${input.restaurantId}`,
   );
-}
-
-export async function mirrorInfinitySelectiveInheritance(input: {
-  evaluationId: string;
-  profileId: string;
-  targetVersion: string;
-  candidates: MealScoutInheritanceCandidate[];
-  overrides?: MealScoutInheritanceOverride[];
-}): Promise<InfinityShadowResult> {
-  const current = config();
-  const policy = mealScoutSelectiveInheritancePolicy(current.tenantId);
-  const allowedFields = new Set(
-    policy.fields
-      .filter((field) => field.action === "inherit")
-      .map((field) => field.field),
-  );
-  const candidates = input.candidates.filter((candidate) =>
-    allowedFields.has(candidate.field),
-  );
-  const overrides = (input.overrides || []).filter((override) =>
-    allowedFields.has(override.field),
-  );
-
-  return post("/v1/selective-inheritance/evaluations", {
-    evaluationId: input.evaluationId,
-    target: {
-      tenantId: current.tenantId,
-      objectType: "food_business_profile",
-      objectId: opaqueObjectId(input.profileId),
-    },
-    targetVersion: input.targetVersion,
-    policy,
-    candidates,
-    overrides,
-    evaluatedAt: new Date().toISOString(),
-  });
 }

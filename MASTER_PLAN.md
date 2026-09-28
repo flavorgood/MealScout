@@ -34,11 +34,12 @@ Confirmed on the repository baseline:
   and mobile Safari.
 - Automated marketing email volume is behind a default-off kill switch; the
   Premium summary cadence is monthly.
-- Infinity referral mirroring and selective inheritance are shadow-only.
+- Infinity referral and signup-evidence mirroring are shadow-only. No active
+  Infinity product-field inheritance consumer exists.
 - Manual profile asset intake is review-gated.
 - The 3D Eats FRUI-TEA sauce classification/description update is recorded.
 - Date-only public event normalization and explicit `501
-  ACTION_NOT_IMPLEMENTED` guards for reserved county actions are present.
+ACTION_NOT_IMPLEMENTED` guards for reserved county actions are present.
 
 Repository state does not by itself prove current production deployment or
 third-party provider health. Those require separate live verification.
@@ -49,7 +50,8 @@ third-party provider health. Those require separate live verification.
 
 - Keep manual production tools fail-closed for the apex domain, ports, and all
   MealScout subdomains.
-- Enforce the selective-inheritance allowlist on candidates and overrides.
+- Keep Infinity mirroring limited to non-PII attribution and conversion
+  evidence.
 - Apply team permissions per selected business, not as account-wide aggregate
   permission leakage.
 - Keep one deterministic global navigation instance.
