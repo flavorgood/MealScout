@@ -309,6 +309,14 @@
       "dest": "https://mealscout.onrender.com/food-trucks-today/$1"
     },
     {
+      "src": "/food-truck-catering/([^/]+)",
+      "dest": "https://mealscout.onrender.com/food-truck-catering/$1"
+    },
+    {
+      "src": "/book-food-truck/([^/]+)",
+      "dest": "https://mealscout.onrender.com/book-food-truck/$1"
+    },
+    {
       "src": "/city/([^/]+)/food",
       "dest": "https://mealscout.onrender.com/city/$1/food"
     },
