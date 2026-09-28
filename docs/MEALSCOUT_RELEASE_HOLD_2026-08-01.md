@@ -167,7 +167,7 @@ EMBED v1 envelope wording:                      CORRECTED BY REVIEWED ERRATUM
 Trusted-principal model:                        PENDING
 GitHub Actions execution evidence:              ABSENT
 Main enforcement:                               BASELINE ACTIVE / CI CHECKS PENDING
-PR #322:                                        HOLD / DECOMPOSE
+PR #322:                                        HOLD / DECOMPOSED (step 5 branches opened; proofs pending)
 Rescue branch:                                  PRESERVED
 Overall status:                                 PARTIAL / HOLD
 ```
@@ -189,23 +189,37 @@ The branch remains untouched.
 No rescue hunk is classified `Conflicting` on the current evidence. The branch
 must not be merged, rebased, replaced, or deleted as part of this record.
 
+
+## Locked release order progress (2026-08-07)
+
+- Step 3 landed on main: PR #330 (`fix: restaurant follow duplicate idempotency`).
+- Step 4 landed on main: PR #331 (`Bound search and live-truck response size and count`).
+- Current `origin/main` tip at decomposition: `caa9a56639c68da52d4f60d73b6373cdc22c6060`.
+- Step 5 (this record): PR #322 decomposed into separate current-main salvage branches. **Not merged wholesale.** Independent proofs are step 6+.
+- GitHub Actions remains **retired as release evidence**. Use Actions-free exact-commit / Render / local matrix evidence only.
+- No production deploy or production migration was performed for step 5.
+- Rescue branch `rescue/2026-07-28-mealscout-local-state` remains untouched.
+
+Detailed file attribution: `docs/PR322_STEP5_DECOMPOSITION_MAP.md`.
+
 ## PR #322 behavioral salvage map
 
 Source: `repair/2026-07-28-mealscout-preview-validation` at `e897188f`.
 
-All rows remain `PENDING EXTRACTION` until rebuilt from a fresh current-main
-branch and proven independently. `server/routes/actionRoutes.ts` is explicitly
+Step 5 opened current-main salvage branches/charters (see table). Rows stay
+`PENDING PROOF` until step 6+ independent evidence. Branches must not be
+treated as PASS from decomposition alone. `server/routes/actionRoutes.ts` is explicitly
 excluded from payment/delivery salvage.
 
 | Ordered slice | Candidate owners from PR #322 | Initial disposition | Required proof boundary |
 |---|---|---|---|
-| 1. Schema and stateful-test foundation | `migrations/119_menu_inventory_auto_availability.sql`, `shared/schema/legacy.ts`, PostgreSQL pickup/replay fixtures | Pending retain/reject comparison | Production-like PostgreSQL apply, replay, rollback or roll-forward statement, mixed-version compatibility |
-| 2. Idempotency and Stripe state transitions | `server/middleware/idempotency.ts`, `server/routes/stripeWebhookRoutes.ts`, payment cancellation/state services, webhook contracts | Pending reconciliation against free-profile main | Duplicate, stale, out-of-order and terminal-state replay; no real provider claim |
-| 3. Pickup checkout and confirmation | pickup routes/pages, order confirmation, orders-workspace tests | Pending reconstruction on current checkout model | Authoritative totals, stale reconfirmation, order creation, refund and exactly-once notification behavior |
-| 4. Merchant delivery lifecycle | merchant delivery route/page, eligibility/timezone services and lifecycle contract | Pending reconstruction | Merchant authority, lifecycle transitions, customer visibility, pickup interaction |
-| 5. Inventory availability | migration 119 plus menu routes/schema behavior | Pending necessity check | Sold-out/zero-inventory truth, concurrency behavior and migration compatibility |
+| 1. Schema and stateful-test foundation | `migrations/119_menu_inventory_auto_availability.sql`, `shared/schema/legacy.ts`, PostgreSQL pickup/replay fixtures | **RETAIN** — branch `salvage/pr322-lane1-schema-stateful-foundation` (schema/migration extracted; fixtures charter) | Production-like PostgreSQL apply, replay, rollback or roll-forward statement, mixed-version compatibility |
+| 2. Idempotency and Stripe state transitions | `server/middleware/idempotency.ts`, `server/routes/stripeWebhookRoutes.ts`, payment cancellation/state services, webhook contracts | **RETAIN** — branch `salvage/pr322-lane2-idempotency-stripe` (classifier extracted; webhook/idempotency charter) | Duplicate, stale, out-of-order and terminal-state replay; no real provider claim |
+| 3. Pickup checkout and confirmation | pickup routes/pages, order confirmation, orders-workspace tests | **RETAIN** — branch `salvage/pr322-lane3-pickup-checkout` (charter + promotion TX hook) | Authoritative totals, stale reconfirmation, order creation, refund and exactly-once notification behavior |
+| 4. Merchant delivery lifecycle | merchant delivery route/page, eligibility/timezone services and lifecycle contract | **RETAIN** — branch `salvage/pr322-lane4-merchant-delivery` (schedule/lifecycle code extracted) | Merchant authority, lifecycle transitions, customer visibility, pickup interaction |
+| 5. Inventory availability | migration 119 plus menu routes/schema behavior | **RETAIN** — branch `salvage/pr322-lane5-inventory-availability` (column + owner clears; checkout SET pending lanes 2/3) | Sold-out/zero-inventory truth, concurrency behavior and migration compatibility |
 | Excluded security lane | `server/routes/actionRoutes.ts` | Reject from PR #322 salvage | Rebuild only under trusted principal/delegation authorization work |
-| Incidental overlap | route map, workspace shell, package scripts, affiliate cleanup and promotion service | Pending per-hunk attribution | Retain only when required by one of the five slices; otherwise reject as unrelated or superseded |
+| Incidental overlap | route map, workspace shell, package scripts, affiliate cleanup and promotion service | **ATTRIBUTED** — route map/affiliate slug → lane 4; promotion TX → lane 3; workspace shell + package deletions + App.tsx → **REJECT/SUPERSEDED** | Retain only when required by one of the five slices; otherwise reject as unrelated or superseded |
 
 The original PR closes without merge only after every hunk and intended
 behavior is marked retained, reimplemented, superseded, or rejected with
