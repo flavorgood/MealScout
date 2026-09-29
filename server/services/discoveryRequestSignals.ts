@@ -6,9 +6,15 @@ export type DiscoverySignalRequest = {
 };
 
 export type DiscoveryTrafficQuality = {
-  version: 1;
+  version: 2;
   basis: "server_observed_request_signals";
-  classification: "browser_candidate" | "automation_signal" | "qa_signal" | "unclassified";
+  classification:
+    | "browser_candidate"
+    | "discovery_crawler"
+    | "infrastructure_monitor"
+    | "automation_signal"
+    | "qa_signal"
+    | "unclassified";
 };
 
 const CAMPAIGN_SOURCES: Readonly<Record<string, string>> = Object.freeze({
@@ -98,7 +104,11 @@ export function classifyDiscoveryRequest(req: DiscoverySignalRequest | null | un
   // Exclusion markers never grant access or promote a request to a human classification.
   if (header(req, "x-mealscout-qa") === "1" || header(req, "x-mealscout-traffic-class") === "qa_automation") {
     classification = "qa_signal";
-  } else if (/bot\b|crawler|spider|headless|playwright|puppeteer|selenium|curl\/|wget\/|python-requests|httpx|node-fetch|undici|postman|google-inspectiontool|facebookexternalhit|chatgpt-user|anthropic-ai|sway-runtime-proof|mealscout.*(?:proof|qa|smoke)/i.test(ua)) {
+  } else if (/uptimerobot|better uptime|betterstack|pingdom|statuscake|site24x7|healthchecks\.io/i.test(ua)) {
+    classification = "infrastructure_monitor";
+  } else if (/googlebot|bingbot|oai-searchbot|chatgpt-user|claudebot|anthropic-ai|facebookexternalhit|ahrefsbot|semrushbot|duckduckbot|applebot|bytespider|yandexbot/i.test(ua)) {
+    classification = "discovery_crawler";
+  } else if (/bot\b|crawler|spider|headless|playwright|puppeteer|selenium|curl\/|wget\/|python-requests|httpx|node-fetch|undici|postman|google-inspectiontool|sway-runtime-proof|mealscout.*(?:proof|qa|smoke)/i.test(ua)) {
     classification = "automation_signal";
   } else if (/^Mozilla\/5\.0\b/.test(ua)
     && /AppleWebKit|Gecko\//.test(ua)
@@ -110,7 +120,11 @@ export function classifyDiscoveryRequest(req: DiscoverySignalRequest | null | un
 }
 
 export function discoveryRequestActorType(quality: DiscoveryTrafficQuality): "unknown" | "bot" | "internal" {
-  if (quality.classification === "automation_signal") return "bot";
+  if (
+    quality.classification === "automation_signal" ||
+    quality.classification === "discovery_crawler" ||
+    quality.classification === "infrastructure_monitor"
+  ) return "bot";
   if (quality.classification === "qa_signal") return "internal";
   return "unknown";
 }
