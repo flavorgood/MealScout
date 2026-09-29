@@ -15,6 +15,8 @@ test("confirmed synthetic production records are not discovery eligible", () => 
     "discoverability-flow-1777479688781-295625",
     "test-supplier-1771607433376-s17ept",
     "Test Truck 1771607433376",
+    "test-host-1776139421969",
+    "smoke-host-site",
   ]) {
     assert.equal(isSyntheticPublicEntityName(name), true, name);
     assert.equal(
@@ -66,6 +68,7 @@ test("sitemap and prerender paths consume the shared integrity policy", () => {
   assert.match(sitemap, /const restaurantRows = allRestaurantRows\.filter/);
   assert.match(sitemap, /const supplierRows = allSupplierRows\.filter/);
   assert.match(prerender, /publicRestaurantRobotsDirective/);
+  assert.match(prerender, /!isPublicDiscoveryEligibleEntity\(\{/);
   assert.match(prerender, /isSyntheticPublicEntityName\(name\)/);
   assert.match(
     prerender,
