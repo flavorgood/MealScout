@@ -16,7 +16,9 @@ test("confirmed synthetic production records are not discovery eligible", () => 
     "test-supplier-1771607433376-s17ept",
     "Test Truck 1771607433376",
     "test-host-1776139421969",
+    "test-host-1776139608501",
     "smoke-host-site",
+    "smoke-host-site-1776139421969",
   ]) {
     assert.equal(isSyntheticPublicEntityName(name), true, name);
     assert.equal(
@@ -34,6 +36,9 @@ test("the narrow guard preserves legitimate public business names", () => {
     "ASDF Coffee Roasters",
     "Discoverability Cafe",
     "Supplier Test Labs",
+    "Test Host Cafe",
+    "Test Location Lounge",
+    "Smoke House",
   ]) {
     assert.equal(isSyntheticPublicEntityName(name), false, name);
     assert.equal(
@@ -80,9 +85,11 @@ test("sitemap and prerender paths consume the shared integrity policy", () => {
   );
 });
 
-test("Action public reads compose shared integrity with Scout visibility and quarantine", () => {
+test("Action public reads compose owner authority, integrity, visibility and quarantine", () => {
   const eligible = {
     id: "restaurant-1",
+    ownerId: "fixture-owner",
+    ownerDisabled: false,
     name: "Riverbend Cafe",
     address: "100 Main St",
     cuisineType: "Cafe",
@@ -92,6 +99,9 @@ test("Action public reads compose shared integrity with Scout visibility and qua
     isActive: true,
   };
   assert.equal(isActionApiPublicBusinessEligible(eligible), true);
+  assert.equal(isActionApiPublicBusinessEligible({ ...eligible, ownerId: null }), false);
+  assert.equal(isActionApiPublicBusinessEligible({ ...eligible, ownerDisabled: true }), false);
+  assert.equal(isActionApiPublicBusinessEligible({ ...eligible, ownerDisabled: undefined }), false);
   assert.equal(
     isActionApiPublicBusinessEligible({
       ...eligible,
