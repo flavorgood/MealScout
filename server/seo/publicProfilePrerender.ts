@@ -1506,9 +1506,7 @@ export function registerPublicProfilePrerenderRoutes(
 
         const current = await loadRestaurantPage(canonicalBaseUrl, id);
         if (current) {
-          res.setHeader("Cache-Control", "public, max-age=300");
-          res.setHeader("X-Robots-Tag", "noindex,follow");
-          return res.redirect(308, current.canonicalPath);
+          return safeCanonicalRedirect(req, res, current);
         }
 
         return renderPage(canonicalBaseUrl, res, null);
@@ -1517,6 +1515,28 @@ export function registerPublicProfilePrerenderRoutes(
         return sendPrerenderUnavailable(res);
       }
     };
+
+  const legacyProfileRedirectQuery = (req: Request) =>
+    legacyCityDealRedirectQuery(req);
+
+  const safeCanonicalRedirect = (
+    req: Request,
+    res: Response,
+    page: PrerenderPage,
+    preserveAttribution = false,
+  ) => {
+    const target =
+      page.canonicalPath +
+      (preserveAttribution ? legacyProfileRedirectQuery(req) : "");
+    const incomingPath = String(req.path || "").replace(/\/+$/, "") || "/";
+    const targetPath = page.canonicalPath.replace(/\/+$/, "") || "/";
+    if (incomingPath === targetPath) {
+      return renderPage(canonicalBaseUrl, res, null);
+    }
+    res.setHeader("Cache-Control", "public, max-age=300");
+    res.setHeader("X-Robots-Tag", "noindex,follow");
+    return res.redirect(308, target);
+  };
 
   const landingGate =
     (handler: (req: Request) => Promise<PrerenderPage | null>) =>
@@ -1697,9 +1717,7 @@ export function registerPublicProfilePrerenderRoutes(
         // profile so search engines transfer signals instead of indexing two
         // competing URL forms.
         if (page) {
-          res.setHeader("Cache-Control", "public, max-age=300");
-          res.setHeader("X-Robots-Tag", "noindex,follow");
-          return res.redirect(308, page.canonicalPath);
+          return safeCanonicalRedirect(req, res, page, true);
         }
 
         // A restaurant-table entity may have changed type since the legacy URL
@@ -1710,9 +1728,7 @@ export function registerPublicProfilePrerenderRoutes(
         ) {
           const current = await loadRestaurantPage(canonicalBaseUrl, id);
           if (current) {
-            res.setHeader("Cache-Control", "public, max-age=300");
-            res.setHeader("X-Robots-Tag", "noindex,follow");
-            return res.redirect(308, current.canonicalPath);
+            return safeCanonicalRedirect(req, res, current, true);
           }
         }
 
