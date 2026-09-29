@@ -23,8 +23,11 @@ export function isSyntheticPublicEntityName(value: unknown): boolean {
   if (/^test supplier(?: \d{10,}(?: [a-z0-9]+)*)?$/.test(normalized)) {
     return true;
   }
+  if (/^(?:test|smoke) host(?: site)?(?: \d{10,}(?: [a-z0-9]+)*)?$/.test(normalized)) {
+    return true;
+  }
 
-  return /^test (?:truck|restaurant|business|vendor)(?:\s|$)/.test(normalized);
+  return /^test (?:truck|restaurant|business|vendor|host|location)(?:\s|$)/.test(normalized);
 }
 
 export function isPublicDiscoveryEligibleEntity(input: {
