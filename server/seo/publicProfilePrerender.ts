@@ -818,6 +818,10 @@ async function hostPage(baseUrl: string, hostId: string) {
   const ownerProfile = await resolveOwnerPublicProfile(row.userId);
   if (
     !ownerProfile.ownerEnabled ||
+    !isPublicDiscoveryEligibleEntity({
+      name: row.businessName,
+      isActive: true,
+    }) ||
     !isPublicBusinessVisible({
       name: row.businessName,
       city: row.city,
@@ -1903,24 +1907,44 @@ export function registerPublicProfilePrerenderRoutes(
   );
   app.get(
     "/cuisine/:cuisine/:city?",
-    landingGate((req) =>
-      seoLandingPage(
-        canonicalBaseUrl,
-        {
-          ...publicSeoCuisineRequest(req.params.cuisine, req.params.city),
-          links:
-            req.params.city === undefined
-              ? [{ label: "Open search", href: "/search" }]
-              : [
-                  {
-                    label: "Open city food",
-                    href: `/city/${encodeURIComponent(String(req.params.city))}/food`,
-                  },
-                ],
-        },
-        loadLanding,
-      ),
-    ),
+    async (req: Request, res: Response) => {
+      try {
+        const page = await seoLandingPage(
+          canonicalBaseUrl,
+          {
+            ...publicSeoCuisineRequest(req.params.cuisine, req.params.city),
+            links:
+              req.params.city === undefined
+                ? [{ label: "Open search", href: "/search" }]
+                : [
+                    {
+                      label: "Open city food",
+                      href: `/city/${encodeURIComponent(String(req.params.city))}/food`,
+                    },
+                  ],
+          },
+          loadLanding,
+        );
+        if (page) {
+          return renderPage(canonicalBaseUrl, res, page);
+        }
+
+        // Historical global cuisine URLs were broadly published before cuisine
+        // membership became evidence-backed. Retire empty legacy URLs as Gone
+        // so crawlers stop spending budget retrying permanent dead ends.
+        res
+          .status(410)
+          .setHeader("Content-Type", "text/html; charset=utf-8")
+          .setHeader("Cache-Control", "public, max-age=300")
+          .setHeader("X-Robots-Tag", "noindex,follow");
+        return res.send(
+          '<!DOCTYPE html><html><head><title>Gone | MealScout</title><meta name="robots" content="noindex,follow"></head><body>This discovery page is no longer published.</body></html>',
+        );
+      } catch (error) {
+        console.error("[seo-prerender] cuisine recovery failed", error);
+        return sendPrerenderUnavailable(res);
+      }
+    },
   );
   app.get(
     "/locations-with-trucks/:city",
