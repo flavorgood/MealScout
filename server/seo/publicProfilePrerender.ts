@@ -504,6 +504,8 @@ async function restaurantPage(
     canonicalBusinessType === "private_chef"
       ? canonicalBusinessType
       : null);
+  // Untyped recovery must never invent a restaurant for an unsupported type.
+  if (!strictRouteProfileType) return null;
   if (expectedProfileType && strictRouteProfileType !== expectedProfileType) {
     return null;
   }
@@ -873,7 +875,7 @@ async function hostPage(baseUrl: string, hostId: string) {
     name,
     description,
     url: canonicalProfileUrl,
-    mainEntityOfPage: { "@id": profilePageId },
+    mainEntityOfPage: { "@id": profileEntityId },
     image,
     telephone: publicPhone || undefined,
     sameAs: [
@@ -1424,8 +1426,10 @@ const sendPage = (
   res: Response,
   page: PrerenderPage | null,
 ) => {
+  res.setHeader("Cache-Control", "no-store");
   if (!page) {
     res.status(404).setHeader("Content-Type", "text/html; charset=utf-8");
+    res.setHeader("X-Robots-Tag", "noindex,follow");
     res.send(
       '<!DOCTYPE html><html><head><title>Not found | MealScout</title><meta name="robots" content="noindex,follow"></head><body>Not found</body></html>',
     );
@@ -1478,10 +1482,6 @@ export function registerPublicProfilePrerenderRoutes(
       }
     };
 
-  // Search engines retain old MealScout profile URLs after a business changes
-  // classification (restaurant -> truck, truck -> restaurant, etc.). Preserve
-  // that accumulated discovery authority by redirecting a stale typed URL to
-  // the entity's current canonical profile instead of returning a dead 404.
   const canonicalRestaurantGate =
     (
       expectedProfileType:
@@ -1523,18 +1523,26 @@ export function registerPublicProfilePrerenderRoutes(
     req: Request,
     res: Response,
     page: PrerenderPage,
-    preserveAttribution = false,
+    preserveAttribution = true,
   ) => {
-    const target =
-      page.canonicalPath +
-      (preserveAttribution ? legacyProfileRedirectQuery(req) : "");
     const incomingPath = String(req.path || "").replace(/\/+$/, "") || "/";
-    const targetPath = page.canonicalPath.replace(/\/+$/, "") || "/";
-    if (incomingPath === targetPath) {
+    const targetPath = String(page.canonicalPath || "");
+    const directives = String(page.robots || "").toLowerCase().split(",").map(value => value.trim());
+    const id = extractId(req.params.profileId || req.params.id || req.params.slug);
+    const match = /^\/(restaurant|truck|bar|caterer|private-chef|location|supplier|event)\/([^/?#\\\s]+)$/.exec(targetPath);
+    let sameEntity = false;
+    if (match) {
+      const decoded = decodeURIComponent(match[2]);
+      sameEntity = decoded.includes("--") && extractId(decoded) === id;
+    }
+    // A recovered URL needs current public eligibility and the same entity ID.
+    // Never publish an arbitrary destination or a self-loop for unknown types.
+    if (!sameEntity || !directives.includes("index") || directives.includes("noindex") || incomingPath === targetPath.replace(/\/+$/, "")) {
       return renderPage(canonicalBaseUrl, res, null);
     }
-    res.setHeader("Cache-Control", "public, max-age=300");
-    res.setHeader("X-Robots-Tag", "noindex,follow");
+    const target = targetPath + (preserveAttribution ? legacyProfileRedirectQuery(req) : "");
+    // Identity can be disabled after this request, so do not cache the redirect.
+    res.setHeader("Cache-Control", "no-store");
     return res.redirect(308, target);
   };
 
@@ -1610,8 +1618,7 @@ export function registerPublicProfilePrerenderRoutes(
       if (!page) {
         return renderPage(canonicalBaseUrl, res, null);
       }
-      res.setHeader("Cache-Control", "public, max-age=300");
-      return res.redirect(308, page.canonicalPath);
+      return safeCanonicalRedirect(req, res, page);
     } catch (error) {
       console.error("[seo-prerender] legacy chef redirect failed", error);
       return sendPrerenderUnavailable(res);
@@ -1712,17 +1719,10 @@ export function registerPublicProfilePrerenderRoutes(
           page = await eventPage(canonicalBaseUrl, id);
         }
 
-        // /p/... is a legacy public identity shape. If the entity is still
-        // public, consolidate every surviving legacy URL onto its canonical
-        // profile so search engines transfer signals instead of indexing two
-        // competing URL forms.
         if (page) {
           return safeCanonicalRedirect(req, res, page, true);
         }
 
-        // A restaurant-table entity may have changed type since the legacy URL
-        // was indexed. Retry without the historical type before declaring it
-        // missing.
         if (
           ["restaurant", "food_truck", "truck", "bar", "caterer", "private_chef", "private-chef", "chef"].includes(type)
         ) {
@@ -1921,46 +1921,28 @@ export function registerPublicProfilePrerenderRoutes(
       ),
     ),
   );
+  // Missing inventory is not evidence of permanent retirement. Unknown cities
+  // and missing cuisines remain 404; loader failures remain retryable 503.
   app.get(
     "/cuisine/:cuisine/:city?",
-    async (req: Request, res: Response) => {
-      try {
-        const page = await seoLandingPage(
-          canonicalBaseUrl,
-          {
-            ...publicSeoCuisineRequest(req.params.cuisine, req.params.city),
-            links:
-              req.params.city === undefined
-                ? [{ label: "Open search", href: "/search" }]
-                : [
-                    {
-                      label: "Open city food",
-                      href: `/city/${encodeURIComponent(String(req.params.city))}/food`,
-                    },
-                  ],
-          },
-          loadLanding,
-        );
-        if (page) {
-          return renderPage(canonicalBaseUrl, res, page);
-        }
-
-        // Historical global cuisine URLs were broadly published before cuisine
-        // membership became evidence-backed. Retire empty legacy URLs as Gone
-        // so crawlers stop spending budget retrying permanent dead ends.
-        res
-          .status(410)
-          .setHeader("Content-Type", "text/html; charset=utf-8")
-          .setHeader("Cache-Control", "public, max-age=300")
-          .setHeader("X-Robots-Tag", "noindex,follow");
-        return res.send(
-          '<!DOCTYPE html><html><head><title>Gone | MealScout</title><meta name="robots" content="noindex,follow"></head><body>This discovery page is no longer published.</body></html>',
-        );
-      } catch (error) {
-        console.error("[seo-prerender] cuisine recovery failed", error);
-        return sendPrerenderUnavailable(res);
-      }
-    },
+    landingGate((req) =>
+      seoLandingPage(
+        canonicalBaseUrl,
+        {
+          ...publicSeoCuisineRequest(req.params.cuisine, req.params.city),
+          links:
+            req.params.city === undefined
+              ? [{ label: "Open search", href: "/search" }]
+              : [
+                  {
+                    label: "Open city food",
+                    href: `/city/${encodeURIComponent(String(req.params.city))}/food`,
+                  },
+                ],
+        },
+        loadLanding,
+      ),
+    ),
   );
   app.get(
     "/locations-with-trucks/:city",
