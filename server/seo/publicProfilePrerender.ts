@@ -1661,35 +1661,63 @@ export function registerPublicProfilePrerenderRoutes(
   );
   app.get(
     ["/p/:profileType/:profileId", "/p/:profileType/:profileId/:profileSlug"],
-    gate((req) => {
-      const type = String(req.params.profileType || "").toLowerCase();
-      const id = extractId(req.params.profileId);
-      if (type === "restaurant") {
-        return loadRestaurantPage(canonicalBaseUrl, id, "restaurant");
+    async (req: Request, res: Response) => {
+      try {
+        const type = String(req.params.profileType || "").toLowerCase();
+        const id = extractId(req.params.profileId);
+        let page: PrerenderPage | null = null;
+        if (type === "restaurant") {
+          page = await loadRestaurantPage(canonicalBaseUrl, id, "restaurant");
+        } else if (type === "food_truck" || type === "truck") {
+          page = await loadRestaurantPage(canonicalBaseUrl, id, "truck");
+        } else if (type === "bar") {
+          page = await loadRestaurantPage(canonicalBaseUrl, id, "bar");
+        } else if (type === "caterer") {
+          page = await loadRestaurantPage(canonicalBaseUrl, id, "caterer");
+        } else if (
+          type === "private_chef" ||
+          type === "private-chef" ||
+          type === "chef"
+        ) {
+          page = await loadRestaurantPage(canonicalBaseUrl, id, "private_chef");
+        } else if (type === "host" || type === "location") {
+          page = await hostPage(canonicalBaseUrl, id);
+        } else if (type === "supplier") {
+          page = await supplierPage(canonicalBaseUrl, id);
+        } else if (type === "event") {
+          page = await eventPage(canonicalBaseUrl, id);
+        }
+
+        // /p/... is a legacy public identity shape. If the entity is still
+        // public, consolidate every surviving legacy URL onto its canonical
+        // profile so search engines transfer signals instead of indexing two
+        // competing URL forms.
+        if (page) {
+          res.setHeader("Cache-Control", "public, max-age=300");
+          res.setHeader("X-Robots-Tag", "noindex,follow");
+          return res.redirect(308, page.canonicalPath);
+        }
+
+        // A restaurant-table entity may have changed type since the legacy URL
+        // was indexed. Retry without the historical type before declaring it
+        // missing.
+        if (
+          ["restaurant", "food_truck", "truck", "bar", "caterer", "private_chef", "private-chef", "chef"].includes(type)
+        ) {
+          const current = await loadRestaurantPage(canonicalBaseUrl, id);
+          if (current) {
+            res.setHeader("Cache-Control", "public, max-age=300");
+            res.setHeader("X-Robots-Tag", "noindex,follow");
+            return res.redirect(308, current.canonicalPath);
+          }
+        }
+
+        return renderPage(canonicalBaseUrl, res, null);
+      } catch (error) {
+        console.error("[seo-prerender] legacy profile recovery failed", error);
+        return sendPrerenderUnavailable(res);
       }
-      if (type === "food_truck" || type === "truck") {
-        return loadRestaurantPage(canonicalBaseUrl, id, "truck");
-      }
-      if (type === "bar") {
-        return loadRestaurantPage(canonicalBaseUrl, id, "bar");
-      }
-      if (type === "caterer") {
-        return loadRestaurantPage(canonicalBaseUrl, id, "caterer");
-      }
-      if (type === "private_chef" || type === "private-chef" || type === "chef") {
-        return loadRestaurantPage(canonicalBaseUrl, id, "private_chef");
-      }
-      if (type === "host" || type === "location") {
-        return hostPage(canonicalBaseUrl, id);
-      }
-      if (type === "supplier") {
-        return supplierPage(canonicalBaseUrl, id);
-      }
-      if (type === "event") {
-        return eventPage(canonicalBaseUrl, id);
-      }
-      return Promise.resolve(null);
-    }),
+    },
   );
   app.get(
     "/food-trucks/:city/:cuisine",
