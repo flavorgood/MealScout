@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -11,6 +11,7 @@ const output = path.join(root, ".discovery-proof");
 mkdirSync(output, { recursive: true });
 const temp = mkdtempSync(path.join(tmpdir(), "mealscout-discovery-proof-"));
 const work = path.join(temp, "source");
+mkdirSync(work);
 const cleanEnv = Object.fromEntries(["PATH", "HOME", "TMPDIR", "LANG", "SYSTEMROOT"].filter(key => process.env[key]).map(key => [key, process.env[key]]));
 Object.assign(cleanEnv, { NODE_ENV: "test", CI: "true", DATABASE_URL: "postgresql://fixture:fixture@127.0.0.1:9/mealscout_discovery_test?sslmode=disable", EMAIL_NOTIFICATIONS_MODE: "off", VAC_AUTO_VERIFY_ENABLED: "false", MERLIN_OR_ENABLED: "false" });
 const receipt = { sourceSha, proofCommit: process.env.VERCEL_GIT_COMMIT_SHA || null, startedAt: new Date().toISOString(), finishedAt: null, passed: false, scope: "isolated_source_tests_and_builds_only", productionChanged: false, providerCallsAllowed: false, stages: [] };
@@ -24,14 +25,15 @@ function run(name, command, args, cwd = work, env = cleanEnv, required = true) {
   return stage.passed;
 }
 try {
-  if (!run("source_checkout", "git", ["worktree", "add", "--detach", work, sourceSha], root)) throw new Error("Exact source checkout failed");
+  if (!run("source_init", "git", ["init"])) throw new Error("Isolated source initialization failed");
+  if (!run("source_fetch", "git", ["fetch", "--depth=1", "--no-tags", "https://github.com/infotradescout/MealScout.git", sourceSha])) throw new Error("Exact source fetch failed");
+  if (!run("source_checkout", "git", ["checkout", "--detach", sourceSha])) throw new Error("Exact source checkout failed");
   symlinkSync(path.join(root, "node_modules"), path.join(work, "node_modules"), "dir");
   const toolRoot = path.join(temp, "sql-tooling");
   mkdirSync(toolRoot);
   if (!run("disposable_pglite_install", "npm", ["install", "--prefix", toolRoot, "--no-save", "--package-lock=false", "--ignore-scripts", "--no-audit", "--no-fund", "@electric-sql/pglite@0.3.14"], root)) throw new Error("Disposable SQL tooling unavailable");
   cleanEnv.MEAL_QUALITY_PGLITE_MODULE = pathToFileURL(path.join(toolRoot, "node_modules/@electric-sql/pglite/dist/index.js")).href;
-  // A pre-existing regression verifies three protected files against this exact historical commit.
-  run("historical_contract_source", "git", ["fetch", "--no-tags", "https://github.com/infotradescout/MealScout.git", "d64ef420f537b78e00fc93c8d8aa1baba84a976f"], root);
+  run("historical_contract_source", "git", ["fetch", "--depth=1", "--no-tags", "https://github.com/infotradescout/MealScout.git", "d64ef420f537b78e00fc93c8d8aa1baba84a976f"]);
   const guard = path.join(temp, "network-guard.mjs");
   writeFileSync(guard, `import net from 'node:net';\nimport tls from 'node:tls';\nimport {syncBuiltinESMExports} from 'node:module';\nconst local = host => ['127.0.0.1','localhost','::1','[::1]'].includes(String(host || 'localhost').toLowerCase());\nconst check = value => { const u = new URL(typeof value === 'string' || value instanceof URL ? value : value.url); if (!local(u.hostname) || !['http:','https:'].includes(u.protocol)) throw new Error('External network is blocked in MealScout discovery proof'); };\nconst originalFetch=globalThis.fetch; globalThis.fetch=(input,...rest)=>{check(input);return originalFetch(input,...rest);};\nconst connect=net.Socket.prototype.connect; net.Socket.prototype.connect=function(...args){const first=args[0];const host=first&&typeof first==='object'?first.host:typeof args[1]==='string'?args[1]:'localhost';if(!local(host))throw new Error('External socket is blocked in MealScout discovery proof');return connect.apply(this,args);};\nconst tlsConnect=tls.connect;tls.connect=function(...args){const first=args[0];const options=first&&typeof first==='object'?first:args.find(arg=>arg&&typeof arg==='object')||{};const host=options.host||(typeof args[1]==='string'?args[1]:'localhost');if(!local(host))throw new Error('External TLS is blocked in MealScout discovery proof');return tlsConnect.apply(this,args);};\nsyncBuiltinESMExports();\n`);
   cleanEnv.NODE_OPTIONS = "--import=" + pathToFileURL(guard).href;
