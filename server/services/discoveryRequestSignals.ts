@@ -1,5 +1,6 @@
 /** Request evidence only. None of these labels establish a unique human or external causation. */
 export type DiscoverySignalRequest = {
+  path?: string;
   query?: Record<string, unknown>;
   headers?: Record<string, unknown>;
   get?: (name: string) => unknown;
@@ -101,14 +102,18 @@ export function deriveDiscoverySearchSurface(req: DiscoverySignalRequest | null 
 export function classifyDiscoveryRequest(req: DiscoverySignalRequest | null | undefined): DiscoveryTrafficQuality {
   let classification: DiscoveryTrafficQuality["classification"] = "unclassified";
   const ua = header(req, "user-agent") || "";
+  const requestPath = scalar(req?.path, 2048) || "";
   // Exclusion markers never grant access or promote a request to a human classification.
   if (header(req, "x-mealscout-qa") === "1" || header(req, "x-mealscout-traffic-class") === "qa_automation") {
     classification = "qa_signal";
-  } else if (/uptimerobot|better uptime|betterstack|pingdom|statuscake|site24x7|healthchecks\.io/i.test(ua)) {
+  } else if (/^\/(?:api\/)?health\/?$/i.test(requestPath) || /uptimerobot|better uptime|betterstack|pingdom|statuscake|site24x7|healthchecks\.io/i.test(ua)) {
     classification = "infrastructure_monitor";
+  } else if (/headless|playwright|puppeteer|selenium|curl\/|wget\/|python-requests|httpx|node-fetch|undici|postman|sway-runtime-proof|mealscout.*(?:proof|qa|smoke)/i.test(ua)) {
+    classification = "automation_signal";
   } else if (/googlebot|bingbot|oai-searchbot|chatgpt-user|claudebot|anthropic-ai|facebookexternalhit|ahrefsbot|semrushbot|duckduckbot|applebot|bytespider|yandexbot/i.test(ua)) {
+    // These are claimed user-agent signals, not independently verified crawler identities.
     classification = "discovery_crawler";
-  } else if (/bot\b|crawler|spider|headless|playwright|puppeteer|selenium|curl\/|wget\/|python-requests|httpx|node-fetch|undici|postman|google-inspectiontool|sway-runtime-proof|mealscout.*(?:proof|qa|smoke)/i.test(ua)) {
+  } else if (/bot\b|crawler|spider|google-inspectiontool/i.test(ua)) {
     classification = "automation_signal";
   } else if (/^Mozilla\/5\.0\b/.test(ua)
     && /AppleWebKit|Gecko\//.test(ua)
@@ -116,7 +121,7 @@ export function classifyDiscoveryRequest(req: DiscoverySignalRequest | null | un
     && ["cors", "same-origin"].includes(header(req, "sec-fetch-mode") || "")) {
     classification = "browser_candidate";
   }
-  return { version: 1, basis: "server_observed_request_signals", classification };
+  return { version: 2, basis: "server_observed_request_signals", classification };
 }
 
 export function discoveryRequestActorType(quality: DiscoveryTrafficQuality): "unknown" | "bot" | "internal" {
