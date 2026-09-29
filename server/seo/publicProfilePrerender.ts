@@ -1474,6 +1474,46 @@ export function registerPublicProfilePrerenderRoutes(
       }
     };
 
+  // Search engines retain old MealScout profile URLs after a business changes
+  // classification (restaurant -> truck, truck -> restaurant, etc.). Preserve
+  // that accumulated discovery authority by redirecting a stale typed URL to
+  // the entity's current canonical profile instead of returning a dead 404.
+  const canonicalRestaurantGate =
+    (
+      expectedProfileType:
+        | "restaurant"
+        | "truck"
+        | "bar"
+        | "caterer"
+        | "private_chef",
+      idFromRequest: (req: Request) => string,
+    ) =>
+    async (req: Request, res: Response) => {
+      try {
+        const id = idFromRequest(req);
+        const expected = await loadRestaurantPage(
+          canonicalBaseUrl,
+          id,
+          expectedProfileType,
+        );
+        if (expected) {
+          return renderPage(canonicalBaseUrl, res, expected);
+        }
+
+        const current = await loadRestaurantPage(canonicalBaseUrl, id);
+        if (current) {
+          res.setHeader("Cache-Control", "public, max-age=300");
+          res.setHeader("X-Robots-Tag", "noindex,follow");
+          return res.redirect(308, current.canonicalPath);
+        }
+
+        return renderPage(canonicalBaseUrl, res, null);
+      } catch (error) {
+        console.error("[seo-prerender] canonical profile recovery failed", error);
+        return sendPrerenderUnavailable(res);
+      }
+    };
+
   const landingGate =
     (handler: (req: Request) => Promise<PrerenderPage | null>) =>
     async (req: Request, res: Response) => {
@@ -1485,12 +1525,9 @@ export function registerPublicProfilePrerenderRoutes(
       }
     };
 
-  const restaurantDetailGate = gate((req) =>
-    loadRestaurantPage(
-      canonicalBaseUrl,
-      extractId(req.params.id),
-      "restaurant",
-    ),
+  const restaurantDetailGate = canonicalRestaurantGate(
+    "restaurant",
+    (req) => extractId(req.params.id),
   );
   app.get(
     "/restaurant/:id/:slug",
@@ -1513,42 +1550,30 @@ export function registerPublicProfilePrerenderRoutes(
   );
   app.get(
     "/truck/:slug",
-    gate((req) =>
-      loadRestaurantPage(
-        canonicalBaseUrl,
-        extractId(req.params.slug),
-        "truck",
-      ),
+    canonicalRestaurantGate(
+      "truck",
+      (req) => extractId(req.params.slug),
     ),
   );
   app.get(
     "/bar/:slug",
-    gate((req) =>
-      loadRestaurantPage(
-        canonicalBaseUrl,
-        extractId(req.params.slug),
-        "bar",
-      ),
+    canonicalRestaurantGate(
+      "bar",
+      (req) => extractId(req.params.slug),
     ),
   );
   app.get(
     "/caterer/:slug",
-    gate((req) =>
-      loadRestaurantPage(
-        canonicalBaseUrl,
-        extractId(req.params.slug),
-        "caterer",
-      ),
+    canonicalRestaurantGate(
+      "caterer",
+      (req) => extractId(req.params.slug),
     ),
   );
   app.get(
     "/private-chef/:slug",
-    gate((req) =>
-      loadRestaurantPage(
-        canonicalBaseUrl,
-        extractId(req.params.slug),
-        "private_chef",
-      ),
+    canonicalRestaurantGate(
+      "private_chef",
+      (req) => extractId(req.params.slug),
     ),
   );
   app.get("/chef/:slug", async (req: Request, res: Response) => {
