@@ -22,7 +22,7 @@ export function registerAcquisitionQualityRoutes(app: Express, authorize: Reques
     if(!pool)return res.status(503).json({message:"Traffic evidence is unavailable. No totals were inferred."});
     if(active>=2)return res.status(429).set("Retry-After","5").json({message:"Report busy. Please retry."});
     active++;let client: AcquisitionQueryClient | undefined;
-    try {client=await acquireQualityClient(pool);return res.json({report:await readAcquisitionQuality(client,hours)});}
+    try {client=await acquireQualityClient(pool);return res.json({report:await readAcquisitionQuality(client,hours,new Date(),{includeOriginRequests:true})});}
     catch {return res.status(503).json({message:"Traffic evidence is unavailable. No totals were inferred."});}
     finally {client?.release();active--;}
   });
