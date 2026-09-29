@@ -1,3 +1,9 @@
+import {
+  HEALTH_REQUEST_PATH_PATTERN, MONITOR_USER_AGENT_PATTERN,
+  AUTOMATION_USER_AGENT_PATTERN, CRAWLER_USER_AGENT_PATTERN,
+  GENERIC_AUTOMATION_USER_AGENT_PATTERN,
+} from "../../shared/discoveryTrafficPatterns";
+
 /** Request evidence only. None of these labels establish a unique human or external causation. */
 export type DiscoverySignalRequest = {
   path?: string;
@@ -31,6 +37,11 @@ const PROVIDER_ROOTS: ReadonlyArray<readonly [string, string]> = [
   ["chatgpt.com", "chatgpt"], ["openai.com", "chatgpt"], ["bing.com", "bing"],
   ["facebook.com", "facebook"], ["fb.com", "facebook"], ["instagram.com", "instagram"],
 ];
+const healthPattern = new RegExp(HEALTH_REQUEST_PATH_PATTERN, "i");
+const monitorPattern = new RegExp(MONITOR_USER_AGENT_PATTERN, "i");
+const automationPattern = new RegExp(AUTOMATION_USER_AGENT_PATTERN, "i");
+const crawlerPattern = new RegExp(CRAWLER_USER_AGENT_PATTERN, "i");
+const genericAutomationPattern = new RegExp(GENERIC_AUTOMATION_USER_AGENT_PATTERN, "i");
 
 function scalar(value: unknown, limit: number): string | null {
   if (typeof value !== "string" || value.length > limit || /[\u0000-\u001f\u007f]/.test(value)) return null;
@@ -106,14 +117,14 @@ export function classifyDiscoveryRequest(req: DiscoverySignalRequest | null | un
   // Exclusion markers never grant access or promote a request to a human classification.
   if (header(req, "x-mealscout-qa") === "1" || header(req, "x-mealscout-traffic-class") === "qa_automation") {
     classification = "qa_signal";
-  } else if (/^\/(?:api\/)?health\/?$/i.test(requestPath) || /uptimerobot|better uptime|betterstack|pingdom|statuscake|site24x7|healthchecks\.io/i.test(ua)) {
+  } else if (healthPattern.test(requestPath) || monitorPattern.test(ua)) {
     classification = "infrastructure_monitor";
-  } else if (/headless|playwright|puppeteer|selenium|curl\/|wget\/|python-requests|httpx|node-fetch|undici|postman|sway-runtime-proof|mealscout.*(?:proof|qa|smoke)/i.test(ua)) {
+  } else if (automationPattern.test(ua)) {
     classification = "automation_signal";
-  } else if (/googlebot|bingbot|oai-searchbot|chatgpt-user|claudebot|anthropic-ai|facebookexternalhit|ahrefsbot|semrushbot|duckduckbot|applebot|bytespider|yandexbot/i.test(ua)) {
+  } else if (crawlerPattern.test(ua)) {
     // These are claimed user-agent signals, not independently verified crawler identities.
     classification = "discovery_crawler";
-  } else if (/bot\b|crawler|spider|google-inspectiontool/i.test(ua)) {
+  } else if (genericAutomationPattern.test(ua)) {
     classification = "automation_signal";
   } else if (/^Mozilla\/5\.0\b/.test(ua)
     && /AppleWebKit|Gecko\//.test(ua)

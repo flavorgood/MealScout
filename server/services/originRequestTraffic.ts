@@ -1,4 +1,9 @@
 import { originRequestTrafficSchema } from "../../shared/acquisitionQuality";
+import {
+  HEALTH_REQUEST_PATH_PATTERN, MONITOR_USER_AGENT_PATTERN,
+  AUTOMATION_USER_AGENT_PATTERN, CRAWLER_USER_AGENT_PATTERN,
+  GENERIC_AUTOMATION_USER_AGENT_PATTERN,
+} from "../../shared/discoveryTrafficPatterns";
 import type { AcquisitionQueryClient } from "./acquisitionQuality";
 
 /** Aggregate existing origin logs; never trust the legacy default actor_type='human'.
@@ -9,11 +14,11 @@ export const ORIGIN_REQUEST_TRAFFIC_SQL = String.raw`
 WITH observed AS (
   SELECT status_code,
     CASE
-      WHEN lower(split_part(coalesce(path,''),'?',1)) ~ '^/(api/)?health/?$'
-        OR coalesce(user_agent,'') ~* '(uptimerobot|better uptime|betterstack|pingdom|statuscake|site24x7|healthchecks\.io)' THEN 'infrastructure_monitor'
-      WHEN coalesce(user_agent,'') ~* '(headless|playwright|puppeteer|selenium|curl/|wget/|python-requests|httpx|node-fetch|undici|postman|sway-runtime-proof|mealscout.*(proof|qa|smoke))' THEN 'automation_signal'
-      WHEN coalesce(user_agent,'') ~* '(googlebot|bingbot|oai-searchbot|chatgpt-user|claudebot|anthropic-ai|facebookexternalhit|ahrefsbot|semrushbot|duckduckbot|applebot|bytespider|yandexbot)' THEN 'discovery_crawler'
-      WHEN coalesce(user_agent,'') ~* '(bot([^a-z]|$)|crawler|spider|google-inspectiontool)' THEN 'automation_signal'
+      WHEN lower(split_part(coalesce(path,''),'?',1)) ~ '${HEALTH_REQUEST_PATH_PATTERN}'
+        OR coalesce(user_agent,'') ~* '${MONITOR_USER_AGENT_PATTERN}' THEN 'infrastructure_monitor'
+      WHEN coalesce(user_agent,'') ~* '${AUTOMATION_USER_AGENT_PATTERN}' THEN 'automation_signal'
+      WHEN coalesce(user_agent,'') ~* '${CRAWLER_USER_AGENT_PATTERN}' THEN 'discovery_crawler'
+      WHEN coalesce(user_agent,'') ~* '${GENERIC_AUTOMATION_USER_AGENT_PATTERN}' THEN 'automation_signal'
       WHEN coalesce(user_agent,'') ~ '^Mozilla/5\.0' AND coalesce(user_agent,'') ~ '(AppleWebKit|Gecko/)' THEN 'browser_shaped'
       ELSE 'unclassified'
     END AS classification
