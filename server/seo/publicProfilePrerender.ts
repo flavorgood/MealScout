@@ -504,6 +504,8 @@ async function restaurantPage(
     canonicalBusinessType === "private_chef"
       ? canonicalBusinessType
       : null);
+  // Untyped recovery must never invent a restaurant for an unsupported type.
+  if (!strictRouteProfileType) return null;
   if (expectedProfileType && strictRouteProfileType !== expectedProfileType) {
     return null;
   }
@@ -818,6 +820,10 @@ async function hostPage(baseUrl: string, hostId: string) {
   const ownerProfile = await resolveOwnerPublicProfile(row.userId);
   if (
     !ownerProfile.ownerEnabled ||
+    !isPublicDiscoveryEligibleEntity({
+      name: row.businessName,
+      isActive: true,
+    }) ||
     !isPublicBusinessVisible({
       name: row.businessName,
       city: row.city,
@@ -1420,8 +1426,10 @@ const sendPage = (
   res: Response,
   page: PrerenderPage | null,
 ) => {
+  res.setHeader("Cache-Control", "no-store");
   if (!page) {
     res.status(404).setHeader("Content-Type", "text/html; charset=utf-8");
+    res.setHeader("X-Robots-Tag", "noindex,follow");
     res.send(
       '<!DOCTYPE html><html><head><title>Not found | MealScout</title><meta name="robots" content="noindex,follow"></head><body>Not found</body></html>',
     );
@@ -1474,6 +1482,70 @@ export function registerPublicProfilePrerenderRoutes(
       }
     };
 
+  const canonicalRestaurantGate =
+    (
+      expectedProfileType:
+        | "restaurant"
+        | "truck"
+        | "bar"
+        | "caterer"
+        | "private_chef",
+      idFromRequest: (req: Request) => string,
+    ) =>
+    async (req: Request, res: Response) => {
+      try {
+        const id = idFromRequest(req);
+        const expected = await loadRestaurantPage(
+          canonicalBaseUrl,
+          id,
+          expectedProfileType,
+        );
+        if (expected) {
+          return renderPage(canonicalBaseUrl, res, expected);
+        }
+
+        const current = await loadRestaurantPage(canonicalBaseUrl, id);
+        if (current) {
+          return safeCanonicalRedirect(req, res, current);
+        }
+
+        return renderPage(canonicalBaseUrl, res, null);
+      } catch (error) {
+        console.error("[seo-prerender] canonical profile recovery failed", error);
+        return sendPrerenderUnavailable(res);
+      }
+    };
+
+  const legacyProfileRedirectQuery = (req: Request) =>
+    legacyCityDealRedirectQuery(req);
+
+  const safeCanonicalRedirect = (
+    req: Request,
+    res: Response,
+    page: PrerenderPage,
+    preserveAttribution = true,
+  ) => {
+    const incomingPath = String(req.path || "").replace(/\/+$/, "") || "/";
+    const targetPath = String(page.canonicalPath || "");
+    const directives = String(page.robots || "").toLowerCase().split(",").map(value => value.trim());
+    const id = extractId(req.params.profileId || req.params.id || req.params.slug);
+    const match = /^\/(restaurant|truck|bar|caterer|private-chef|location|supplier|event)\/([^/?#\\\s]+)$/.exec(targetPath);
+    let sameEntity = false;
+    if (match) {
+      const decoded = decodeURIComponent(match[2]);
+      sameEntity = decoded.includes("--") && extractId(decoded) === id;
+    }
+    // A recovered URL needs current public eligibility and the same entity ID.
+    // Never publish an arbitrary destination or a self-loop for unknown types.
+    if (!sameEntity || !directives.includes("index") || directives.includes("noindex") || incomingPath === targetPath.replace(/\/+$/, "")) {
+      return renderPage(canonicalBaseUrl, res, null);
+    }
+    const target = targetPath + (preserveAttribution ? legacyProfileRedirectQuery(req) : "");
+    // Identity can be disabled after this request, so do not cache the redirect.
+    res.setHeader("Cache-Control", "no-store");
+    return res.redirect(308, target);
+  };
+
   const landingGate =
     (handler: (req: Request) => Promise<PrerenderPage | null>) =>
     async (req: Request, res: Response) => {
@@ -1485,12 +1557,9 @@ export function registerPublicProfilePrerenderRoutes(
       }
     };
 
-  const restaurantDetailGate = gate((req) =>
-    loadRestaurantPage(
-      canonicalBaseUrl,
-      extractId(req.params.id),
-      "restaurant",
-    ),
+  const restaurantDetailGate = canonicalRestaurantGate(
+    "restaurant",
+    (req) => extractId(req.params.id),
   );
   app.get(
     "/restaurant/:id/:slug",
@@ -1513,42 +1582,30 @@ export function registerPublicProfilePrerenderRoutes(
   );
   app.get(
     "/truck/:slug",
-    gate((req) =>
-      loadRestaurantPage(
-        canonicalBaseUrl,
-        extractId(req.params.slug),
-        "truck",
-      ),
+    canonicalRestaurantGate(
+      "truck",
+      (req) => extractId(req.params.slug),
     ),
   );
   app.get(
     "/bar/:slug",
-    gate((req) =>
-      loadRestaurantPage(
-        canonicalBaseUrl,
-        extractId(req.params.slug),
-        "bar",
-      ),
+    canonicalRestaurantGate(
+      "bar",
+      (req) => extractId(req.params.slug),
     ),
   );
   app.get(
     "/caterer/:slug",
-    gate((req) =>
-      loadRestaurantPage(
-        canonicalBaseUrl,
-        extractId(req.params.slug),
-        "caterer",
-      ),
+    canonicalRestaurantGate(
+      "caterer",
+      (req) => extractId(req.params.slug),
     ),
   );
   app.get(
     "/private-chef/:slug",
-    gate((req) =>
-      loadRestaurantPage(
-        canonicalBaseUrl,
-        extractId(req.params.slug),
-        "private_chef",
-      ),
+    canonicalRestaurantGate(
+      "private_chef",
+      (req) => extractId(req.params.slug),
     ),
   );
   app.get("/chef/:slug", async (req: Request, res: Response) => {
@@ -1561,8 +1618,7 @@ export function registerPublicProfilePrerenderRoutes(
       if (!page) {
         return renderPage(canonicalBaseUrl, res, null);
       }
-      res.setHeader("Cache-Control", "public, max-age=300");
-      return res.redirect(308, page.canonicalPath);
+      return safeCanonicalRedirect(req, res, page);
     } catch (error) {
       console.error("[seo-prerender] legacy chef redirect failed", error);
       return sendPrerenderUnavailable(res);
@@ -1636,35 +1692,52 @@ export function registerPublicProfilePrerenderRoutes(
   );
   app.get(
     ["/p/:profileType/:profileId", "/p/:profileType/:profileId/:profileSlug"],
-    gate((req) => {
-      const type = String(req.params.profileType || "").toLowerCase();
-      const id = extractId(req.params.profileId);
-      if (type === "restaurant") {
-        return loadRestaurantPage(canonicalBaseUrl, id, "restaurant");
+    async (req: Request, res: Response) => {
+      try {
+        const type = String(req.params.profileType || "").toLowerCase();
+        const id = extractId(req.params.profileId);
+        let page: PrerenderPage | null = null;
+        if (type === "restaurant") {
+          page = await loadRestaurantPage(canonicalBaseUrl, id, "restaurant");
+        } else if (type === "food_truck" || type === "truck") {
+          page = await loadRestaurantPage(canonicalBaseUrl, id, "truck");
+        } else if (type === "bar") {
+          page = await loadRestaurantPage(canonicalBaseUrl, id, "bar");
+        } else if (type === "caterer") {
+          page = await loadRestaurantPage(canonicalBaseUrl, id, "caterer");
+        } else if (
+          type === "private_chef" ||
+          type === "private-chef" ||
+          type === "chef"
+        ) {
+          page = await loadRestaurantPage(canonicalBaseUrl, id, "private_chef");
+        } else if (type === "host" || type === "location") {
+          page = await hostPage(canonicalBaseUrl, id);
+        } else if (type === "supplier") {
+          page = await supplierPage(canonicalBaseUrl, id);
+        } else if (type === "event") {
+          page = await eventPage(canonicalBaseUrl, id);
+        }
+
+        if (page) {
+          return safeCanonicalRedirect(req, res, page, true);
+        }
+
+        if (
+          ["restaurant", "food_truck", "truck", "bar", "caterer", "private_chef", "private-chef", "chef"].includes(type)
+        ) {
+          const current = await loadRestaurantPage(canonicalBaseUrl, id);
+          if (current) {
+            return safeCanonicalRedirect(req, res, current, true);
+          }
+        }
+
+        return renderPage(canonicalBaseUrl, res, null);
+      } catch (error) {
+        console.error("[seo-prerender] legacy profile recovery failed", error);
+        return sendPrerenderUnavailable(res);
       }
-      if (type === "food_truck" || type === "truck") {
-        return loadRestaurantPage(canonicalBaseUrl, id, "truck");
-      }
-      if (type === "bar") {
-        return loadRestaurantPage(canonicalBaseUrl, id, "bar");
-      }
-      if (type === "caterer") {
-        return loadRestaurantPage(canonicalBaseUrl, id, "caterer");
-      }
-      if (type === "private_chef" || type === "private-chef" || type === "chef") {
-        return loadRestaurantPage(canonicalBaseUrl, id, "private_chef");
-      }
-      if (type === "host" || type === "location") {
-        return hostPage(canonicalBaseUrl, id);
-      }
-      if (type === "supplier") {
-        return supplierPage(canonicalBaseUrl, id);
-      }
-      if (type === "event") {
-        return eventPage(canonicalBaseUrl, id);
-      }
-      return Promise.resolve(null);
-    }),
+    },
   );
   app.get(
     "/food-trucks/:city/:cuisine",
@@ -1848,6 +1921,8 @@ export function registerPublicProfilePrerenderRoutes(
       ),
     ),
   );
+  // Missing inventory is not evidence of permanent retirement. Unknown cities
+  // and missing cuisines remain 404; loader failures remain retryable 503.
   app.get(
     "/cuisine/:cuisine/:city?",
     landingGate((req) =>

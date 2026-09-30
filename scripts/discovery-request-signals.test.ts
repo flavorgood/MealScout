@@ -59,7 +59,17 @@ test("browser signals never prove a human; bot and QA signals override them", ()
   const candidate = classifyDiscoveryRequest({ headers: browser });
   assert.equal(candidate.classification, "browser_candidate");
   assert.equal(discoveryRequestActorType(candidate), "unknown");
-  for (const ua of ["Googlebot/2.1", "OAI-SearchBot/1.3", "ChatGPT-User/1.0", "facebookexternalhit/1.1", "Mozilla/5.0 HeadlessChrome/130", "curl/8.0", "python-requests/2", "mealscout-runtime-proof/1"]) {
+  for (const ua of ["Googlebot/2.1", "OAI-SearchBot/1.3", "ChatGPT-User/1.0", "ClaudeBot/1.0", "facebookexternalhit/1.1", "AhrefsBot/7.0"]) {
+    const quality = classifyDiscoveryRequest({ headers: { ...browser, "user-agent": ua } });
+    assert.equal(quality.classification, "discovery_crawler", ua);
+    assert.equal(discoveryRequestActorType(quality), "bot");
+  }
+  for (const ua of ["UptimeRobot/2.0", "Pingdom.com_bot_version_1.4"]) {
+    const quality = classifyDiscoveryRequest({ headers: { ...browser, "user-agent": ua } });
+    assert.equal(quality.classification, "infrastructure_monitor", ua);
+    assert.equal(discoveryRequestActorType(quality), "bot");
+  }
+  for (const ua of ["Mozilla/5.0 HeadlessChrome/130", "curl/8.0", "python-requests/2", "mealscout-runtime-proof/1"]) {
     const quality = classifyDiscoveryRequest({ headers: { ...browser, "user-agent": ua } });
     assert.equal(quality.classification, "automation_signal", ua);
     assert.equal(discoveryRequestActorType(quality), "bot");
@@ -68,6 +78,7 @@ test("browser signals never prove a human; bot and QA signals override them", ()
   assert.equal(classifyDiscoveryRequest({ headers: { "x-mealscout-traffic-class": "human" } }).classification, "unclassified");
   assert.equal(classifyDiscoveryRequest({ headers: { "user-agent": browser["user-agent"] } }).classification, "unclassified");
   assert.equal(classifyDiscoveryRequest({ headers: { ...browser, "user-agent": [browser["user-agent"]] } }).classification, "unclassified");
+  assert.equal(candidate.version, 2);
   assert.deepEqual(Object.keys(candidate).sort(), ["basis", "classification", "version"]);
 });
 
@@ -89,7 +100,8 @@ test("actual Express handler keeps concurrent error reports separate, ignores fo
   try {
     const cases = [
       { id: "browser", headers: browser, quality: "browser_candidate", actor: "unknown" },
-      { id: "bot", headers: { ...browser, "user-agent": "Googlebot/2.1" }, quality: "automation_signal", actor: "bot" },
+      { id: "bot", headers: { ...browser, "user-agent": "Googlebot/2.1" }, quality: "discovery_crawler", actor: "bot" },
+      { id: "monitor", headers: { ...browser, "user-agent": "UptimeRobot/2.0" }, quality: "infrastructure_monitor", actor: "bot" },
       { id: "qa", headers: { ...browser, "x-mealscout-qa": "1" }, quality: "qa_signal", actor: "internal" },
       { id: "unknown", headers: { "user-agent": "unknown" }, quality: "unclassified", actor: "unknown" },
     ];

@@ -82,18 +82,24 @@ test('real SQL excludes quality reports, tainted journeys, repeats and out-of-wi
     const r=await readAcquisitionQuality(client,24,now);
     assert.equal(r.recordedRows,11);assert.equal(r.entryEvents,6);assert.equal(r.actionEvents,3);assert.equal(r.profileQualityReports,2);assert.equal(r.candidateJourneys,2);assert.equal(r.candidateJourneysWithAction,1);
     const relaxed=ACQUISITION_QUALITY_SQL.replace(/AND NOT EXISTS\(\s*SELECT 1 FROM public\.request_logs bad[\s\S]*?\n    \)/,'');
-    assert.notEqual(relaxed,ACQUISITION_QUALITY_SQL);const negative=await db.query(relaxed,[r.from,r.toExclusive]);assert(negative.rows[0].report.candidateJourneys>r.candidateJourneys);
+    assert.notEqual(relaxed,ACQUISITION_QUALITY_SQL);
+    await db.query('BEGIN READ ONLY');
+    await db.query("SET LOCAL TIME ZONE 'UTC'");
+    const negative=await db.query(relaxed,[r.from,r.toExclusive]);
+    await db.query('COMMIT');
+    assert(negative.rows[0].report.candidateJourneys>r.candidateJourneys);
     await db.exec('DELETE FROM request_logs');await row('legacy','profile_view',null,1);await row('error','missing_menu_viewed','qa_signal',2,{discoveryStage:'entry'});
     const historical=await readAcquisitionQuality(client,24,now);assert.equal(historical.classifiedAcquisitionEvents,0);assert.equal(historical.candidateJourneys,null);assert.equal(historical.profileQualityReports,1);
     console.log('MEAL_TRAFFIC_SQL '+JSON.stringify({passed:true,rawRows:11,entryEvents:6,actions:3,excludedQuality:2,candidates:2,withAction:1,negativeControlDetected:true,historicalUnknown:true}));
   }finally{await db.close();}
 });
-test('legacy analytics, discovery and evidence UI remain exact source; new route keeps existing admin authority',()=>{
+test('legacy analytics, discovery and evidence UI retain exact content modulo checkout line endings; new route keeps existing admin authority',()=>{
   const base='d64ef420f537b78e00fc93c8d8aa1baba84a976f';
   const original=p=>execFileSync('git',['show',base+':'+p],{encoding:'utf8'});
-  assert.equal(readFileSync('server/routes/analyticsEvidenceRoutes.ts','utf8'),original('server/routes/analyticsRoutes.ts'));
-  assert.equal(readFileSync('server/routes/discoveryObservatoryRoutes.ts','utf8'),original('server/routes/discoveryObservatoryRoutes.ts'));
-  assert.equal(readFileSync('client/src/pages/admin-discovery-evidence.tsx','utf8'),original('client/src/pages/admin-discovery-observatory.tsx'));
+  const checkedOut=p=>readFileSync(p,'utf8').replace(/\r\n/g,'\n');
+  assert.equal(checkedOut('server/routes/analyticsEvidenceRoutes.ts'),original('server/routes/analyticsRoutes.ts'));
+  assert.equal(checkedOut('server/routes/discoveryObservatoryRoutes.ts'),original('server/routes/discoveryObservatoryRoutes.ts'));
+  assert.equal(checkedOut('client/src/pages/admin-discovery-evidence.tsx'),original('client/src/pages/admin-discovery-observatory.tsx'));
   const registration=readFileSync('server/routes/analyticsRoutes.ts','utf8');assert(registration.includes('registerAcquisitionQualityRoutes(app, isAdmin, pool)'));assert(registration.includes('registerEvidenceAnalyticsRoutes(app)'));
 });
 

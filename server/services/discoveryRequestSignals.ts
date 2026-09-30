@@ -1,14 +1,27 @@
+import {
+  HEALTH_REQUEST_PATH_PATTERN, MONITOR_USER_AGENT_PATTERN,
+  AUTOMATION_USER_AGENT_PATTERN, CRAWLER_USER_AGENT_PATTERN,
+  GENERIC_AUTOMATION_USER_AGENT_PATTERN,
+} from "../../shared/discoveryTrafficPatterns";
+
 /** Request evidence only. None of these labels establish a unique human or external causation. */
 export type DiscoverySignalRequest = {
+  path?: string;
   query?: Record<string, unknown>;
   headers?: Record<string, unknown>;
   get?: (name: string) => unknown;
 };
 
 export type DiscoveryTrafficQuality = {
-  version: 1;
+  version: 2;
   basis: "server_observed_request_signals";
-  classification: "browser_candidate" | "automation_signal" | "qa_signal" | "unclassified";
+  classification:
+    | "browser_candidate"
+    | "discovery_crawler"
+    | "infrastructure_monitor"
+    | "automation_signal"
+    | "qa_signal"
+    | "unclassified";
 };
 
 const CAMPAIGN_SOURCES: Readonly<Record<string, string>> = Object.freeze({
@@ -24,6 +37,11 @@ const PROVIDER_ROOTS: ReadonlyArray<readonly [string, string]> = [
   ["chatgpt.com", "chatgpt"], ["openai.com", "chatgpt"], ["bing.com", "bing"],
   ["facebook.com", "facebook"], ["fb.com", "facebook"], ["instagram.com", "instagram"],
 ];
+const healthPattern = new RegExp(HEALTH_REQUEST_PATH_PATTERN, "i");
+const monitorPattern = new RegExp(MONITOR_USER_AGENT_PATTERN, "i");
+const automationPattern = new RegExp(AUTOMATION_USER_AGENT_PATTERN, "i");
+const crawlerPattern = new RegExp(CRAWLER_USER_AGENT_PATTERN, "i");
+const genericAutomationPattern = new RegExp(GENERIC_AUTOMATION_USER_AGENT_PATTERN, "i");
 
 function scalar(value: unknown, limit: number): string | null {
   if (typeof value !== "string" || value.length > limit || /[\u0000-\u001f\u007f]/.test(value)) return null;
@@ -95,10 +113,18 @@ export function deriveDiscoverySearchSurface(req: DiscoverySignalRequest | null 
 export function classifyDiscoveryRequest(req: DiscoverySignalRequest | null | undefined): DiscoveryTrafficQuality {
   let classification: DiscoveryTrafficQuality["classification"] = "unclassified";
   const ua = header(req, "user-agent") || "";
+  const requestPath = scalar(req?.path, 2048) || "";
   // Exclusion markers never grant access or promote a request to a human classification.
   if (header(req, "x-mealscout-qa") === "1" || header(req, "x-mealscout-traffic-class") === "qa_automation") {
     classification = "qa_signal";
-  } else if (/bot\b|crawler|spider|headless|playwright|puppeteer|selenium|curl\/|wget\/|python-requests|httpx|node-fetch|undici|postman|google-inspectiontool|facebookexternalhit|chatgpt-user|anthropic-ai|sway-runtime-proof|mealscout.*(?:proof|qa|smoke)/i.test(ua)) {
+  } else if (healthPattern.test(requestPath) || monitorPattern.test(ua)) {
+    classification = "infrastructure_monitor";
+  } else if (automationPattern.test(ua)) {
+    classification = "automation_signal";
+  } else if (crawlerPattern.test(ua)) {
+    // These are claimed user-agent signals, not independently verified crawler identities.
+    classification = "discovery_crawler";
+  } else if (genericAutomationPattern.test(ua)) {
     classification = "automation_signal";
   } else if (/^Mozilla\/5\.0\b/.test(ua)
     && /AppleWebKit|Gecko\//.test(ua)
@@ -106,11 +132,15 @@ export function classifyDiscoveryRequest(req: DiscoverySignalRequest | null | un
     && ["cors", "same-origin"].includes(header(req, "sec-fetch-mode") || "")) {
     classification = "browser_candidate";
   }
-  return { version: 1, basis: "server_observed_request_signals", classification };
+  return { version: 2, basis: "server_observed_request_signals", classification };
 }
 
 export function discoveryRequestActorType(quality: DiscoveryTrafficQuality): "unknown" | "bot" | "internal" {
-  if (quality.classification === "automation_signal") return "bot";
+  if (
+    quality.classification === "automation_signal" ||
+    quality.classification === "discovery_crawler" ||
+    quality.classification === "infrastructure_monitor"
+  ) return "bot";
   if (quality.classification === "qa_signal") return "internal";
   return "unknown";
 }
