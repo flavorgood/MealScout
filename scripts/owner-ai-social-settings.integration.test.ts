@@ -93,9 +93,11 @@ try {
   const sparse = success(await call("create_mealscout_draft", { idempotencyKey: "sparse-counterexample", request: { packet: { intent: "Future posting consent", settings: { socialPosting: { promptBeforePost: false } } }, expectedVersions: sparseContext.expectedVersions } }));
   const sparseP = await prepare(sparse);
   assert.deepEqual(sparseP.currentSnapshot.settings.effectiveSocialPosting.platforms, { facebook: true, instagram: true, x: true });
-  assert.equal(sparseP.currentSnapshot.settings.effectiveSocialPosting.triggers.deal, true);
-  assert.equal(sparseP.currentSnapshot.settings.effectiveSocialPosting.automaticPostTriggers.schedule, "no_native_consumer");
+  assert.deepEqual(sparseP.currentSnapshot.settings.effectiveSocialPosting.triggers, { schedule: true, booking: true, live: true, deal: true });
+  assert.deepEqual(sparseP.currentSnapshot.settings.effectiveSocialPosting.postingFlows, { schedule: "client_owner_schedule_save", booking: "client_owner_booking_action", live: "client_owner_live_location_action", deal: "server_deal_creation" });
   assert.match(sparseP.consentPrompt, /"facebook":true/); assert.match(sparseP.consentPrompt, /without prompting/);
+  assert.match(sparseP.consentPrompt, /schedule, booking, and live-location/);
+  assert.match(sparseP.consentPrompt, /native deal creation/);
   success(await approve(sparse,sparseP));
   const [sparseApplied] = await database.select().from(schema.restaurants).where(eq(schema.restaurants.id, principal.restaurantId));
   assert.deepEqual(sparseApplied.socialAutopostSettings, { promptBeforePost: false }, "Preview defaults must not become stored writes");

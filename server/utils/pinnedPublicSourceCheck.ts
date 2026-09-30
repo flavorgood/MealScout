@@ -1,5 +1,6 @@
 import * as https from "node:https";
 import { createHash } from "node:crypto";
+import * as cheerio from "cheerio";
 import { isBlockedIp, resolvePublicHostname } from "./websiteProfileImport";
 
 export const SOURCE_CHECK_MAX_BYTES = 512 * 1024;
@@ -16,6 +17,15 @@ export function sourceCheckUrl(value: unknown): string | null {
     url.hash = "";
     return url.toString();
   } catch { return null; }
+}
+export function hasPublicSourceAccessBarrier(url: URL, boundedHtml: string): boolean {
+  if (/(?:^|\/)(?:login|log-in|signin|sign-in|checkpoint|challenge)(?:\/|$)/i.test(url.pathname)) return true;
+  // Only dominant page signals count. Optional sign-in navigation and script
+  // feature names such as checkout-cloudflare-challenge-recovery are normal UI.
+  const $ = cheerio.load(boundedHtml.slice(0, 16384));
+  const signals = [$("title").first().text(), $("h1").first().text()]
+    .map(value => value.replace(/\s+/g, " ").trim());
+  return signals.some(value => /^(?:(?:please\s+)?(?:log\s*in|sign\s*in)(?:\s|$|[|:-])|access denied(?:\s|$)|(?:please\s+)?verify (?:that )?you are human(?:\s|$)|security (?:check|verification)(?:\s|$)|just a moment(?:\s|$|[.!])|enable javascript and cookies to continue(?:\s|$))/i.test(value));
 }
 
 // One deadline covers DNS, all redirect hops, headers, and the complete body.
@@ -66,7 +76,7 @@ export async function checkPinnedPublicSource(startUrl: string, options: {
             if (snippet.length < 16384) snippet += chunk.toString("utf8").slice(0, 16384 - snippet.length);
           });
           res.on("end", () => resolve({ hash: hash.digest("hex"), bytes,
-            login: /(?:login|log in|sign in|checkpoint|challenge|captcha|access denied)/i.test(url.pathname + " " + snippet) }));
+            login: hasPublicSourceAccessBarrier(url, snippet) }));
           res.on("error", reject);
           res.on("aborted", () => reject(new Error("incomplete_body")));
         });

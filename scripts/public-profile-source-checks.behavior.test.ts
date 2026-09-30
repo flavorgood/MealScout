@@ -7,7 +7,7 @@ import { drizzle } from "drizzle-orm/pglite";
 import { getTableConfig } from "drizzle-orm/pg-core";
 import { eq } from "drizzle-orm";
 import * as schema from "../shared/schema";
-import { checkPinnedPublicSource, sourceCheckUrl } from "../server/utils/pinnedPublicSourceCheck";
+import { checkPinnedPublicSource, hasPublicSourceAccessBarrier, sourceCheckUrl } from "../server/utils/pinnedPublicSourceCheck";
 
 process.env.NODE_ENV = "development";
 const service = await import("../server/services/publicProfileSourceChecks");
@@ -113,8 +113,17 @@ receipt = await checkPinnedPublicSource("https://public.example/", { resolve: as
 assert.equal(receipt.reason, "blocked_address"); assert.equal(seen.length, 1);
 receipt = await checkPinnedPublicSource("https://public.example/", { resolve: resolver, request: transport({ status: 403 }, seen) });
 assert.equal(receipt.httpStatus, 403); assert.equal(receipt.availability, "unavailable");
-receipt = await checkPinnedPublicSource("https://public.example/", { resolve: resolver, request: transport({ body: "Please log in to continue" }, seen) });
+receipt = await checkPinnedPublicSource("https://public.example/", { resolve: resolver, request: transport({ body: "<title>Please log in to continue</title>" }, seen) });
 assert.equal(receipt.reason, "login_or_access_barrier");
+receipt = await checkPinnedPublicSource("https://public.example/", { resolve: resolver, request: transport({ body:
+  '<title>Home Sweet Love</title><nav>Sign in</nav><script>const challengeRecovery = true; const loginDialog = "Log in";</script><h1>Welcome</h1>' }, seen) });
+assert.equal(receipt.availability, "reachable"); assert.equal(receipt.outcome, "UNVERIFIED");
+receipt = await checkPinnedPublicSource("https://www.instagram.com/accounts/login/", { resolve: resolver, request: transport({ body: "<title>Instagram</title>" }, seen) });
+assert.equal(receipt.availability, "unavailable");
+assert.equal(hasPublicSourceAccessBarrier(new URL("https://public.example/"), "<title>Login • Instagram</title>"), true);
+for (const punctuation of ["|", ":", "-"]) assert.equal(hasPublicSourceAccessBarrier(new URL("https://public.example/"), `<title>Log in${punctuation}Instagram</title>`), true);
+assert.equal(hasPublicSourceAccessBarrier(new URL("https://public.example/"), "<h1>Access denied</h1>"), true);
+assert.equal(hasPublicSourceAccessBarrier(new URL("https://public.example/"), "<h1>Verify you are human</h1>"), true);
 receipt = await checkPinnedPublicSource("https://public.example/", { resolve: resolver, request: transport({ bytes: 524289 }, seen) });
 assert.equal(receipt.reason, "size_limit"); assert.equal(receipt.bodyHash, null);
 receipt = await checkPinnedPublicSource("https://public.example/", { timeoutMs: 15, resolve: async () => new Promise(() => {}), request: transport({}, seen) });

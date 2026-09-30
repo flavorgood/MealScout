@@ -114,15 +114,15 @@ function settingsReview(value: unknown, packet: OwnerAiActionPacket) {
   if (!packet.settings) return null;
   const current = safeOwnerAiSocialPostingSettings(value);
   const merged = mergeOwnerAiSocialPostingSettings(value, packet.settings.socialPosting);
-  // Native deal auto-posting uses opt-out flags; sparse storage is not its effective behavior.
-  // Schedule/booking/live preferences are editable, but have no native consumers today.
+  // Both the owner sharing UI and native deal posting default omitted flags to enabled.
+  // Client owner actions and server deal creation are distinct consumers of these preferences.
   const effective = {
     platforms: Object.fromEntries(OWNER_AI_PLATFORMS.map(key => [key, asRecord(merged.platforms)[key] !== false])),
-    triggers: { ...safeOwnerAiSocialPostingSettings(merged).triggers, deal: asRecord(merged.triggers).deal !== false },
+    triggers: Object.fromEntries(["schedule", "booking", "live", "deal"].map(key => [key, asRecord(merged.triggers)[key] !== false])),
     promptBeforePost: merged.promptBeforePost !== false,
-    automaticPostTriggers: { deal: asRecord(merged.triggers).deal !== false ? "enabled" : "disabled", schedule: "no_native_consumer", booking: "no_native_consumer", live: "no_native_consumer" },
+    postingFlows: { schedule: "client_owner_schedule_save", booking: "client_owner_booking_action", live: "client_owner_live_location_action", deal: "server_deal_creation" },
   };
-  return { socialPosting: current, effectiveSocialPosting: effective, warning: effective.promptBeforePost === false ? "Future enabled event posts can publish without prompting the owner. This settings change does not create or publish a post." : null };
+  return { socialPosting: current, effectiveSocialPosting: effective, warning: effective.promptBeforePost === false ? "Future enabled owner schedule, booking, and live-location actions can share to enabled destinations without prompting the owner; native deal creation can also queue posts under its existing distribution-access gate. This settings change does not create or publish a post." : null };
 }
 
 const asArray = <T = any>(value: unknown): T[] =>
