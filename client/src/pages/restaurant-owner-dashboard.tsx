@@ -4014,6 +4014,12 @@ export default function RestaurantOwnerDashboard() {
                     </Button>
                   </div>
                 ) : null}
+                {ownsSelectedBusiness && currentRestaurant && (
+                  <a className="mb-3 block text-sm text-orange-700 underline"
+                    href={`/owner/ecosystem-sharing/${encodeURIComponent(String(currentRestaurant.id))}`}>
+                    Manage optional TradeScout ecosystem sharing
+                  </a>
+                )}
                 <ul className="space-y-2">
                   {checklistItems.map((item) => (
                     <li key={item.id} className="flex items-center gap-3">
