@@ -305,7 +305,7 @@ if (
   seoRoutes.includes("/food-trucks/pensacola-fl/bbq") ||
   !seoRoutes.includes("Pattern: /food-trucks/{city-slug}") ||
   !seoRoutes.includes(
-    "Cuisine child pages are discoverable only when published in MealScout's sitemap.",
+    "City and cuisine child pages are discoverable only when published in MealScout's sitemap.",
   )
 ) {
   throw new Error(
@@ -393,8 +393,37 @@ if (
   );
 }
 
+function resolveConfiguredRoute(profilePath: string) {
+  const route = vercel.routes.find(
+    (candidate: { src?: string }) =>
+      candidate.src && new RegExp(`^(?:${candidate.src})$`).test(profilePath),
+  );
+  const captures = route && profilePath.match(new RegExp(`^(?:${route.src})$`));
+  const destination = route?.dest?.replace(
+    /\$(\d+)/g,
+    (_: string, index: string) => captures?.[Number(index)] ?? "",
+  );
+  return { route, destination };
+}
+
+for (const kind of ["caterer", "private-chef", "chef"]) {
+  const profilePath = `/${kind}/fixture-profile--fixture-id`;
+  const { route, destination } = resolveConfiguredRoute(profilePath);
+  const rewrite = vercel.rewrites.find((candidate: { source: string }) => {
+    const match = candidate.source.match(/^\/:kind\(([^)]+)\)\/:path\*$/);
+    return match?.[1].split("|").includes(kind);
+  });
+  if (
+    route?.has || route?.continue ||
+    destination !== `https://mealscout.onrender.com${profilePath}` ||
+    rewrite?.has ||
+    rewrite?.destination !== "https://mealscout.onrender.com/:kind/:path*"
+  ) {
+    throw new Error(`Vercel service profile routing must preserve kind and id: ${kind}`);
+  }
+}
+
 for (const snippet of [
-  '"caterer|private-chef|chef"',
   '"/food-trucks/:city/:cuisine"',
   '"/food-trucks/:city"',
   '"/food-trucks-today/:city"',
@@ -941,8 +970,10 @@ const publicEventsRouteIndex = vercel.routes.findIndex(
   (entry: any) => entry.src === "/events/public",
 );
 const broadProfileRouteIndex = vercel.routes.findIndex(
-  (entry: any) =>
-    String(entry.src || "").startsWith("/(restaurant|truck|bar|chef|location|event|events|deal|"),
+  (entry: { src?: string }) => {
+    const match = entry.src?.match(/^\/\(([^)]+)\)\/\(\.\*\)$/);
+    return match?.[1].split("|").includes("events");
+  },
 );
 if (
   featuredDealRewriteIndex < 0 ||
@@ -981,7 +1012,10 @@ if (
   !String(vercel.routes[broadProfileRouteIndex]?.src).includes("events") ||
   !String(vercel.routes[broadProfileRouteIndex]?.dest).startsWith(
     "https://mealscout.onrender.com/",
-  )
+  ) ||
+  resolveConfiguredRoute("/events/public").destination !== "/index.html" ||
+  resolveConfiguredRoute("/events/fixture-profile--fixture-id").destination !==
+    "https://mealscout.onrender.com/events/fixture-profile--fixture-id"
 ) {
   throw new Error(
     "Vercel must keep exact /events/public on the local SPA before the unchanged external event-detail proxy",

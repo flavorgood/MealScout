@@ -875,7 +875,7 @@ async function hostPage(baseUrl: string, hostId: string) {
     name,
     description,
     url: canonicalProfileUrl,
-    mainEntityOfPage: { "@id": profileEntityId },
+    mainEntityOfPage: { "@id": profilePageId },
     image,
     telephone: publicPhone || undefined,
     sameAs: [
