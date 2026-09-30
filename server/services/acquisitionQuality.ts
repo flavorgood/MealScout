@@ -59,7 +59,8 @@ WITH rows AS (
   SELECT source,count(*)::int AS journeys,count(*) FILTER(WHERE acted)::int AS "journeysWithAction"
   FROM candidates GROUP BY source
 ), classified AS (
-  SELECT count(*)::int AS total FROM rows WHERE kind IN ('entry','action') AND classification <> 'legacy_unclassified'
+  SELECT count(*)::int AS total FROM rows WHERE kind IN ('entry','action')
+    AND classification NOT IN ('unclassified','legacy_unclassified')
 )
 SELECT jsonb_build_object(
   'recordedRows',(SELECT count(*) FROM rows),

@@ -19,6 +19,49 @@ test("v2 health and automation signals cannot enter browser-candidate acquisitio
   }
 });
 
+test("unknown-only acquisition evidence stays unavailable while known exclusions remain zero", async t => {
+  const modulePath = process.env.MEAL_QUALITY_PGLITE_MODULE;
+  assert(modulePath, "An explicit disposable PGlite module is required");
+  const { PGlite } = await import(modulePath);
+  const db = new PGlite();
+  const now = new Date("2026-09-29T18:00:00.000Z");
+  const signal = (classification: string, version = 2, basis = "server_observed_request_signals") => ({ version, basis, classification });
+  try {
+    await db.exec("CREATE TABLE request_logs(id text primary key,created_at timestamp,metadata jsonb,surface text,event_type text,anonymous_actor_id text,session_id text)");
+    const client = { query: (text: string, values?: any[]) => db.query(text, values), release: () => {} };
+    const cases = [
+      { name: "legacy only", quality: undefined, known: false },
+      { name: "supported unclassified only", quality: signal("unclassified"), known: false },
+      { name: "unsupported version only", quality: signal("browser_candidate", 999), known: false },
+      { name: "client basis only", quality: signal("browser_candidate", 2, "client_claim"), known: false },
+      { name: "invalid v1 classification only", quality: signal("discovery_crawler", 1), known: false },
+      ...["discovery_crawler", "infrastructure_monitor", "automation_signal", "qa_signal"].map(classification => ({ name: `${classification} only`, quality: signal(classification), known: true })),
+    ];
+    for (const scenario of cases) await t.test(scenario.name, async () => {
+      await db.exec("TRUNCATE request_logs");
+      for (const [id, eventType] of [["entry", "profile_view"], ["action", "profile_action"]]) {
+        await db.query("INSERT INTO request_logs(id,created_at,metadata,surface,event_type) VALUES($1,$2,$3,'public_profile',$4)", [id, new Date(now.getTime() - 3600000).toISOString(), JSON.stringify({ anonymousJourneyId: "isolated-fixture", trafficQuality: scenario.quality }), eventType]);
+      }
+      const report = await readAcquisitionQuality(client, 24, now);
+      assert.equal(report.recordedRows, 2);
+      assert.equal(report.classifiedAcquisitionEvents, scenario.known ? 2 : 0);
+      assert.equal(report.candidateJourneys, scenario.known ? 0 : null);
+      assert.equal(report.candidateJourneysWithAction, scenario.known ? 0 : null);
+      assert.deepEqual(report.sources, []);
+      assert.equal(report.verifiedPeople, null);
+    });
+    await t.test("quality-only browser signals cannot establish acquisition availability", async () => {
+      await db.exec("TRUNCATE request_logs");
+      await db.query("INSERT INTO request_logs(id,created_at,metadata,surface,event_type) VALUES('quality',$1,$2,'public_profile','missing_menu_viewed')", [new Date(now.getTime() - 3600000).toISOString(), JSON.stringify({ trafficQuality: signal("browser_candidate") })]);
+      const report = await readAcquisitionQuality(client, 24, now);
+      assert.equal(report.profileQualityReports, 1);
+      assert.equal(report.classifiedAcquisitionEvents, 0);
+      assert.equal(report.candidateJourneys, null);
+      assert.equal(report.candidateJourneysWithAction, null);
+    });
+  } finally { await db.close(); }
+});
+
 test("real SQL supports old and new versions, retained taint, and separate origin counters", async () => {
   const modulePath=process.env.MEAL_QUALITY_PGLITE_MODULE;
   assert(modulePath,"An explicit disposable PGlite module is required");

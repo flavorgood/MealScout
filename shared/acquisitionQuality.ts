@@ -41,7 +41,7 @@ export function parseAcquisitionQualityReport(value: unknown): AcquisitionQualit
     if (r.quality.reduce((sum, row) => sum + row[field], 0) !== total) throw new Error("Aggregate counts do not reconcile.");
   }
   if (r.recordedRows !== r.entryEvents + r.actionEvents + r.profileQualityReports + r.otherRecords) throw new Error("Aggregate counts do not reconcile.");
-  const classified = r.quality.filter(q => q.classification !== "legacy_unclassified").reduce((sum, q) => sum + q.entryEvents + q.actionEvents, 0);
+  const classified = r.quality.filter(q => q.classification !== "unclassified" && q.classification !== "legacy_unclassified").reduce((sum, q) => sum + q.entryEvents + q.actionEvents, 0);
   if (classified !== r.classifiedAcquisitionEvents) throw new Error("Classification counts do not reconcile.");
   if ((classified === 0) !== (r.candidateJourneys === null) || (classified === 0) !== (r.candidateJourneysWithAction === null)) throw new Error("Missing evidence must remain unavailable.");
   if (r.sources.reduce((sum, s) => sum + s.journeys, 0) !== (r.candidateJourneys ?? 0) || r.sources.reduce((sum, s) => sum + s.journeysWithAction, 0) !== (r.candidateJourneysWithAction ?? 0)) throw new Error("Source counts do not reconcile.");
