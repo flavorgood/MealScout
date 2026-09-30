@@ -86,8 +86,8 @@ function PublicProfileMenuItem({
     >
       <div className="grid min-h-32 grid-cols-[minmax(0,1fr)_6.5rem] gap-3 p-3 sm:grid-cols-[minmax(0,1fr)_7.5rem]">
         <div className="flex min-w-0 flex-col py-0.5">
-          <div className="flex items-start justify-between gap-3">
-            <h3 className="min-w-0 text-sm font-black leading-snug text-[color:var(--profile-ink)] sm:text-base">
+          <div className="flex flex-col items-start gap-1">
+            <h3 className="min-w-0 break-words text-sm font-black leading-snug text-[color:var(--profile-ink)] sm:text-base">
               {item.name}
             </h3>
             {item.isAvailable === false ? (
