@@ -1,4 +1,6 @@
 import { z } from "zod";
+import { ownerAiProfileCapabilities } from "./ownerAiProfileCapabilities";
+import { OWNER_AI_PROFILE_PREVIEW_JSON_SCHEMA } from "@shared/ownerAiCapabilities";
 import {
   createHash,
   createHmac,
@@ -122,6 +124,18 @@ const approveDraftInputSchema = {
 };
 
 export const OWNER_AI_MCP_TOOLS = [
+  {
+    name: "get_mealscout_profile_capabilities",
+    description: "Read current authenticated native profile type, supported edits and credential state. This grants no application authority.",
+    inputSchema: { type: "object", additionalProperties: false, properties: {} },
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  },
+  {
+    name: "preview_mealscout_profile_changes",
+    description: "Strict read-only preview against fresh native versions and persisted ownership/type/visibility. Source provenance is declared and unverified. Create a native draft and obtain exact-revision owner consent separately to apply.",
+    inputSchema: { type: "object", additionalProperties: false, required: ["request"], properties: { request: OWNER_AI_PROFILE_PREVIEW_JSON_SCHEMA } },
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  },
   {
     name: "get_mealscout_context",
     title: "Read current MealScout business context",
@@ -432,6 +446,16 @@ async function callOwnerAiTool(
   argumentsValue: unknown,
   callContext: McpToolCallContext,
 ) {
+  if (name === "get_mealscout_profile_capabilities") {
+    requireScope(principal, "owner_ai:context");
+    z.object({}).strict().parse(argumentsValue || {});
+    return toolResult(await ownerAiProfileCapabilities.read(principal));
+  }
+  if (name === "preview_mealscout_profile_changes") {
+    requireScope(principal, "owner_ai:drafts:create");
+    const args = z.object({ request: z.unknown() }).strict().parse(argumentsValue || {});
+    return toolResult(await ownerAiProfileCapabilities.preview(principal, args.request));
+  }
   if (name === "get_mealscout_context") {
     requireScope(principal, "owner_ai:context");
     const args = z

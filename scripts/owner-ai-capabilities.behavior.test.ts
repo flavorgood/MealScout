@@ -59,7 +59,7 @@ test("dated source and explicit public schedule access preserve private/restrict
 test("dated stops require timezone/absolute expiry and cannot resurrect past dates", () => {
   const input = fixture(); input.request.packet = { intent: "Stop", schedules: [{ date: "2026-10-01", isPublic: true }] }; rejects(input, "DATED_STOP_CONTEXT_REQUIRED");
   input.request.packet.schedules = [{ date: "2026-09-29", isPublic: true, timezone: "America/Chicago", expiresAt: "2026-10-02T00:00:00Z" }]; rejects(input, "SCHEDULE_EXPIRED");
-  input.request.packet.schedules = [{ date: "2026-10-01", isPublic: true, timezone: "unknown", expiresAt: "2026-10-02T00:00:00Z" }]; rejects(input, "DATED_STOP_CONTEXT_REQUIRED");
+  input.request.packet.schedules = [{ date: "2026-10-01", isPublic: true, timezone: "unknown", expiresAt: "2026-10-02T00:00:00Z" }]; rejects(input, "INVALID_INPUT");
   const noVersions = fixture(); (noVersions.authority as { currentVersions: unknown }).currentVersions = null;
   assert.ok(readOwnerAiCapabilities(noVersions).profiles.every(p => !p.schedules)); rejects(noVersions, "STALE_CONTEXT");
   assert.throws(() => readOwnerAiCapabilities(fixture("event")), (e: unknown) => e instanceof OwnerAiCapabilityError && e.code === "INVALID_INPUT");
@@ -74,8 +74,34 @@ test("synchronous capture detaches and freezes returned target, versions and sou
 test("calendar dates reject rollover and accept a valid leap day", () => {
   for (const date of ["2026-09-31", "2027-02-29"]) {
     const input = fixture(); input.request.packet = { intent: "Stop", schedules: [{ date, isPublic: true, timezone: "America/Chicago", expiresAt: "2028-03-01T00:00:00Z" }] };
-    rejects(input, "INVALID_SCHEDULE_DATE");
+    rejects(input, "INVALID_INPUT");
   }
   const leap = fixture(); leap.request.packet = { intent: "Leap stop", schedules: [{ date: "2028-02-29", isPublic: true, timezone: "America/Chicago", expiresAt: "2028-03-01T00:00:00Z" }] };
   assert.equal(previewOwnerAiPacket(leap).packet.schedules?.[0].date, "2028-02-29");
+});
+test("private authority advertises private schedules without unavailable public edits", () => {
+  const input = fixture();
+  input.authority.provenance.access = "private";
+  const capability = readOwnerAiCapabilities(input).profiles.find(profile => profile.profileType === "truck")!;
+  assert.equal(capability.details, false);
+  assert.equal(capability.menus, false);
+  assert.equal(capability.prices, false);
+  assert.equal(capability.locations, false);
+  assert.equal(capability.photos, false);
+  assert.equal(capability.schedules, true);
+  assert.equal(capability.scheduleAccess, "private_only");
+  rejects(input, "PUBLIC_ACCESS_REQUIRED");
+  input.request.provenance.access = "private";
+  input.request.packet = { intent: "Owner-private stop", schedules: [{ date: "2026-10-01", isPublic: false, timezone: "America/Chicago", expiresAt: "2026-10-02T05:00:00Z" }] };
+  assert.equal(previewOwnerAiPacket(input).packet.schedules?.[0].isPublic, false);
+});
+test("future closure preview expiry must fall inside its own local day", () => {
+  for (const expiresAt of ["2026-10-01T05:00:00Z", "2026-11-01T05:00:00Z", "2026-11-02T06:00:01Z"]) {
+    const input = fixture();
+    input.request.packet = { intent: "One dated closure", schedules: [{ status: "closed", date: "2026-11-01", isPublic: true, timezone: "America/Chicago", expiresAt }] };
+    rejects(input, "INVALID_INPUT");
+  }
+  const valid = fixture();
+  valid.request.packet = { intent: "One dated closure", schedules: [{ status: "closed", date: "2026-11-01", isPublic: true, timezone: "America/Chicago", expiresAt: "2026-11-02T06:00:00Z" }] };
+  assert.equal(previewOwnerAiPacket(valid).packet.schedules?.[0].status, "closed");
 });

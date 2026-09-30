@@ -10,6 +10,7 @@ import {
   OWNER_AI_PACKET_JSON_SCHEMA,
 } from "@shared/ownerAiActions";
 import { restaurants } from "@shared/schema";
+import { OWNER_AI_PROFILE_PREVIEW_JSON_SCHEMA } from "@shared/ownerAiCapabilities";
 import {
   OwnerAiActionError,
   approveOwnerAiDraft,
@@ -44,6 +45,7 @@ import {
   revokeRefreshTokensForAccessKey,
 } from "../services/ownerAiOAuth";
 import { handleOwnerAiMcpRequest } from "../services/ownerAiMcp";
+import { ownerAiProfileCapabilities } from "../services/ownerAiProfileCapabilities";
 import { toPublicRestaurantListingWithVisibility } from "../publicProfiles/toPublicRestaurantListingWithVisibility";
 import { deriveProfileEvidenceQuarantineVisibility } from "../services/profileEvidenceQuarantine";
 
@@ -223,6 +225,8 @@ const instructions = {
     authorization:
       "OAuth 2.1 authorization code with PKCE and MealScout owner consent",
     tools: [
+      "get_mealscout_profile_capabilities",
+      "preview_mealscout_profile_changes",
       "get_mealscout_context",
       "create_mealscout_draft",
       "get_mealscout_draft_status",
@@ -262,6 +266,23 @@ const openApiDocument = {
     schemas: { OwnerAiDraftRequest: OWNER_AI_PACKET_JSON_SCHEMA },
   },
   paths: {
+    "/api/owner-ai/connector/capabilities": {
+      get: {
+        operationId: "getMealScoutProfileCapabilities",
+        summary: "Read persisted owner-bound native profile type, supported capabilities and credential state",
+        security: [{ mealScoutOAuth: ["owner_ai:context"] }, { connectorBearer: [] }],
+        responses: { "200": { description: "Read-only capabilities; no application grant" }, "403": { description: "Current owner or credential state rejected" } },
+      },
+    },
+    "/api/owner-ai/connector/preview": {
+      post: {
+        operationId: "previewMealScoutProfileChanges",
+        summary: "Strict read-only preview; source declarations remain unverified and confer no grants",
+        security: [{ mealScoutOAuth: ["owner_ai:context", "owner_ai:drafts:create"] }, { connectorBearer: [] }],
+        requestBody: { required: true, content: { "application/json": { schema: OWNER_AI_PROFILE_PREVIEW_JSON_SCHEMA } } },
+        responses: { "200": { description: "Read-only preview, approval required, canApply false" }, "409": { description: "Native versions stale" }, "403": { description: "Authority, visibility or scope rejected" } },
+      },
+    },
     "/api/owner-ai/connector/context": {
       get: {
         operationId: "getMealScoutOwnerContext",
@@ -665,12 +686,34 @@ export function registerOwnerAiActionRoutes(app: Express) {
     connectorAuth("owner_ai:context"),
     connectorContextLimiter,
     asyncRoute(async (req: ConnectorRequest, res) => {
+      res.setHeader("Cache-Control", "private, no-store");
       res.json(
         await getOwnerAiContext(
           req.ownerAiConnector!.restaurantId,
           contextOffsets(req),
         ),
       );
+    }),
+  );
+
+  app.get(
+    "/api/owner-ai/connector/capabilities",
+    requireOwnerAiRemoteConnector,
+    connectorAuth("owner_ai:context"),
+    connectorContextLimiter,
+    asyncRoute(async (req: ConnectorRequest, res) => {
+      res.setHeader("Cache-Control", "private, no-store");
+      res.json(await ownerAiProfileCapabilities.read(req.ownerAiConnector!));
+    }),
+  );
+  app.post(
+    "/api/owner-ai/connector/preview",
+    requireOwnerAiRemoteConnector,
+    connectorAuth("owner_ai:drafts:create"),
+    connectorDraftCreateLimiter,
+    asyncRoute(async (req: ConnectorRequest, res) => {
+      res.setHeader("Cache-Control", "private, no-store");
+      res.json(await ownerAiProfileCapabilities.preview(req.ownerAiConnector!, req.body));
     }),
   );
 

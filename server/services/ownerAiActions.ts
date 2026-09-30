@@ -1,3 +1,4 @@
+import { DateTime } from "luxon";
 import bcrypt from "bcryptjs";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import {
@@ -9,6 +10,8 @@ import {
   inArray,
   isNull,
   lt,
+  lte,
+  sql,
   or,
 } from "drizzle-orm";
 
@@ -16,6 +19,11 @@ import { db } from "../db";
 import {
   apiKeys,
   deals,
+  eventBookings,
+  events,
+  eventSeries,
+  hosts,
+  users,
   menuCategories,
   menuItems,
   menus,
@@ -48,6 +56,8 @@ import {
   publishSocialQueueItem,
 } from "./socialPublishing";
 import { resolveCityTimeZoneSync } from "./cityTimeZone";
+import { isPublicDiscoveryEligibleEntity } from "@shared/publicDiscoveryIntegrity";
+import { buildSlotDateTimes } from "./timeIntent";
 
 const DRAFT_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const PUBLIC_BASE_URL = () =>
@@ -426,7 +436,7 @@ async function buildOwnerAiCurrentSnapshot(
     }),
     schedules: (packet.schedules || []).map((proposed) => {
       const expectedLocation =
-        proposed.locationName || proposed.eventName || "Scheduled stop";
+        proposed.status === "closed" ? "Closed" : proposed.locationName || proposed.eventName || "Scheduled stop";
       const current = allSchedules.find(
         (row: any) =>
           (proposed.id && row.id === proposed.id) ||
@@ -1552,7 +1562,7 @@ export const mergeOwnerAiProfileActionLinks = (
   };
 };
 
-async function applyCanonicalPacket(tx: any, restaurant: any, packet: OwnerAiActionPacket, now: Date) {
+export async function applyCanonicalPacket(tx: any, restaurant: any, packet: OwnerAiActionPacket, now: Date) {
   const counts = { profile: 0, hours: 0, menusUpserted: 0, menusArchived: 0, categoriesUpserted: 0, categoriesArchived: 0, itemsUpserted: 0, itemsArchived: 0, schedulesUpserted: 0, schedulesArchived: 0, dealsUpserted: 0, dealsArchived: 0 };
   if (packet.profile || packet.hours) {
     const updates: Record<string, any> = { updatedAt: now };
@@ -1648,8 +1658,19 @@ async function applyCanonicalPacket(tx: any, restaurant: any, packet: OwnerAiAct
   for (const stop of packet.schedules || []) {
     let existing: any = null;
     if (stop.id) [existing] = await tx.select().from(truckManualSchedules).where(and(eq(truckManualSchedules.id, stop.id), eq(truckManualSchedules.truckId, restaurant.id))).limit(1);
+    if (stop.id && !existing) throw new OwnerAiActionError(409, "schedule_not_found", "The requested schedule does not belong to this restaurant or no longer exists");
+    const closed = stop.status === "closed";
+    if (closed && stop.operation === "upsert") {
+      const expiry = stop.expiresAt ? new Date(stop.expiresAt) : null;
+      const closureDayStart = DateTime.fromISO(stop.date, { zone: stop.timezone || "invalid" }).startOf("day");
+      const nextMidnight = closureDayStart.plus({ days: 1 });
+      if (!expiry || !nextMidnight.isValid || !Number.isFinite(expiry.getTime()) || expiry <= now || expiry.getTime() <= closureDayStart.toMillis() || expiry.getTime() > nextMidnight.toMillis()) {
+        throw new OwnerAiActionError(409, "invalid_closure_expiry", "A dated closure requires an expiry after its local day begins and after now, no later than the next midnight in its explicit timezone");
+      }
+    }
+    const locationName = closed ? "Closed" : stop.locationName || stop.eventName || "Scheduled stop";
     const date = new Date(`${stop.date}T00:00:00.000Z`);
-    if (!existing) [existing] = await tx.select().from(truckManualSchedules).where(and(eq(truckManualSchedules.truckId, restaurant.id), eq(truckManualSchedules.date, date), eq(truckManualSchedules.locationName, stop.locationName || stop.eventName || "Scheduled stop"))).limit(1);
+    if (!existing) [existing] = await tx.select().from(truckManualSchedules).where(and(eq(truckManualSchedules.truckId, restaurant.id), eq(truckManualSchedules.date, date), eq(truckManualSchedules.locationName, locationName))).limit(1);
     if (stop.operation === "archive") {
       if (existing) {
         await tx.update(truckManualSchedules).set({ status: "cancelled", isPublic: false, mapEligible: false, liveFeedEligible: false, updatedAt: now }).where(eq(truckManualSchedules.id, existing.id));
@@ -1659,10 +1680,64 @@ async function applyCanonicalPacket(tx: any, restaurant: any, packet: OwnerAiAct
     }
     const city = stop.city || restaurant.city || null;
     const state = stop.state || restaurant.state || null;
-    const values = { truckId: restaurant.id, date, startTime: stop.startTime ?? null, endTime: stop.endTime ?? null, locationName: stop.locationName || stop.eventName || "Scheduled stop", address: stop.address ?? null, city, state, notes: [stop.eventName && stop.kind === "event_stop" ? `Event: ${stop.eventName}` : null, stop.notes].filter(Boolean).join("\n") || null, isPublic: stop.isPublic, status: "confirmed", scheduleType: stop.kind, timezone: stop.timezone || resolveCityTimeZoneSync({ city: city || "", state: state || "" }), sourceType: "owner_ai_approved", sourceArtifact: stop.sourceUrl || null, sourceConfidence: "confirmed", ownerSubmittedEquivalent: true, recurring: false, expiresAt: stop.expiresAt ? new Date(stop.expiresAt) : null, mapEligible: stop.isPublic, liveFeedEligible: stop.isPublic, lastConfirmedAt: now, updatedAt: now };
+    const values = { truckId: restaurant.id, date, startTime: stop.startTime ?? null, endTime: stop.endTime ?? null, locationName, address: stop.address ?? null, city, state, notes: [stop.eventName && stop.kind === "event_stop" ? `Event: ${stop.eventName}` : null, stop.notes].filter(Boolean).join("\n") || null, isPublic: stop.isPublic, status: stop.status, scheduleType: stop.kind, timezone: closed ? stop.timezone! : stop.timezone || resolveCityTimeZoneSync({ city: city || "", state: state || "" }), sourceType: "owner_ai_approved", sourceArtifact: stop.sourceUrl || null, sourceConfidence: "confirmed", ownerSubmittedEquivalent: true, recurring: false, expiresAt: stop.expiresAt ? new Date(stop.expiresAt) : null, mapEligible: stop.isPublic && !closed, liveFeedEligible: stop.isPublic, lastConfirmedAt: now, updatedAt: now };
     if (existing) await tx.update(truckManualSchedules).set(values).where(eq(truckManualSchedules.id, existing.id));
     else await tx.insert(truckManualSchedules).values(values);
     counts.schedulesUpserted += 1;
+  }
+
+  // Check the final reviewed schedule state, allowing explicit archives in either packet order.
+  for (const closure of (packet.schedules || []).filter((stop) => stop.status === "closed" && stop.operation === "upsert")) {
+    const dayStart = DateTime.fromISO(closure.date, { zone: closure.timezone! }).startOf("day");
+    const dayEnd = dayStart.plus({ days: 1 });
+    // Inventory proof is scoped to the closure day, never to the public feed's
+    // current lookahead/confirmation TTL. Date keys are stored at UTC midnight;
+    // two days on either side cover timezone differences and overnight intervals.
+    const dateAnchor = DateTime.fromISO(closure.date, { zone: "utc" });
+    const queryStart = dateAnchor.minus({ days: 2 }).toJSDate();
+    const queryEnd = dateAnchor.plus({ days: 2 }).endOf("day").toJSDate();
+    const activeTruck = sql`exists (
+      select 1 from restaurants operating_truck
+      inner join users operating_truck_owner on operating_truck_owner.id = operating_truck.owner_id
+      where operating_truck.id = ${restaurant.id}
+        and operating_truck.is_active = true and operating_truck_owner.is_disabled = false
+    )`;
+    const manualRows = await tx.select().from(truckManualSchedules).where(and(
+      eq(truckManualSchedules.truckId, restaurant.id), eq(truckManualSchedules.isPublic, true),
+      gte(truckManualSchedules.date, queryStart), lte(truckManualSchedules.date, queryEnd), activeTruck,
+    ));
+    const bookingRows = await tx.select({
+      date: events.date, startTime: events.startTime, endTime: events.endTime,
+      timezone: eventSeries.timezone, city: hosts.city, state: hosts.state,
+      eventType: events.eventType, eventName: events.name, hostName: hosts.businessName,
+    }).from(eventBookings)
+      .innerJoin(events, eq(eventBookings.eventId, events.id))
+      .innerJoin(hosts, eq(events.hostId, hosts.id))
+      .innerJoin(users, eq(hosts.userId, users.id))
+      .leftJoin(eventSeries, eq(events.seriesId, eventSeries.id))
+      .where(and(eq(eventBookings.truckId, restaurant.id), eq(eventBookings.status, "confirmed"),
+        eq(users.isDisabled, false), activeTruck, inArray(events.status, ["open", "booked", "filled"]),
+        or(isNull(events.requiresPayment), eq(events.requiresPayment, false)),
+        gte(events.date, queryStart), lte(events.date, queryEnd)));
+    const serviceRows = [
+      ...manualRows.filter((row: any) =>
+        ["open", "confirmed", "scheduled", "filled", "booked"].includes(String(row.status || "").trim().toLowerCase()) &&
+        row.liveFeedEligible !== false &&
+        (!row.expiresAt || new Date(row.expiresAt).getTime() > Math.max(now.getTime(), dayStart.toMillis()))),
+      ...bookingRows.filter((row: any) =>
+        String(row.eventType || "").trim().toLowerCase() !== "private_event" &&
+        isPublicDiscoveryEligibleEntity({ name: row.eventName, isActive: true }) &&
+        isPublicDiscoveryEligibleEntity({ name: row.hostName, isActive: true })),
+    ];
+    for (const row of serviceRows) {
+      const date = row.date instanceof Date ? row.date.toISOString().slice(0, 10) : String(row.date || "").slice(0, 10);
+      if (!date || !row.startTime || !row.endTime) continue;
+      const timezone = String(row.timezone || "") || resolveCityTimeZoneSync({ city: String(row.city || ""), state: String(row.state || "") });
+      const interval = buildSlotDateTimes({ date, startTime: row.startTime, endTime: row.endTime, timeZone: timezone });
+      if (interval && interval.startUtc.getTime() < dayEnd.toMillis() && interval.endUtc.getTime() > dayStart.toMillis()) {
+        throw new OwnerAiActionError(409, "closure_schedule_conflict", "Another public service stop remains on this closure day. Review and archive the manual stop or cancel its booking through the existing owner flow before applying the closure");
+      }
+    }
   }
 
   for (const deal of packet.deals || []) {

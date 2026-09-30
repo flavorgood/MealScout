@@ -1,3 +1,4 @@
+import { DateTime } from "luxon";
 import { z } from "zod";
 
 export const OWNER_AI_SCHEMA_VERSION = "1.0" as const;
@@ -154,8 +155,12 @@ export const ownerAiScheduleStopSchema = z
     ref: z.string().trim().max(100).optional(),
     operation: operationSchema,
     kind: z.enum(["schedule", "event_stop"]).default("schedule"),
+    status: z.enum(["confirmed", "closed"]).default("confirmed"),
     eventName: z.string().trim().max(200).optional().nullable(),
-    date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+    date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine((value) => {
+      const date = new Date(`${value}T00:00:00.000Z`);
+      return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === value;
+    }, "Date must be a real calendar day"),
     startTime: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).optional().nullable(),
     endTime: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).optional().nullable(),
     locationName: z.string().trim().max(240).optional().nullable(),
@@ -168,7 +173,28 @@ export const ownerAiScheduleStopSchema = z
     sourceUrl: optionalHttpUrl,
     expiresAt: z.string().datetime().optional().nullable(),
   })
-  .strict();
+  .strict()
+  .superRefine((stop, ctx) => {
+    if (stop.timezone) {
+      try { new Intl.DateTimeFormat("en-US", { timeZone: stop.timezone }).format(); }
+      catch { ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["timezone"], message: "Timezone must be a valid IANA timezone" }); }
+    }
+    if (stop.status === "closed" && stop.operation === "upsert") {
+      if (!stop.expiresAt) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["expiresAt"], message: "Dated closures require an explicit expiry" });
+      if (!stop.timezone) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["timezone"], message: "Dated closures require an explicit timezone" });
+      if (stop.timezone && stop.expiresAt) {
+        const localDayStart = DateTime.fromISO(stop.date, { zone: stop.timezone }).startOf("day");
+        const expiry = new Date(stop.expiresAt).getTime();
+        if (!localDayStart.isValid || expiry <= localDayStart.toMillis() || expiry > localDayStart.plus({ days: 1 }).toMillis()) {
+          ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["expiresAt"], message: "Closure expiry must be after its local day begins and no later than the next local midnight" });
+        }
+      }
+      if (stop.kind !== "schedule") ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["kind"], message: "A dated closure is a schedule, not an event stop" });
+      for (const key of ["startTime", "endTime", "locationName", "eventName", "address"] as const) {
+        if (stop[key] != null) ctx.addIssue({ code: z.ZodIssueCode.custom, path: [key], message: "A dated closure cannot advertise a service time or location" });
+      }
+    }
+  });
 
 export const ownerAiDealSchema = z
   .object({
@@ -563,6 +589,15 @@ export const OWNER_AI_PACKET_JSON_SCHEMA = {
       },
     },
     schedule: {
+      allOf: [{
+        if: { required: ["status"], properties: { status: { const: "closed" }, operation: { const: "upsert" } } },
+        then: { required: ["timezone", "expiresAt"], properties: {
+          timezone: { type: "string", minLength: 1, maxLength: 100 },
+          expiresAt: { type: "string", format: "date-time" },
+          kind: { const: "schedule" },
+          ...Object.fromEntries(["startTime", "endTime", "locationName", "eventName", "address"].map((key) => [key, { type: "null" }])),
+        } },
+      }],
       type: "object",
       additionalProperties: false,
       required: ["date"],
@@ -571,6 +606,7 @@ export const OWNER_AI_PACKET_JSON_SCHEMA = {
         ref: { type: "string", maxLength: 100 },
         operation: { $ref: "#/$defs/operation" },
         kind: { enum: ["schedule", "event_stop"], default: "schedule" },
+        status: { enum: ["confirmed", "closed"], default: "confirmed" },
         eventName: { type: ["string", "null"], maxLength: 200 },
         date: { type: "string", format: "date", pattern: "^\\d{4}-\\d{2}-\\d{2}$" },
         startTime: { $ref: "#/$defs/nullableTime" },

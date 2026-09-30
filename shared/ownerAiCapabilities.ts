@@ -1,6 +1,31 @@
 import { z } from "zod";
 import type { PublicProfileType } from "./publicProfiles";
-import { ownerAiActionPacketSchema, ownerAiExpectedVersionsSchema } from "./ownerAiActions";
+import { OWNER_AI_PACKET_JSON_SCHEMA, ownerAiActionPacketSchema, ownerAiExpectedVersionsSchema } from "./ownerAiActions";
+
+// Carry the native definitions with their own resource scope in both REST and MCP.
+export const OWNER_AI_PROFILE_PREVIEW_JSON_SCHEMA = {
+  $schema: OWNER_AI_PACKET_JSON_SCHEMA.$schema,
+  $id: "https://www.mealscout.us/schemas/owner-ai-profile-preview.v1.json",
+  title: "MealScout authenticated profile preview request",
+  type: "object",
+  additionalProperties: false,
+  required: ["packet", "expectedVersions", "provenance"],
+  $defs: OWNER_AI_PACKET_JSON_SCHEMA.$defs,
+  properties: {
+    packet: OWNER_AI_PACKET_JSON_SCHEMA.properties.packet,
+    expectedVersions: OWNER_AI_PACKET_JSON_SCHEMA.properties.expectedVersions,
+    provenance: {
+      type: "object", additionalProperties: false,
+      required: ["source", "observedAt", "access", "expiresAt"],
+      properties: {
+        source: { type: "string", minLength: 1 },
+        observedAt: { type: "string", format: "date-time" },
+        access: { enum: ["public", "private", "restricted", "unknown"] },
+        expiresAt: { type: ["string", "null"], format: "date-time" },
+      },
+    },
+  },
+} as const;
 
 // Server-side trusted-input facade, not authentication or a persistence adapter.
 export const OWNER_AI_PROFILE_TYPES = ["restaurant", "truck", "bar", "caterer", "private_chef", "location", "host", "supplier"] as const satisfies readonly PublicProfileType[];
@@ -60,13 +85,15 @@ export function readOwnerAiCapabilities(input: { target: unknown; authority: unk
   const { target, authority, principal } = bind(input.target, input.authority, input.principal, input.now);
   const native = authority.adapter === "restaurant_native";
   const canPreview = native && authority.currentVersions !== null && principal.scopes.includes("owner_ai:drafts:create");
+  const canPreviewPublicFields = canPreview && authority.provenance.access === "public";
   return freeze({ target, mode: "read" as const, approvalRequired: true as const, canApply: false as const,
     provenance: authority.provenance, principalExpiresAt: principal.expiresAt,
     profiles: OWNER_AI_PROFILE_TYPES.map(type => ({ profileType: type,
       adapter: type === target.profileType && native ? "restaurant_native" : "unsupported",
-      details: type === target.profileType && canPreview, menus: type === target.profileType && canPreview,
-      prices: type === target.profileType && canPreview, schedules: type === target.profileType && canPreview,
-      locations: type === target.profileType && canPreview, photos: type === target.profileType && canPreview,
+      details: type === target.profileType && canPreviewPublicFields, menus: type === target.profileType && canPreviewPublicFields,
+      prices: type === target.profileType && canPreviewPublicFields, schedules: type === target.profileType && canPreview,
+      scheduleAccess: type === target.profileType && canPreview ? (authority.provenance.access === "public" ? "public_and_private" : "private_only") : "none",
+      locations: type === target.profileType && canPreviewPublicFields, photos: type === target.profileType && canPreviewPublicFields,
       settings: false as const,
     })),
   });
