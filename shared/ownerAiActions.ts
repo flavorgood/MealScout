@@ -264,6 +264,14 @@ export const ownerAiSocialPackageSchema = z
     }
   });
 
+const nonempty = (value: Record<string, unknown>) => Object.keys(value).length > 0;
+export const ownerAiSocialPostingSettingsSchema = z.object({
+  platforms: z.object({ facebook: z.boolean().optional(), instagram: z.boolean().optional(), x: z.boolean().optional() }).strict().refine(nonempty, "Provide a platform preference").optional(),
+  triggers: z.object({ schedule: z.boolean().optional(), booking: z.boolean().optional(), live: z.boolean().optional(), deal: z.boolean().optional() }).strict().refine(nonempty, "Provide a trigger preference").optional(),
+  promptBeforePost: z.boolean().optional(),
+}).strict().refine(nonempty, "Provide a social preference");
+export const ownerAiSettingsSchema = z.object({ socialPosting: ownerAiSocialPostingSettingsSchema }).strict();
+
 export const ownerAiActionPacketSchema = z
   .object({
     schemaVersion: z.literal(OWNER_AI_SCHEMA_VERSION).default(OWNER_AI_SCHEMA_VERSION),
@@ -296,10 +304,11 @@ export const ownerAiActionPacketSchema = z
     schedules: z.array(ownerAiScheduleStopSchema).max(365).optional(),
     deals: z.array(ownerAiDealSchema).max(100).optional(),
     social: ownerAiSocialPackageSchema.optional(),
+    settings: ownerAiSettingsSchema.optional(),
   })
   .strict()
   .superRefine((packet, ctx) => {
-    if (!packet.profile && !packet.hours && !packet.menus?.length && !packet.schedules?.length && !packet.deals?.length && !packet.social) {
+    if (!packet.profile && !packet.hours && !packet.menus?.length && !packet.schedules?.length && !packet.deals?.length && !packet.social && !packet.settings) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Packet must contain at least one proposed change or social package" });
     }
     const remoteImages = [
@@ -646,6 +655,15 @@ export const OWNER_AI_PACKET_JSON_SCHEMA = {
         perCustomerLimit: { type: "integer", minimum: 1, default: 1 },
       },
     },
+    socialPostingSettings: {
+      type: "object", additionalProperties: false, minProperties: 1,
+      properties: {
+        platforms: { type: "object", additionalProperties: false, minProperties: 1, properties: Object.fromEntries(OWNER_AI_PLATFORMS.map(key => [key, { type: "boolean" }])) },
+        triggers: { type: "object", additionalProperties: false, minProperties: 1, properties: Object.fromEntries(["schedule", "booking", "live", "deal"].map(key => [key, { type: "boolean" }])) },
+        promptBeforePost: { type: "boolean" },
+      },
+    },
+    settings: { type: "object", additionalProperties: false, required: ["socialPosting"], properties: { socialPosting: { $ref: "#/$defs/socialPostingSettings" } } },
     socialPost: {
       type: "object",
       additionalProperties: false,
@@ -724,6 +742,7 @@ export const OWNER_AI_PACKET_JSON_SCHEMA = {
           items: { $ref: "#/$defs/deal" },
         },
         social: { $ref: "#/$defs/social" },
+        settings: { $ref: "#/$defs/settings" },
       },
       anyOf: [
         { required: ["profile"] },
@@ -732,6 +751,7 @@ export const OWNER_AI_PACKET_JSON_SCHEMA = {
         { required: ["schedules"] },
         { required: ["deals"] },
         { required: ["social"] },
+        { required: ["settings"] },
       ],
     },
   },

@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { ownerAiProfileCapabilities } from "./ownerAiProfileCapabilities";
+import { readPublicProfileSourceChecks } from "./publicProfileSourceChecks";
 import { OWNER_AI_PROFILE_PREVIEW_JSON_SCHEMA } from "@shared/ownerAiCapabilities";
 import {
   createHash,
@@ -124,6 +125,12 @@ const approveDraftInputSchema = {
 };
 
 export const OWNER_AI_MCP_TOOLS = [
+  {
+    name: "get_mealscout_public_source_checks",
+    description: "Read private midnight public-link check receipts for this current owner's business. Responses and byte changes remain unverified; this never fetches on demand, approves evidence, changes profile facts, or publishes.",
+    inputSchema: { type: "object", additionalProperties: false, properties: {} },
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  },
   {
     name: "get_mealscout_profile_capabilities",
     description: "Read current authenticated native profile type, supported edits and credential state. This grants no application authority.",
@@ -414,6 +421,10 @@ const approvalPrompt = (draft: any) => {
   return [
     `Approve MealScout draft revision ${draft.revision}?`,
     `Intent: ${String(draft.packet?.intent || "Business update")}`,
+    ...(draft.currentSnapshot?.settings ? [
+      `Effective social preferences: ${JSON.stringify(draft.currentSnapshot.settings.effectiveSocialPosting)}`,
+      ...(draft.currentSnapshot.settings.warning ? [draft.currentSnapshot.settings.warning] : []),
+    ] : []),
     platforms.length
       ? `After MealScout applies the exact preview, publish its approved descriptions and images to: ${platforms.join(", ")}.`
       : "This revision does not request social publishing.",
@@ -446,6 +457,17 @@ async function callOwnerAiTool(
   argumentsValue: unknown,
   callContext: McpToolCallContext,
 ) {
+  if (name === "get_mealscout_public_source_checks") {
+    requireScope(principal, "owner_ai:context");
+    z.object({}).strict().parse(argumentsValue || {});
+    await ownerAiProfileCapabilities.read(principal);
+    const result = await readPublicProfileSourceChecks(principal.userId, principal.restaurantId);
+    // A revoked credential or owner transfer while reading fails closed.
+    await ownerAiProfileCapabilities.read(principal);
+    if (result.status !== 200) throw new OwnerAiActionError(result.status, "SOURCE_CHECK_ACCESS_DENIED", "Current owner source checks are unavailable");
+    const { status: _status, ...checks } = result;
+    return toolResult({ ...checks, mode: "read", sourceVerification: "UNVERIFIED", mutationPerformed: false });
+  }
   if (name === "get_mealscout_profile_capabilities") {
     requireScope(principal, "owner_ai:context");
     z.object({}).strict().parse(argumentsValue || {});

@@ -75,6 +75,7 @@ import { registerDiscoveryObservatoryRoutes } from "./routes/discoveryObservator
 import { registerScoutcoinRoutes } from "./routes/scoutcoinRoutes";
 import { registerParkingRoutePlanningRoutes } from "./routes/parkingRoutePlanningRoutes";
 import { registerOwnerAiActionRoutes } from "./routes/ownerAiActionRoutes";
+import { registerPublicProfileSourceCheckRoutes } from "./routes/publicProfileSourceCheckRoutes";
 import {
   notifyNearbyDealSubscribers,
   notifyRestaurantFollowersOfDeal,
@@ -104,6 +105,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   registerSupportRoutes(app);
   registerParkingRoutePlanningRoutes(app);
   registerOwnerAiActionRoutes(app);
+  registerPublicProfileSourceCheckRoutes(app);
 
   registerLocationDemandRoutes(app);
   registerLocationUtilityRoutes(app, { hasCompleteProfileAccess });

@@ -1,3 +1,5 @@
+import { PROFILE_ACCESS_POLICY } from "@shared/profileAccessPolicy";
+import { toCanonicalFoodBusinessType } from "@shared/businessTypes";
 import { DateTime } from "luxon";
 import bcrypt from "bcryptjs";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
@@ -81,6 +83,47 @@ const asRecord = (value: unknown): Record<string, any> =>
   value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, any>)
     : {};
+
+// Uncached equivalent of the manual social editor's active owner access policy.
+export async function hasOwnerAiCompleteProfileAccess(userId: string, database: any = db, lock = false) {
+  if (PROFILE_ACCESS_POLICY.status !== "active") return false;
+  let query = database.select({ id: users.id, isDisabled: users.isDisabled }).from(users).where(eq(users.id, userId)).limit(1);
+  if (lock) query = query.for("share");
+  const [user] = await query;
+  return user?.isDisabled === false;
+}
+async function assertOwnerAiSettingsAccess(userId: string, restaurant: any, packet: OwnerAiActionPacket, database: any = db, lock = false) {
+  if (!packet.settings) return;
+  if (!toCanonicalFoodBusinessType(restaurant.businessType)) throw new OwnerAiActionError(403, "UNSUPPORTED_ADAPTER", "Social preferences require a supported native food business");
+  if (!await hasOwnerAiCompleteProfileAccess(userId, database, lock)) throw new OwnerAiActionError(402, "COMPLETE_PROFILE_ACCESS_REQUIRED", "Profile access could not be verified for social preferences");
+}
+export function mergeOwnerAiSocialPostingSettings(value: unknown, patch: NonNullable<OwnerAiActionPacket["settings"]>["socialPosting"]) {
+  const current = asRecord(value);
+  return { ...current,
+    ...(patch.platforms ? { platforms: { ...asRecord(current.platforms), ...patch.platforms } } : {}),
+    ...(patch.triggers ? { triggers: { ...asRecord(current.triggers), ...patch.triggers } } : {}),
+    ...(patch.promptBeforePost !== undefined ? { promptBeforePost: patch.promptBeforePost } : {}),
+  };
+}
+export function safeOwnerAiSocialPostingSettings(value: unknown) {
+  const current = asRecord(value);
+  const flags = (keys: readonly string[], input: unknown) => Object.fromEntries(keys.filter(key => typeof asRecord(input)[key] === "boolean").map(key => [key, asRecord(input)[key]]));
+  return { platforms: flags(OWNER_AI_PLATFORMS, current.platforms), triggers: flags(["schedule", "booking", "live", "deal"], current.triggers), ...(typeof current.promptBeforePost === "boolean" ? { promptBeforePost: current.promptBeforePost } : {}) };
+}
+function settingsReview(value: unknown, packet: OwnerAiActionPacket) {
+  if (!packet.settings) return null;
+  const current = safeOwnerAiSocialPostingSettings(value);
+  const merged = mergeOwnerAiSocialPostingSettings(value, packet.settings.socialPosting);
+  // Native deal auto-posting uses opt-out flags; sparse storage is not its effective behavior.
+  // Schedule/booking/live preferences are editable, but have no native consumers today.
+  const effective = {
+    platforms: Object.fromEntries(OWNER_AI_PLATFORMS.map(key => [key, asRecord(merged.platforms)[key] !== false])),
+    triggers: { ...safeOwnerAiSocialPostingSettings(merged).triggers, deal: asRecord(merged.triggers).deal !== false },
+    promptBeforePost: merged.promptBeforePost !== false,
+    automaticPostTriggers: { deal: asRecord(merged.triggers).deal !== false ? "enabled" : "disabled", schedule: "no_native_consumer", booking: "no_native_consumer", live: "no_native_consumer" },
+  };
+  return { socialPosting: current, effectiveSocialPosting: effective, warning: effective.promptBeforePost === false ? "Future enabled event posts can publish without prompting the owner. This settings change does not create or publish a post." : null };
+}
 
 const asArray = <T = any>(value: unknown): T[] =>
   Array.isArray(value) ? (value as T[]) : [];
@@ -256,6 +299,7 @@ export function buildOwnerAiSocialDrafts(input: {
 
 export function normalizeOwnerAiPlan(packet: OwnerAiActionPacket) {
   const plan: Array<Record<string, unknown>> = [];
+  if (packet.settings) plan.push({ section: "settings", action: "merge_social_posting_preferences", proposed: packet.settings });
   if (packet.profile) {
     plan.push({
       section: "profile",
@@ -404,6 +448,7 @@ async function buildOwnerAiCurrentSnapshot(
     dateVersion(value)?.slice(0, 10) || null;
 
   return {
+    settings: settingsReview(settings, packet),
     profile: packet.profile ? profileCurrent : null,
     hours: packet.hours ? restaurant?.operatingHours || null : null,
     menus: (packet.menus || []).map((proposed) => {
@@ -687,6 +732,7 @@ async function getOwnerAiContextSnapshot(
         historyReturned: dealHistoryRows.length,
       },
     },
+    settings: { socialPosting: safeOwnerAiSocialPostingSettings(restaurant.socialAutopostSettings) },
     socialConnections: OWNER_AI_PLATFORMS.map((platform) => {
       const connection = connections.find((row: any) => row.platform === platform);
       return {
@@ -764,7 +810,7 @@ export async function authenticateOwnerAiConnector(
 }
 
 export async function assertActualRestaurantOwner(userId: string, restaurantId: string) {
-  const [restaurant] = await db.select({ id: restaurants.id, ownerId: restaurants.ownerId, name: restaurants.name }).from(restaurants).where(eq(restaurants.id, restaurantId)).limit(1);
+  const [restaurant] = await db.select({ id: restaurants.id, ownerId: restaurants.ownerId, name: restaurants.name, businessType: restaurants.businessType }).from(restaurants).where(eq(restaurants.id, restaurantId)).limit(1);
   if (!restaurant) throw new OwnerAiActionError(404, "RESTAURANT_NOT_FOUND", "Restaurant not found");
   if (restaurant.ownerId !== userId) throw new OwnerAiActionError(403, "ACTUAL_OWNER_REQUIRED", "Only the restaurant's actual owner can perform this action");
   return restaurant;
@@ -912,10 +958,11 @@ export async function createOwnerAiDraft(input: {
       return { ...toOwnerAiDraftResponse(replay), idempotencyReplay: true };
     }
   }
-  const [restaurant] = await db.select({ id: restaurants.id, name: restaurants.name, ownerId: restaurants.ownerId }).from(restaurants).where(eq(restaurants.id, input.restaurantId)).limit(1);
+  const [restaurant] = await db.select({ id: restaurants.id, name: restaurants.name, ownerId: restaurants.ownerId, businessType: restaurants.businessType }).from(restaurants).where(eq(restaurants.id, input.restaurantId)).limit(1);
   if (!restaurant || restaurant.ownerId !== input.createdByUserId) throw new OwnerAiActionError(403, "CONNECTOR_OWNERSHIP_INVALID", "Draft identity must come from the current owner-business attachment");
   const id = randomUUID();
   const packet = ownerAiActionPacketSchema.parse(request.packet);
+  await assertOwnerAiSettingsAccess(input.createdByUserId, restaurant, packet);
   const { expectedVersions, currentSnapshot } = await db.transaction(
     async (tx: any) => ({
       expectedVersions: await assertRequestVersions(
@@ -931,7 +978,7 @@ export async function createOwnerAiDraft(input: {
     }),
     { isolationLevel: "repeatable read", accessMode: "read only" },
   );
-  const normalizedPlan = normalizeOwnerAiPlan(packet);
+  const normalizedPlan = normalizeOwnerAiPlan(packet).map(step => step.section === "settings" ? { ...step, review: (currentSnapshot as any).settings } : step);
   const socialDrafts = buildOwnerAiSocialDrafts({ draftId: id, restaurantId: input.restaurantId, restaurantName: packet.profile?.name || restaurant.name, packet });
   const mediaManifest = await buildOwnerAiMediaManifest(id, packet);
   const inserted = await db.insert(ownerAiActionDrafts).values({
@@ -1322,6 +1369,7 @@ export async function updateOwnerAiDraft(input: { userId: string; draftId: strin
   if (existing.status !== "draft") throw new OwnerAiActionError(409, "DRAFT_NOT_EDITABLE", "Only draft-status proposals can be edited");
   if (existing.revision !== input.expectedRevision) throw new OwnerAiActionError(409, "STALE_DRAFT_REVISION", "Draft revision changed; reload before editing", { currentRevision: existing.revision });
   const packet = ownerAiActionPacketSchema.parse(request.packet);
+  await assertOwnerAiSettingsAccess(input.userId, restaurant, packet);
   const { expectedVersions, currentSnapshot } = await db.transaction(
     async (tx: any) => ({
       expectedVersions: await assertRequestVersions(
@@ -1341,7 +1389,7 @@ export async function updateOwnerAiDraft(input: { userId: string; draftId: strin
   const mediaManifest = await buildOwnerAiMediaManifest(existing.id, packet);
   const [updated] = await db.update(ownerAiActionDrafts).set({
     packet,
-    normalizedPlan: normalizeOwnerAiPlan(packet),
+    normalizedPlan: normalizeOwnerAiPlan(packet).map(step => step.section === "settings" ? { ...step, review: (currentSnapshot as any).settings } : step),
     currentSnapshot,
     socialDrafts: buildOwnerAiSocialDrafts({ draftId: existing.id, restaurantId: existing.restaurantId, restaurantName: packet.profile?.name || restaurant.name, packet }),
     mediaManifest,
@@ -1563,8 +1611,8 @@ export const mergeOwnerAiProfileActionLinks = (
 };
 
 export async function applyCanonicalPacket(tx: any, restaurant: any, packet: OwnerAiActionPacket, now: Date) {
-  const counts = { profile: 0, hours: 0, menusUpserted: 0, menusArchived: 0, categoriesUpserted: 0, categoriesArchived: 0, itemsUpserted: 0, itemsArchived: 0, schedulesUpserted: 0, schedulesArchived: 0, dealsUpserted: 0, dealsArchived: 0 };
-  if (packet.profile || packet.hours) {
+  const counts = { profile: 0, settings: 0, hours: 0, menusUpserted: 0, menusArchived: 0, categoriesUpserted: 0, categoriesArchived: 0, itemsUpserted: 0, itemsArchived: 0, schedulesUpserted: 0, schedulesArchived: 0, dealsUpserted: 0, dealsArchived: 0 };
+  if (packet.profile || packet.hours || packet.settings) {
     const updates: Record<string, any> = { updatedAt: now };
     const profile = packet.profile;
     if (profile) {
@@ -1590,6 +1638,10 @@ export async function applyCanonicalPacket(tx: any, restaurant: any, packet: Own
         updates.socialAutopostSettings = nextSettings;
       }
       counts.profile = 1;
+    }
+    if (packet.settings) {
+      updates.socialAutopostSettings = mergeOwnerAiSocialPostingSettings(updates.socialAutopostSettings ?? restaurant.socialAutopostSettings, packet.settings.socialPosting);
+      counts.settings = 1;
     }
     if (packet.hours) {
       updates.operatingHours = packet.hours;
@@ -1989,6 +2041,7 @@ export async function approveOwnerAiDraft(input: { userId: string; draftId: stri
       );
       const expectedVersions = lockedDraft.expectedVersions as OwnerAiExpectedVersions;
       if (!versionsEqual(expectedVersions, currentVersions)) throw new OwnerAiActionError(409, "STALE_CONTEXT", "MealScout content changed after this draft was prepared. Nothing was applied or published.", { expected: expectedVersions, current: currentVersions });
+      await assertOwnerAiSettingsAccess(input.userId, restaurant, preparedPacket, tx, true);
       const now = new Date();
       const canonicalCounts = await applyCanonicalPacket(tx, restaurant, preparedPacket, now);
       for (const social of socialDrafts) {

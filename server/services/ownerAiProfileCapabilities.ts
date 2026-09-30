@@ -5,7 +5,7 @@ import { deriveProfileEvidenceQuarantineVisibility } from "./profileEvidenceQuar
 import { shouldExposeStaticTruckProfileLocation } from "../utils/truckLocationSemantics";
 
 type Credential = { id: string; userId: string; restaurantId: string | null; purpose: string; scope: string; isActive: boolean | null; expiresAt: Date | null; revokedAt: Date | null };
-type Binding = { credential: Credential | undefined; restaurant: { id: string; ownerId: string | null; businessType: string; publicSurface: boolean; blockedProfileFields: string[] } | undefined };
+type Binding = { credential: Credential | undefined; restaurant: { id: string; ownerId: string | null; businessType: string; publicSurface: boolean; blockedProfileFields: string[]; completeProfileAccess?: boolean } | undefined };
 export type OwnerAiProfileDependencies = {
   readBinding(principal: OwnerAiConnectorPrincipal): Promise<Binding>;
   readContext(restaurantId: string): Promise<{ restaurant: { id: string; businessType: string }; expectedVersions: unknown }>;
@@ -34,7 +34,7 @@ export function createOwnerAiProfileCapabilities(deps: OwnerAiProfileDependencie
     const target = { profileId: restaurant.id, profileType: nativeType === "food_truck" ? "truck" : nativeType };
     return {
       target, now, blockedProfileFields: restaurant.blockedProfileFields,
-      authority: { target, currentOwnerId: restaurant.ownerId, adapter: "restaurant_native", backingRestaurantId: restaurant.id, currentVersions: context.expectedVersions,
+      authority: { target, completeProfileAccess: restaurant.completeProfileAccess === true, currentOwnerId: restaurant.ownerId, adapter: "restaurant_native", backingRestaurantId: restaurant.id, currentVersions: context.expectedVersions,
         // This labels the native public profile publication surface, not private inventory or externally supplied evidence.
         provenance: { source: "MealScout native publication visibility policy", observedAt: now, access: restaurant.publicSurface ? "public" : "private", expiresAt: nowPlusMinute(now) } },
       principal: { apiKeyId: credential.id, userId: credential.userId, target, scopes: credential.scope.split(/[\s,]+/).filter(Boolean), isActive: credential.isActive === true, expiresAt: credential.expiresAt?.toISOString() ?? null, revokedAt: credential.revokedAt?.toISOString() ?? null },
@@ -82,7 +82,9 @@ const productionDependencies: OwnerAiProfileDependencies = {
       const { loadPublicRestaurantListingVisibility } = await import("../publicProfiles/toPublicRestaurantListingWithVisibility");
       const visibility = restaurant ? (await loadPublicRestaurantListingVisibility([restaurant], tx)).get(restaurant.ownerId) : undefined;
       const policy = deriveOwnerAiPublicationPolicy(restaurant, visibility);
-      return { credential, restaurant: restaurant ? { ...restaurant, ...policy } : undefined };
+      const { hasOwnerAiCompleteProfileAccess } = await import("./ownerAiActions");
+      const completeProfileAccess = restaurant ? await hasOwnerAiCompleteProfileAccess(principal.userId, tx) : false;
+      return { credential, restaurant: restaurant ? { ...restaurant, ...policy, completeProfileAccess } : undefined };
     }, { isolationLevel: "repeatable read", accessMode: "read only" });
   },
 };

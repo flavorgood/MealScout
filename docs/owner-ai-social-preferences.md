@@ -1,0 +1,11 @@
+# Owner AI social preference contract
+
+Owner AI may propose `settings.socialPosting` for native restaurant, truck, bar, caterer, and private-chef profiles. Allowed keys match the manual social editor: `platforms.facebook/instagram/x`, `triggers.schedule/booking/live/deal`, and `promptBeforePost`. Boolean partial patches preserve omitted preferences and every other settings key. Empty patches, unknown keys, and arbitrary settings are rejected.
+
+A current actual owner with existing draft scopes must create a versioned draft, prepare its exact consent preview, and explicitly approve that revision. The native writer rechecks current versions, ownership, and uncached active complete-profile access immediately before application. Disabled or absent owners fail closed; the approval transaction holds the owner row against concurrent changes. No additional connector grants are introduced.
+
+Owner AI context exposes only allowlisted stored preferences. Approval snapshots and consent prompts expose merged effective behavior and warn when future event posts can run without prompting. Native deal auto-posting treats omitted platform flags and the deal trigger as enabled, but requires explicit `promptBeforePost:false` and its existing distribution-access gate. Schedule, booking, and live preferences are stored; they have no native consumers today. Preview defaults are never written into sparse storage.
+
+Settings-only approval creates no social intent or publication. Evidence ledgers, private settings, gallery entries, and action links survive the nested merge. Profile-only and social-package behavior remains governed by the existing contracts.
+
+Proof: `node --import tsx scripts/owner-ai-social-settings.integration.test.ts` uses disposable PGlite tables and a test-only module loader for the canonical DB export. It authenticates a locally hashed fixture credential and runs actual MCP create, prepare, consent, and native approval. It proves persisted preference writes, default destination disclosure, five supported types, unsupported adapters, stale native/draft versions, changed consent fingerprints, disabled/missing access, ownership transfer, and zero network calls/social queue rows. The same harness verifies the read-only source-check tool's persisted credential/scope/private-receipt bounds.
