@@ -43,6 +43,7 @@ const authoritySchema = z.object({
   backingRestaurantId: z.string().min(1).nullable(),
   currentVersions: ownerAiExpectedVersionsSchema.nullable(),
   provenance: provenanceSchema,
+  completeProfileAccess: z.boolean().optional().default(false),
 }).strict();
 const principalSchema = z.object({
   apiKeyId: z.string().min(1), userId: z.string().min(1), target: targetSchema,
@@ -94,7 +95,8 @@ export function readOwnerAiCapabilities(input: { target: unknown; authority: unk
       prices: type === target.profileType && canPreviewPublicFields, schedules: type === target.profileType && canPreview,
       scheduleAccess: type === target.profileType && canPreview ? (authority.provenance.access === "public" ? "public_and_private" : "private_only") : "none",
       locations: type === target.profileType && canPreviewPublicFields, photos: type === target.profileType && canPreviewPublicFields,
-      settings: false as const,
+      settings: type === target.profileType && canPreview && authority.completeProfileAccess,
+      settingsFields: type === target.profileType && canPreview && authority.completeProfileAccess ? ["socialPosting.platforms", "socialPosting.triggers", "socialPosting.promptBeforePost"] : [],
     })),
   });
 }
@@ -104,6 +106,7 @@ export function previewOwnerAiPacket(input: { target: unknown; authority: unknow
   if (authority.adapter !== "restaurant_native") reject("UNSUPPORTED_ADAPTER");
   const request = parse(z.object({ packet: ownerAiActionPacketSchema, expectedVersions: ownerAiExpectedVersionsSchema, provenance: provenanceSchema }).strict(), input.request);
   if (!authority.currentVersions || Object.keys(request.expectedVersions).some(key => request.expectedVersions[key as keyof typeof request.expectedVersions] !== authority.currentVersions![key as keyof typeof request.expectedVersions])) reject("STALE_CONTEXT");
+  if (request.packet.settings && !authority.completeProfileAccess) reject("COMPLETE_PROFILE_ACCESS_REQUIRED");
   if (request.packet.social || request.packet.deals) reject("UNSUPPORTED_CAPABILITY");
   if (request.provenance.access === "unknown" || Date.parse(request.provenance.observedAt) > now || (request.provenance.expiresAt !== null && Date.parse(request.provenance.expiresAt) <= now)) reject("SOURCE_UNAVAILABLE");
   if ((request.packet.profile || request.packet.hours || request.packet.menus?.length) && (request.provenance.access !== "public" || authority.provenance.access !== "public")) reject("PUBLIC_ACCESS_REQUIRED");

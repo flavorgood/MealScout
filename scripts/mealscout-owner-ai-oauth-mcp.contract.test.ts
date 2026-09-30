@@ -193,6 +193,7 @@ const listed = (await handleOwnerAiMcpRequest(principal, {
 assert.deepEqual(
   listed.result.tools.map((tool: any) => tool.name),
   [
+    "get_mealscout_public_source_checks",
     "get_mealscout_profile_capabilities",
     "preview_mealscout_profile_changes",
     "get_mealscout_context",
@@ -203,7 +204,7 @@ assert.deepEqual(
     "approve_mealscout_draft",
   ],
 );
-for (const name of ["get_mealscout_profile_capabilities", "preview_mealscout_profile_changes"]) {
+for (const name of ["get_mealscout_public_source_checks", "get_mealscout_profile_capabilities", "preview_mealscout_profile_changes"]) {
   const tool = OWNER_AI_MCP_TOOLS.find((tool) => tool.name === name)!;
   assert.equal(tool.annotations.readOnlyHint, true);
   assert.equal(tool.annotations.destructiveHint, false);

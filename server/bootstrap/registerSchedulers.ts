@@ -10,6 +10,7 @@
 
 import type { Express } from "express";
 import cron from "node-cron";
+import { publicSourceCheckSchedule, runPublicProfileSourceChecks } from "../services/publicProfileSourceChecks";
 import { DigestService } from "../digestService";
 import { DinerDigestService } from "../dinerDigestService";
 import { OnboardingDripService } from "../onboardingDripService";
@@ -68,6 +69,12 @@ function shouldRunMarketingEmailJobs(now = new Date()): boolean {
 // ---------------------------------------------------------------------------
 
 export async function registerSchedulers(app: Express): Promise<void> {
+  const sourceChecks = publicSourceCheckSchedule();
+  console.info("[public-source-checks] scheduled", sourceChecks);
+  cron.schedule(sourceChecks.expression, async () => {
+    try { console.info("[public-source-checks] completed", await runPublicProfileSourceChecks()); }
+    catch { console.error("[public-source-checks] failed; no profile changes published"); }
+  }, { timezone: sourceChecks.timezone });
   console.log(
     `[schedulers] timezone=${SCHEDULER_TIMEZONE} marketing_email_window=${MARKETING_EMAIL_WINDOW_START_HOUR}:00-${MARKETING_EMAIL_WINDOW_END_HOUR}:00`,
   );
