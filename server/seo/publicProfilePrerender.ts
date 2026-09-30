@@ -55,6 +55,7 @@ import {
   resolvePublicProfileVisibility,
 } from "../publicProfiles/publicProfileUtils";
 import { isPublicBusinessVisible } from "../utils/publicBusinessVisibility";
+import { PUBLIC_PROFILE_STYLES, PUBLIC_PROFILE_STYLES_PATH } from "./publicProfileStyles";
 
 type PageLink = { label: string; href: string };
 
@@ -68,6 +69,8 @@ type PrerenderPage = {
   links: PageLink[];
   body: string[];
   listingHtml?: string;
+  // Only restaurantPage sets this after current native public eligibility checks.
+  appProfile?: { id: string; profileType: "restaurant" | "truck" | "bar" | "caterer" | "private_chef" };
   selectiveIntelligence?: {
     manifestUrl: string;
     mcpUrl: string;
@@ -449,21 +452,7 @@ const buildHtml = (baseUrl: string, page: PrerenderPage) => {
   ${schema
     .map((entry) => buildJsonLdScript(entry))
     .join("\n  ")}
-  <style>
-    body { font-family: -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif; margin: 0; color: #111827; background: #fffaf2; }
-    main { max-width: 860px; margin: 0 auto; padding: 28px 18px 44px; }
-    h1 { font-size: 34px; line-height: 1.15; margin: 0 0 12px; }
-    p { font-size: 16px; line-height: 1.65; margin: 0 0 14px; }
-    img { max-width: 100%; border-radius: 12px; margin: 14px 0; }
-    .links { margin-top: 20px; padding-top: 14px; border-top: 1px solid #fed7aa; }
-    .links a { display: inline-block; margin: 8px 12px 0 0; color: #9a3412; font-weight: 700; text-decoration: none; }
-    .listing-results { margin-top: 24px; }
-    .listing-results ul { display: grid; grid-template-columns: repeat(auto-fit,minmax(230px,1fr)); gap: 14px; padding: 0; list-style: none; }
-    .listing-results li { border: 1px solid #fed7aa; border-radius: 12px; padding: 14px; background: #fff; }
-    .listing-results li > a, .listing-results li > span { display: block; margin-bottom: 8px; }
-    .listing-results li > a { color: #9a3412; }
-    .listing-results li p { font-size: 14px; margin-bottom: 6px; }
-  </style>
+  <link rel="stylesheet" href="${PUBLIC_PROFILE_STYLES_PATH}">
 </head>
 <body>
   <main>
@@ -489,7 +478,7 @@ async function restaurantPage(
   baseUrl: string,
   restaurantId: string,
   expectedProfileType?: "restaurant" | "truck" | "bar" | "caterer" | "private_chef",
-) {
+): Promise<PrerenderPage | null> {
   const [row] = await db
     .select()
     .from(restaurants)
@@ -723,7 +712,7 @@ async function restaurantPage(
   };
 
   const discoveryLinks: PageLink[] = [
-    { label: "Open profile", href: canonicalPath },
+    { label: "Open profile", href: `${canonicalPath}?view=app` },
     ...(offersCatering
       ? [{ label: "Catering", href: `${canonicalPath}?service=catering` }]
       : []),
@@ -770,6 +759,7 @@ async function restaurantPage(
     title: `${name}${cityState ? ` in ${cityState}` : ""}${isPrivateChef ? " | MealScout Private Chef" : isCaterer ? " | MealScout Caterer" : " | MealScout"}`,
     description,
     canonicalPath,
+    appProfile: { id: row.id, profileType: strictRouteProfileType },
     imageUrl: image,
     robots,
     schema: [
@@ -1471,6 +1461,24 @@ export function registerPublicProfilePrerenderRoutes(
 ) {
   const loadRestaurantPage = dependencies.restaurantPage || restaurantPage;
   const renderPage = dependencies.sendPage || sendPage;
+  app.get(PUBLIC_PROFILE_STYLES_PATH, (_req, res) => {
+    res.setHeader("Content-Type", "text/css; charset=utf-8");
+    res.setHeader("Cache-Control", "public, max-age=3600");
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.send(PUBLIC_PROFILE_STYLES);
+  });
+  const canonicalAppTarget = (req: Request, page: PrerenderPage, expectedType: NonNullable<PrerenderPage["appProfile"]>["profileType"], id: string) => {
+    const routeKind = expectedType === "private_chef" ? "private-chef" : expectedType;
+    const match = /^\/(restaurant|truck|bar|caterer|private-chef)\/([^/?#\\\s]+)$/.exec(page.canonicalPath);
+    if (!page.appProfile || page.appProfile.id !== id || page.appProfile.profileType !== expectedType || !match || match[1] !== routeKind) return false;
+    let slug: string;
+    try { slug = decodeURIComponent(match[2]); } catch { return false; }
+    return slug.includes("--") && extractId(slug) === id && req.path === page.canonicalPath;
+  };
+  const appViewUrl = (req: Request, canonicalPath: string) => {
+    const attribution = legacyCityDealRedirectQuery(req);
+    return `${canonicalPath}?view=app${attribution ? `&${attribution.slice(1)}` : ""}`;
+  };
   const gate =
     (handler: (req: Request) => Promise<PrerenderPage | null>) =>
     async (req: Request, res: Response) => {
@@ -1492,7 +1500,7 @@ export function registerPublicProfilePrerenderRoutes(
         | "private_chef",
       idFromRequest: (req: Request) => string,
     ) =>
-    async (req: Request, res: Response) => {
+    async (req: Request, res: Response, next: NextFunction) => {
       try {
         const id = idFromRequest(req);
         const expected = await loadRestaurantPage(
@@ -1501,6 +1509,26 @@ export function registerPublicProfilePrerenderRoutes(
           expectedProfileType,
         );
         if (expected) {
+          if (canonicalAppTarget(req, expected, expectedProfileType, id)) {
+            const incoming = new URL(req.originalUrl || req.url, canonicalBaseUrl);
+            const views = incoming.searchParams.getAll("view");
+            if (views.length === 1 && views[0] === "app") {
+              const safeTarget = appViewUrl(req, expected.canonicalPath);
+              res.setHeader("Cache-Control", "no-store");
+              if (incoming.pathname + incoming.search !== safeTarget) return res.redirect(308, safeTarget);
+              const discovery = [`<${absoluteUrl(canonicalBaseUrl, expected.canonicalPath)}>; rel="canonical"`];
+              const manifestUrl = absoluteUrl(canonicalBaseUrl, `/api/owner-ai/profiles/${encodeURIComponent(id)}/selective-intelligence`);
+              const mcpUrl = absoluteUrl(canonicalBaseUrl, `/api/owner-ai/profiles/${encodeURIComponent(id)}/mcp`);
+              if (expected.selectiveIntelligence?.manifestUrl === manifestUrl && expected.selectiveIntelligence.mcpUrl === mcpUrl) {
+                discovery.push(`<${manifestUrl}>; rel="alternate"; type="application/vnd.selective-intelligence+json"; title="Selective Intelligence"`, `<${mcpUrl}>; rel="alternate"; type="application/mcp+json"; title="MealScout owner actions"`);
+              }
+              res.setHeader("Link", discovery.join(", "));
+              // Server-owned handoff marker; never derived directly from query flags downstream.
+              res.locals.mealScoutPublicProfileAppView = true;
+              return next();
+            }
+            return renderPage(canonicalBaseUrl, res, { ...expected, links: expected.links.map(link => link.label === "Open profile" ? { ...link, href: appViewUrl(req, expected.canonicalPath) } : link) });
+          }
           return renderPage(canonicalBaseUrl, res, expected);
         }
 
@@ -1568,7 +1596,7 @@ export function registerPublicProfilePrerenderRoutes(
         res.setHeader("X-Robots-Tag", "noindex,nofollow,noarchive");
         return next();
       }
-      return restaurantDetailGate(req, res);
+      return restaurantDetailGate(req, res, next);
     },
   );
   app.get(
@@ -1577,7 +1605,7 @@ export function registerPublicProfilePrerenderRoutes(
       if (String(req.params.id || "").trim().toLowerCase() === "dashboard") {
         return next();
       }
-      return restaurantDetailGate(req, res);
+      return restaurantDetailGate(req, res, next);
     },
   );
   app.get(
