@@ -141,6 +141,7 @@ const BusinessTeamAcceptPage = lazy(
 );
 const MenuBuilderPage = lazy(() => import("@/pages/menu-builder"));
 const OwnerAiActionsPage = lazy(() => import("@/pages/owner-ai-actions"));
+const EcosystemSharingPage = lazy(() => import("@/pages/ecosystem-sharing"));
 const OwnerAiAuthorizePage = lazy(() => import("@/pages/owner-ai-authorize"));
 const KitchenDisplayPage = lazy(() => import("@/pages/kitchen-display"));
 const OnlineMenuPage = lazy(() => import("@/pages/online-menu"));
@@ -325,6 +326,7 @@ const isPublicPath = (path: string) =>
   ) || Boolean(parseCleanAffiliateBusinessRoute(path));
 
 const shouldRenderShellNotFound = (path: string) => {
+  if (/^\/owner\/ecosystem-sharing\/[^/]+$/.test(path)) return false;
   const segments = path.split("/").filter(Boolean);
   if (segments.length <= 2) return false;
   if (isPublicPath(path)) return false;
@@ -349,6 +351,7 @@ function GuestProtectedRoutes() {
   return (
     <>
       <Route path="/favorites" component={RedirectToLogin} />
+      <Route path="/owner/ecosystem-sharing/:sourceId" component={RedirectToLogin} />
       <Route path="/restaurant-owner-dashboard" component={RedirectToLogin} />
       <Route path="/restaurant/dashboard" component={RedirectToLogin} />
       <Route path="/deal-edit/:dealId" component={RedirectToLogin} />
@@ -688,6 +691,7 @@ function Router() {
             <Route path="/business-team" component={BusinessTeamPage} />
             <Route path="/menu-builder" component={MenuBuilderPage} />
             <Route path="/owner-ai" component={OwnerAiActionsPage} />
+            <Route path="/owner/ecosystem-sharing/:sourceId" component={EcosystemSharingPage} />
             <Route path="/owner-ai/authorize" component={OwnerAiAuthorizePage} />
             <Route path="/kitchen" component={KitchenDisplayPage} />
             <Route
@@ -720,6 +724,7 @@ function App() {
   const usesCinematicBackground =
     currentPath === "/" || currentPath === "/food-truck-rush";
   const usesBusinessWorkspace =
+    currentPath.startsWith("/owner/ecosystem-sharing/") ||
     currentPath === "/restaurant-owner-dashboard" ||
     currentPath === "/menu-builder" ||
     currentPath === "/owner-ai" ||

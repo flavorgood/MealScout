@@ -35,6 +35,7 @@ import { and, eq } from "drizzle-orm";
 import { registerAcquisitionPrerenderRoutes } from "./seo/acquisitionPrerender";
 import { buildJsonLdScript } from "./seo/jsonLdScript";
 import { registerPublicProfilePrerenderRoutes } from "./seo/publicProfilePrerender";
+import { registerPublicProfileAppAssets } from "./seo/publicProfileAppAssets";
 import { guardUnauthenticatedProtectedHtml } from "./seo/protectedHtmlRoutes";
 import { resolvePublicBusinessSlug } from "./publicProfiles/publicBusinessSlugResolver";
 import { mirrorInfinityTouch } from "./integrations/infinityShadow";
@@ -1002,6 +1003,7 @@ app.use((req, res, next) => {
   // MUST be registered before any SPA routing or Vite middleware
   app.use(customProfileDomainRootRedirect);
   registerAcquisitionPrerenderRoutes(app, canonicalBaseUrl);
+  registerPublicProfileAppAssets(app);
   registerPublicProfilePrerenderRoutes(app, canonicalBaseUrl);
 
   // Crawler-friendly SSR route for video transcripts

@@ -111,6 +111,7 @@ import { resolvePublicCanonicalOrigin } from "../seo/publicCanonicalOrigin";
 import { toPublicRestaurantListingWithVisibility } from "../publicProfiles/toPublicRestaurantListingWithVisibility";
 import { projectPublicDealRows } from "../services/publicDealProjection";
 import { isPublicBusinessVisible } from "../utils/publicBusinessVisibility";
+import { isNativePublicRestaurant } from "../publicProfiles/admitPublicRestaurant";
 import { publicStoryPublicationWhere } from "../services/publicStoryProjection";
 
 const toSlug = (value: string | null | undefined) =>
@@ -3030,12 +3031,7 @@ export function registerPublicDiscoveryRoutes(app: Express) {
 
       if (entity === "restaurant") {
         const row = await storage.getRestaurant(id);
-        if (
-          !row ||
-          !row.isActive ||
-          !isPublicBusinessVisible(row) ||
-          canonicalPublicRestaurantProfileEntity(row) !== "restaurant"
-        ) {
+        if (!row || !isNativePublicRestaurant(row)) {
           return res.status(404).json({ message: "Profile not found" });
         }
         const ownerProfile = await loadEnabledPublicProfileOwner(row.ownerId);
