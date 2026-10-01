@@ -7,7 +7,7 @@ const versions = { restaurant: "r1", menus: "m1", schedules: "s1", deals: "d1" }
 function fixture(type = "truck") {
   const target = { profileType: type, profileId: "profile-a" };
   return { target, now,
-    authority: { target: { ...target }, currentOwnerId: "owner-a", adapter: "restaurant_native", backingRestaurantId: "profile-a", currentVersions: { ...versions }, provenance: { ...provenance } },
+    authority: { target: { ...target }, currentOwnerId: "owner-a", adapter: (["restaurant","truck","bar","caterer","private_chef"].includes(type) ? type + "_native" : "restaurant_native"), backingRestaurantId: "profile-a", currentVersions: { ...versions }, provenance: { ...provenance } },
     principal: { apiKeyId: "key-a", userId: "owner-a", target: { ...target }, scopes: ["owner_ai:context", "owner_ai:drafts:create"], isActive: true, expiresAt: "2026-10-01T12:00:00Z", revokedAt: null as string | null },
     request: { packet: { intent: "Update details", profile: { description: "Owner supplied details" } } as Record<string, unknown>, expectedVersions: { ...versions }, provenance: { ...provenance } },
   };

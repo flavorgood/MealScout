@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { and, asc, desc, eq, gt, sql } from "drizzle-orm";
 import { restaurants, telemetryEvents } from "@shared/schema";
-import { toCanonicalFoodBusinessType } from "@shared/businessTypes";
+import { resolveStoredFoodBusinessType } from "@shared/businessTypes";
 import { ownerAiActionPacketSchema } from "@shared/ownerAiActions";
 import { canonicalSourceSection } from "@shared/ownerAiSourceFacts";
 import { db } from "../db";
@@ -68,10 +68,10 @@ export async function runOwnerAiSourceReviews(options: { restaurantIds?: readonl
     // Page the existing native table; no new paid scheduler or grant is needed.
     let cursor = "";
     for (;;) {
-      const rows = await database.select({ id: restaurants.id, businessType: restaurants.businessType }).from(restaurants)
+      const rows = await database.select({ id: restaurants.id, businessType: restaurants.businessType, isFoodTruck: restaurants.isFoodTruck }).from(restaurants)
         .where(and(eq(restaurants.isActive, true), gt(restaurants.id, cursor))).orderBy(asc(restaurants.id)).limit(100);
       if (!rows.length) break;
-      for (const row of rows) if (toCanonicalFoodBusinessType(row.businessType)) await run(row.id);
+      for (const row of rows) if (resolveStoredFoodBusinessType(row)) await run(row.id);
       cursor = rows[rows.length - 1].id;
     }
   }

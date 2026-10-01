@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { OWNER_AI_NATIVE_ADAPTERS } from "./ownerAiNativeAdapters";
 import type { PublicProfileType } from "./publicProfiles";
 import { OWNER_AI_PACKET_JSON_SCHEMA, ownerAiActionPacketSchema, ownerAiExpectedVersionsSchema } from "./ownerAiActions";
 
@@ -39,7 +40,7 @@ const provenanceSchema = z.object({
 }).strict();
 const authoritySchema = z.object({
   target: targetSchema, currentOwnerId: z.string().min(1),
-  adapter: z.enum(["restaurant_native", "unsupported"]),
+  adapter: z.enum([...OWNER_AI_NATIVE_ADAPTERS, "unsupported"]),
   backingRestaurantId: z.string().min(1).nullable(),
   currentVersions: ownerAiExpectedVersionsSchema.nullable(),
   provenance: provenanceSchema,
@@ -79,18 +80,18 @@ function bind(targetInput: unknown, authorityInput: unknown, principalInput: unk
   if (Date.parse(authority.provenance.observedAt) > now || (authority.provenance.expiresAt !== null && Date.parse(authority.provenance.expiresAt) <= now)) reject("CONTEXT_EXPIRED");
   if (authority.provenance.access === "unknown") reject("ACCESS_UNKNOWN");
   // A shared restaurant ID is never proof of a type-specific adapter.
-  if (authority.adapter === "restaurant_native" && (!["restaurant", "truck", "bar", "caterer", "private_chef"].includes(target.profileType) || authority.backingRestaurantId !== target.profileId)) reject("ADAPTER_TARGET_MISMATCH");
+  if (authority.adapter !== "unsupported" && (authority.adapter !== target.profileType + "_native" || authority.backingRestaurantId !== target.profileId)) reject("ADAPTER_TARGET_MISMATCH");
   return { target, authority, principal, now };
 }
 export function readOwnerAiCapabilities(input: { target: unknown; authority: unknown; principal: unknown; now: string }) {
   const { target, authority, principal } = bind(input.target, input.authority, input.principal, input.now);
-  const native = authority.adapter === "restaurant_native";
+  const native = authority.adapter !== "unsupported";
   const canPreview = native && authority.currentVersions !== null && principal.scopes.includes("owner_ai:drafts:create");
   const canPreviewPublicFields = canPreview && authority.provenance.access === "public";
   return freeze({ target, mode: "read" as const, approvalRequired: true as const, canApply: false as const,
     provenance: authority.provenance, principalExpiresAt: principal.expiresAt,
     profiles: OWNER_AI_PROFILE_TYPES.map(type => ({ profileType: type,
-      adapter: type === target.profileType && native ? "restaurant_native" : "unsupported",
+      adapter: type === target.profileType && native ? authority.adapter : "unsupported",
       details: type === target.profileType && canPreviewPublicFields, menus: type === target.profileType && canPreviewPublicFields,
       prices: type === target.profileType && canPreviewPublicFields, schedules: type === target.profileType && canPreview,
       scheduleAccess: type === target.profileType && canPreview ? (authority.provenance.access === "public" ? "public_and_private" : "private_only") : "none",
@@ -103,7 +104,7 @@ export function readOwnerAiCapabilities(input: { target: unknown; authority: unk
 export function previewOwnerAiPacket(input: { target: unknown; authority: unknown; principal: unknown; now: string; request: unknown }) {
   const { target, authority, principal, now } = bind(input.target, input.authority, input.principal, input.now);
   if (!principal.scopes.includes("owner_ai:drafts:create")) reject("CREATE_SCOPE_REQUIRED");
-  if (authority.adapter !== "restaurant_native") reject("UNSUPPORTED_ADAPTER");
+  if (authority.adapter === "unsupported") reject("UNSUPPORTED_ADAPTER");
   const request = parse(z.object({ packet: ownerAiActionPacketSchema, expectedVersions: ownerAiExpectedVersionsSchema, provenance: provenanceSchema }).strict(), input.request);
   if (!authority.currentVersions || Object.keys(request.expectedVersions).some(key => request.expectedVersions[key as keyof typeof request.expectedVersions] !== authority.currentVersions![key as keyof typeof request.expectedVersions])) reject("STALE_CONTEXT");
   if (request.packet.settings && !authority.completeProfileAccess) reject("COMPLETE_PROFILE_ACCESS_REQUIRED");
