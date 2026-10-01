@@ -1,0 +1,15 @@
+{
+  "schemaVersion": "mealscout.reverse-osmosis.package-identity.v1",
+  "capturedAt": "2026-10-01T17:16:52.971Z",
+  "package": "@tradescout-infinity/reverse-osmosis",
+  "version": "0.1.0",
+  "coreRepository": "infotradescout/tradescout-infinity",
+  "coreRevision": "b5cdef4187b9e21981c7bf004fb15fd34edd73cf",
+  "archiveSha256": "af2c8c9eda9af99d257f403f5bff9365fcbbfd30403098283f8c1e0df393185a",
+  "sourceSha256": "ec55ed710765928b639f6be96b52379b45f5849b54f4396ff67c7e47f0a7fcd6",
+  "compiledEntrySha256": "877e44dc00279aebf8da8db884c1e487da5c599f3bd5e4cfd4755dcff8206b53",
+  "importPassed": true,
+  "installation": "existing checkout, offline, ignore-scripts, one local package added",
+  "runtimeDependencies": [],
+  "externalEffects": "No provider request, customer write, new credential/grant/resource, push, merge or deployment"
+}
