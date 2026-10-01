@@ -325,7 +325,7 @@ export function normalizeOwnerAiPlan(packet: OwnerAiActionPacket) {
     });
   }
   for (const menu of packet.menus || []) {
-    plan.push({ section: "menu", action: menu.operation, id: menu.id || null, ref: menu.ref || null, name: menu.name, categories: menu.categories.length, items: menu.categories.reduce((count, category) => count + category.items.length, 0), proposed: menu });
+    plan.push({ section: "menu", action: menu.operation, id: menu.id || null, ref: menu.ref || null, name: menu.name, categories: menu.categories.length, items: menu.categories.reduce((count, category) => count + category.items.length, 0), ...(packet.sourceFacts?.version === 2 ? { mergePolicy: "Update only proposed fields; omitted owner metadata and existing items remain. Native classification conflicts hold application." } : {}), proposed: menu });
   }
   for (const stop of packet.schedules || []) {
     plan.push({ section: "schedule", action: stop.operation, id: stop.id || null, ref: stop.ref || null, date: stop.date, kind: stop.kind, proposed: stop });
@@ -1664,6 +1664,8 @@ export async function applyCanonicalPacket(tx: any, restaurant: any, packet: Own
     await tx.update(restaurants).set(updates).where(eq(restaurants.id, restaurant.id));
   }
 
+  const sourceMenus = packet.sourceFacts?.version === 2 && packet.sourceFacts.sections.some(s=>s.path === "menus");
+  const preserve = (proposed: any, current: any, fallback: any) => sourceMenus && proposed === undefined ? current ?? fallback : proposed ?? fallback;
   for (const menu of packet.menus || []) {
     let existing: any = null;
     if (menu.id) [existing] = await tx.select().from(menus).where(and(eq(menus.id, menu.id), eq(menus.restaurantId, restaurant.id))).limit(1);
@@ -1677,7 +1679,7 @@ export async function applyCanonicalPacket(tx: any, restaurant: any, packet: Own
       }
       continue;
     }
-    const menuValues = { restaurantId: restaurant.id, name: menu.name, serviceType: menu.serviceType, availableFrom: menu.availableFrom ?? null, availableTo: menu.availableTo ?? null, availableDays: menu.availableDays, isActive: true, importSource: "owner_ai", importedAt: now, updatedAt: now };
+    const menuValues = { restaurantId: restaurant.id, name: menu.name, serviceType: menu.serviceType, availableFrom: preserve(menu.availableFrom, existing?.availableFrom, null), availableTo: preserve(menu.availableTo, existing?.availableTo, null), availableDays: menu.availableDays, isActive: true, importSource: "owner_ai", importedAt: now, updatedAt: now };
     if (existing) [existing] = await tx.update(menus).set(menuValues).where(eq(menus.id, existing.id)).returning();
     else [existing] = await tx.insert(menus).values(menuValues).returning();
     counts.menusUpserted += 1;
@@ -1695,7 +1697,7 @@ export async function applyCanonicalPacket(tx: any, restaurant: any, packet: Own
         }
         continue;
       }
-      const categoryValues = { menuId: existing.id, restaurantId: restaurant.id, name: category.name, description: category.description ?? null, sortOrder: category.sortOrder ?? 0, isActive: true, updatedAt: now };
+      const categoryValues = { menuId: existing.id, restaurantId: restaurant.id, name: category.name, description: preserve(category.description, existingCategory?.description, null), sortOrder: preserve(category.sortOrder, existingCategory?.sortOrder, 0), isActive: true, updatedAt: now };
       if (existingCategory) [existingCategory] = await tx.update(menuCategories).set(categoryValues).where(eq(menuCategories.id, existingCategory.id)).returning();
       else [existingCategory] = await tx.insert(menuCategories).values(categoryValues).returning();
       if (category.ref) categoryRefIds.set(category.ref, existingCategory.id);
@@ -1712,7 +1714,8 @@ export async function applyCanonicalPacket(tx: any, restaurant: any, packet: Own
           }
           continue;
         }
-        const itemValues = { menuId: existing.id, categoryId: existingCategory.id, restaurantId: restaurant.id, name: item.name, description: item.description ?? null, priceCents: item.priceCents ?? null, itemType: item.itemType, imageUrl: item.imageUrl ?? null, dietaryTags: item.dietaryTags || [], allergens: item.allergens || [], sortOrder: item.sortOrder ?? 0, isAvailable: true, updatedAt: now };
+        if (sourceMenus && existingItem && existingItem.itemType !== item.itemType) throw new OwnerAiActionError(409, "SOURCE_FACT_MENU_TYPE_CONFLICT", "Source classification conflicts with the native item type; automated source packets cannot change that type");
+        const itemValues = { menuId: existing.id, categoryId: existingCategory.id, restaurantId: restaurant.id, name: item.name, description: preserve(item.description, existingItem?.description, null), priceCents: item.priceCents ?? null, itemType: sourceMenus && existingItem ? existingItem.itemType : item.itemType, imageUrl: preserve(item.imageUrl, existingItem?.imageUrl, null), dietaryTags: preserve(item.dietaryTags, existingItem?.dietaryTags, []), allergens: preserve(item.allergens, existingItem?.allergens, []), sortOrder: preserve(item.sortOrder, existingItem?.sortOrder, 0), isAvailable: true, updatedAt: now };
         if (existingItem) await tx.update(menuItems).set(itemValues).where(eq(menuItems.id, existingItem.id));
         else await tx.insert(menuItems).values(itemValues);
         counts.itemsUpserted += 1;
@@ -1721,7 +1724,20 @@ export async function applyCanonicalPacket(tx: any, restaurant: any, packet: Own
     void categoryRefIds;
   }
 
+  const sourceSchedules = packet.sourceFacts?.version === 2 && packet.sourceFacts.sections.some(s=>s.path === "schedules");
   for (const stop of packet.schedules || []) {
+    if (sourceSchedules) {
+      const interval=buildSlotDateTimes({date:stop.date,timeZone:stop.timezone!,startTime:stop.startTime!,endTime:stop.endTime!});
+      if (!interval) throw new OwnerAiActionError(409,"SOURCE_FACT_NATIVE_INTERVAL_REQUIRED","Source event interval cannot be represented exactly");
+      const closures = await tx.select().from(truckManualSchedules).where(and(eq(truckManualSchedules.truckId,restaurant.id),eq(truckManualSchedules.status,"closed"),eq(truckManualSchedules.isPublic,true)));
+      for (const closure of closures) {
+        if (closure.expiresAt && new Date(closure.expiresAt).getTime() <= now.getTime()) continue;
+        const dateKey=new Date(closure.date).toISOString().slice(0,10);
+        const localDay=DateTime.fromISO(dateKey,{zone:closure.timezone || "invalid"}).startOf("day");
+        if (!localDay.isValid) throw new OwnerAiActionError(409,"SOURCE_FACT_NATIVE_CLOSURE_CONTEXT_REQUIRED","Existing active owner closure needs a verified timezone");
+        if (interval.startUtc.getTime() < localDay.plus({days:1}).toMillis() && interval.endUtc.getTime() > localDay.toMillis()) throw new OwnerAiActionError(409,"SOURCE_FACT_NATIVE_CLOSURE_CONFLICT","Existing owner closure overlaps this public source stop");
+      }
+    }
     let existing: any = null;
     if (stop.id) [existing] = await tx.select().from(truckManualSchedules).where(and(eq(truckManualSchedules.id, stop.id), eq(truckManualSchedules.truckId, restaurant.id))).limit(1);
     if (stop.id && !existing) throw new OwnerAiActionError(409, "schedule_not_found", "The requested schedule does not belong to this restaurant or no longer exists");
@@ -1737,6 +1753,7 @@ export async function applyCanonicalPacket(tx: any, restaurant: any, packet: Own
     const locationName = closed ? "Closed" : stop.locationName || stop.eventName || "Scheduled stop";
     const date = new Date(`${stop.date}T00:00:00.000Z`);
     if (!existing) [existing] = await tx.select().from(truckManualSchedules).where(and(eq(truckManualSchedules.truckId, restaurant.id), eq(truckManualSchedules.date, date), eq(truckManualSchedules.locationName, locationName))).limit(1);
+    if (sourceSchedules && existing && existing.isPublic !== true) throw new OwnerAiActionError(409,"SOURCE_FACT_PRIVATE_SCHEDULE_CONFLICT","Public source updates cannot repurpose an existing private schedule");
     if (stop.operation === "archive") {
       if (existing) {
         await tx.update(truckManualSchedules).set({ status: "cancelled", isPublic: false, mapEligible: false, liveFeedEligible: false, updatedAt: now }).where(eq(truckManualSchedules.id, existing.id));

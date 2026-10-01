@@ -128,7 +128,7 @@ const approveDraftInputSchema = {
 export const OWNER_AI_MCP_TOOLS = [
   {
     name: "get_mealscout_official_source_facts",
-    description: "Fetch visible official public sources for this authenticated native business and propose explicit field facts with source URL, server capture time, expiry and content hash. Conflicts and unsupported menu prices or dated attendance stay held. This creates no draft and cannot apply; create_mealscout_draft and exact owner consent remain required.",
+    description: "Fetch visible official public sources for this authenticated native business and propose explicit field facts with source URL, server capture time, expiry and content hash. Explicit current USD menu offers and confirmed public dated business attendance can form complete native section proposals; missing dates, identity, public access or conflicting content stay held. This creates no draft and cannot apply; create_mealscout_draft and exact owner consent remain required.",
     inputSchema: { type: "object", additionalProperties: false, properties: {} },
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: true },
   },
@@ -428,7 +428,7 @@ const approvalPrompt = (draft: any) => {
   return [
     `Approve MealScout draft revision ${draft.revision}?`,
     `Intent: ${String(draft.packet?.intent || "Business update")}`,
-    ...(draft.packet?.sourceFacts ? [`Official source field evidence: ${JSON.stringify(draft.packet.sourceFacts)}`, "Source values will be checked again before application. Menu contents, stock and dated attendance are not verified by a menu link."] : []),
+    ...(draft.packet?.sourceFacts ? [`Official source field evidence: ${JSON.stringify(draft.packet.sourceFacts)}`, "Source values will be checked again before application. A menu link alone does not verify contents, stock or dated attendance. Source section updates preserve omitted owner metadata and existing items; native classification conflicts stay held."] : []),
     ...(draft.currentSnapshot?.settings ? [
       `Effective social preferences: ${JSON.stringify(draft.currentSnapshot.settings.effectiveSocialPosting)}`,
       ...(draft.currentSnapshot.settings.warning ? [draft.currentSnapshot.settings.warning] : []),
