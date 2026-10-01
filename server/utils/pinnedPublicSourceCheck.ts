@@ -6,7 +6,7 @@ import { isBlockedIp, resolvePublicHostname } from "./websiteProfileImport";
 export const SOURCE_CHECK_MAX_BYTES = 512 * 1024;
 export type SourceCheckReceipt = {
   sourceUrl: string; checkedAt: string; httpStatus: number | null;
-  bodyHash: string | null; byteCount: number; outcome: "UNVERIFIED";
+  bodyHash: string | null; byteCount: number; declaredByteCount?: number; outcome: "UNVERIFIED";
   availability: "reachable" | "unavailable"; reason: string;
 };
 export function sourceCheckUrl(value: unknown): string | null {
@@ -31,13 +31,15 @@ export function hasPublicSourceAccessBarrier(url: URL, boundedHtml: string): boo
 // One deadline covers DNS, all redirect hops, headers, and the complete body.
 // The socket uses the validated address; TLS still authenticates the URL host.
 export async function checkPinnedPublicSource(startUrl: string, options: {
-  timeoutMs?: number; resolve?: typeof resolvePublicHostname; request?: typeof https.request;
+  timeoutMs?: number; maxBytes?: number; resolve?: typeof resolvePublicHostname; request?: typeof https.request;
   capture?: (value: { sourceUrl: string; finalUrl: string; body: Buffer; contentType: string; checkedAt: string; bodyHash: string }) => void;
 } = {}): Promise<SourceCheckReceipt> {
   const receipt: SourceCheckReceipt = { sourceUrl: sourceCheckUrl(startUrl) || "",
     checkedAt: new Date().toISOString(), httpStatus: null, bodyHash: null,
     byteCount: 0, outcome: "UNVERIFIED", availability: "unavailable", reason: "unavailable" };
   if (!receipt.sourceUrl) return { ...receipt, reason: "unsafe_url" };
+  const maxBytes = options.maxBytes === undefined ? SOURCE_CHECK_MAX_BYTES : options.maxBytes;
+  if (!Number.isInteger(maxBytes) || maxBytes < 1 || maxBytes > 16 * 1024 * 1024) return { ...receipt, reason: "invalid_size_limit" };
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), options.timeoutMs ?? 6000);
   const resolveHost = options.resolve || resolvePublicHostname;
@@ -68,11 +70,12 @@ export async function checkPinnedPublicSource(startUrl: string, options: {
             return resolve({ redirect: new URL(location, url).toString() });
           }
           if (receipt.httpStatus < 200 || receipt.httpStatus >= 300) { res.destroy(); return reject(new Error("http_unavailable")); }
-          if (Number(res.headers["content-length"] || 0) > SOURCE_CHECK_MAX_BYTES) { res.destroy(); return reject(new Error("size_limit")); }
+          if (res.headers["content-length"] && Number.isFinite(Number(res.headers["content-length"]))) receipt.declaredByteCount = Number(res.headers["content-length"]);
+          if (Number(res.headers["content-length"] || 0) > maxBytes) { res.destroy(); return reject(new Error("size_limit")); }
           const hash = createHash("sha256"); let bytes = 0; let snippet = ""; const chunks: Buffer[] = [];
           res.on("data", (chunk: Buffer) => {
             bytes += chunk.length;
-            if (bytes > SOURCE_CHECK_MAX_BYTES) { res.destroy(); reject(new Error("size_limit")); return; }
+            if (bytes > maxBytes) { res.destroy(); reject(new Error("size_limit")); return; }
             hash.update(chunk);
             if (options.capture) chunks.push(Buffer.from(chunk));
             if (snippet.length < 16384) snippet += chunk.toString("utf8").slice(0, 16384 - snippet.length);
