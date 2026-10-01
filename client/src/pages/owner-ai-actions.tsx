@@ -68,6 +68,15 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 
 type JsonRecord = Record<string, unknown>;
+type OfficialSourceReviews = { reviews: Array<{ day: string; checkedAt: string; packet: JsonRecord | null; holds: string[] }> };
+function officialSourceHoldMessage(hold: string) {
+  if (/EXPIRED/.test(hold)) return "The saved review needs a fresh source check.";
+  if (/UNAVAILABLE/.test(hold)) return "An official source could not be read publicly.";
+  if (/CONFLICT/.test(hold)) return "Official sources disagree; the conflicting change is held.";
+  if (/MENU|menus/.test(hold)) return "Menu contents need explicit current prices, dates and availability.";
+  if (/SCHEDULE|DATED|schedules|EVENT/.test(hold)) return "Events need verified dates, timezone and public attendance.";
+  return "Some source content needs further verification.";
+}
 
 type OwnerAiCredential = {
   id: string;
@@ -460,6 +469,9 @@ export default function OwnerAiActionsPage() {
     businesses[0] ||
     null;
   const restaurantId = selectedBusiness?.id || "";
+  const activeSourceBusiness = useRef(restaurantId);
+  activeSourceBusiness.current = restaurantId;
+  const [sourceDraftHolds, setSourceDraftHolds] = useState<string[]>([]);
   const ownsBusiness = isScopedBusinessOwner(businessAccess, restaurantId);
   const scopedPermissions = getScopedBusinessPermissions(
     businessAccess,
@@ -500,6 +512,7 @@ export default function OwnerAiActionsPage() {
     setPacketText(buildStarterPacket(selectedBusiness.name));
     setSelectedDraftId(null);
     setRevealedCredential("");
+    setSourceDraftHolds([]);
   }, [selectedBusiness?.id, selectedBusiness?.name]);
 
   const draftsQuery = useQuery<OwnerAiDraft[]>({
@@ -551,6 +564,12 @@ export default function OwnerAiActionsPage() {
       ),
     enabled: Boolean(restaurantId && ownsBusiness),
     refetchOnWindowFocus: false,
+  });
+
+  const sourceReviewsQuery = useQuery<OfficialSourceReviews>({
+    queryKey: ["owner-ai-source-reviews", restaurantId],
+    queryFn: () => fetchJson("/api/owner-ai/restaurants/" + encodeURIComponent(restaurantId) + "/source-reviews"),
+    enabled: Boolean(restaurantId && ownsBusiness), retry: false, refetchOnWindowFocus: false,
   });
 
   const credentialsQuery = useQuery<OwnerAiCredential[]>({
@@ -637,6 +656,26 @@ export default function OwnerAiActionsPage() {
         description: error.message,
         variant: "destructive",
       }),
+  });
+
+  const createSourceDraftMutation = useMutation({
+    mutationFn: async () => {
+      const requestedRestaurantId = restaurantId;
+      const response = await apiRequest("POST", "/api/owner-ai/restaurants/" + encodeURIComponent(requestedRestaurantId) + "/source-draft", {});
+      const payload = await response.json();
+      return { restaurantId: requestedRestaurantId, draft: payload.draft ? readDraft(payload.draft) : null, holds: payload.holds as string[] };
+    },
+    onSuccess: async (result) => {
+      await queryClient.invalidateQueries({ queryKey: ["owner-ai-drafts", result.restaurantId] });
+      if (activeSourceBusiness.current !== result.restaurantId) return;
+      setSourceDraftHolds(result.holds || []);
+      if (result.draft?.id) {
+        setSelectedDraftId(result.draft.id);
+        setLocation(buildOwnerAiHref({ restaurantId: result.restaurantId, source: entrySource, focus: requestedFocus, menuSource, draftId: result.draft.id }));
+      }
+      toast({ title: result.draft ? "Official-source draft prepared" : "Source changes held", description: result.draft ? "Review the source evidence and exact changes before approving." : "No supported changes could be verified. See the source holds below." });
+    },
+    onError: (error: Error) => toast({ title: "Official-source draft could not be prepared", description: error.message, variant: "destructive" }),
   });
 
   const approveDraftMutation = useMutation({
@@ -1169,6 +1208,28 @@ export default function OwnerAiActionsPage() {
             </Card>
           ))}
         </section>
+
+        {ownsBusiness ? (
+          <Card data-testid="owner-ai-official-source-review">
+            <CardHeader>
+              <CardTitle>Updates from your official sources</CardTitle>
+              <CardDescription>
+                MealScout checks public food profiles each midnight, Central time. Prepare a fresh draft from verified menu, schedule and profile facts, then review and approve the exact changes.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              <Button onClick={() => createSourceDraftMutation.mutate()} disabled={createSourceDraftMutation.isPending}>
+                {createSourceDraftMutation.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <RefreshCw className="mr-2 h-4 w-4" />}
+                Prepare official-source draft
+              </Button>
+              {sourceReviewsQuery.isError ? <p className="text-sm text-amber-800">Saved source reviews could not be loaded. A fresh draft still checks current sources.</p> : null}
+              {sourceReviewsQuery.data?.reviews[0] ? (
+                <p className="text-sm text-muted-foreground">Last automatic review: {new Date(sourceReviewsQuery.data.reviews[0].checkedAt).toLocaleString()}. {sourceReviewsQuery.data.reviews[0].packet ? "Supported facts are ready for owner review." : "Source changes are held for verification."}</p>
+              ) : <p className="text-sm text-muted-foreground">Your nightly source reviews will appear here. You can prepare a fresh draft now.</p>}
+              {[...new Set((sourceDraftHolds.length ? sourceDraftHolds : sourceReviewsQuery.data?.reviews[0]?.holds || []).map(officialSourceHoldMessage))].map(message => <p key={message} className="text-sm text-amber-800">{message}</p>)}
+            </CardContent>
+          </Card>
+        ) : null}
 
         <Card data-testid="owner-ai-connection-readiness">
           <CardHeader>

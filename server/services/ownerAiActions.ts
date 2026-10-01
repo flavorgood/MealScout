@@ -990,7 +990,17 @@ export async function createOwnerAiDraft(input: {
   const normalizedPlan = normalizeOwnerAiPlan(packet).map(step => step.section === "settings" ? { ...step, review: (currentSnapshot as any).settings } : step);
   const socialDrafts = buildOwnerAiSocialDrafts({ draftId: id, restaurantId: input.restaurantId, restaurantName: packet.profile?.name || restaurant.name, packet });
   const mediaManifest = await buildOwnerAiMediaManifest(id, packet);
-  const inserted = await db.insert(ownerAiActionDrafts).values({
+  const inserted = await db.transaction(async (tx: any) => {
+    if (packet.sourceFacts) {
+      // Parent update lock also blocks FK-backed child insertions during version capture.
+      await tx.select({ id: restaurants.id }).from(restaurants).where(eq(restaurants.id, input.restaurantId)).for("update");
+      let authority;
+      try { authority = await loadSourceFactAuthority(input.restaurantId, input.createdByUserId, tx, true); }
+      catch { throw new OwnerAiActionError(409, "SOURCE_FACT_HOLD", "Source authority changed while the native draft was prepared"); }
+      assertSourceFactAuthority(packet, authority);
+      if (!versionsEqual(expectedVersions, await computeOwnerAiExpectedVersions(input.restaurantId, tx, { forUpdate: true }))) throw new OwnerAiActionError(409, "STALE_CONTEXT", "MealScout changed while official source evidence was prepared");
+    }
+    return tx.insert(ownerAiActionDrafts).values({
     id,
     restaurantId: input.restaurantId,
     createdByUserId: input.createdByUserId,
@@ -1009,6 +1019,7 @@ export async function createOwnerAiDraft(input: {
     errors: [],
     updatedAt: new Date(),
   }).onConflictDoNothing().returning();
+  });
   let [draft] = inserted;
   if (!draft && input.connectorApiKeyId && idempotencyKey) {
     [draft] = await db

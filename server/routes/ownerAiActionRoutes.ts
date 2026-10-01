@@ -46,6 +46,7 @@ import {
 } from "../services/ownerAiOAuth";
 import { handleOwnerAiMcpRequest } from "../services/ownerAiMcp";
 import { ownerAiProfileCapabilities } from "../services/ownerAiProfileCapabilities";
+import { createOwnerAiOfficialSourceDraft, readOwnerAiSourceReviews } from "../services/ownerAiSourceReviews";
 import { toPublicRestaurantListingWithVisibility } from "../publicProfiles/toPublicRestaurantListingWithVisibility";
 import { deriveProfileEvidenceQuarantineVisibility } from "../services/profileEvidenceQuarantine";
 
@@ -266,6 +267,8 @@ const openApiDocument = {
     schemas: { OwnerAiDraftRequest: OWNER_AI_PACKET_JSON_SCHEMA },
   },
   paths: {
+    "/api/owner-ai/restaurants/{restaurantId}/source-reviews": { get: { operationId: "readMealScoutOfficialSourceReviews", security: [{ ownerSession: [] }], summary: "Read current-owner private nightly semantic proposals; removed or hidden evidence is withheld", responses: { "200": { description: "Private proposals and explicit holds; no application authority" }, "403": { description: "Current native owner/public visibility required" } } } },
+    "/api/owner-ai/restaurants/{restaurantId}/source-draft": { post: { operationId: "prepareMealScoutOfficialSourceDraft", security: [{ ownerSession: [] }], summary: "Re-fetch verified official sources and prepare a native draft for exact owner review", requestBody: { content: { "application/json": { schema: { type: "object", additionalProperties: false } } } }, responses: { "201": { description: "Native evidence-bound draft created; exact revision approval still required" }, "200": { description: "No supported facts; explicit holds and no draft" }, "409": { description: "Sources or native versions changed" } } } },
     "/api/owner-ai/connector/capabilities": {
       get: {
         operationId: "getMealScoutProfileCapabilities",
@@ -764,6 +767,26 @@ export function registerOwnerAiActionRoutes(app: Express) {
           contextOffsets(req),
         ),
       );
+    }),
+  );
+
+  app.get(
+    "/api/owner-ai/restaurants/:restaurantId/source-reviews",
+    isAuthenticated,
+    asyncRoute(async (req: any, res) => {
+      res.setHeader("Cache-Control", "private, no-store");
+      res.json(await readOwnerAiSourceReviews(String(req.user.id), z.string().uuid().parse(req.params.restaurantId)));
+    }),
+  );
+  app.post(
+    "/api/owner-ai/restaurants/:restaurantId/source-draft",
+    isAuthenticated,
+    distributedRateLimit({ scope: "owner-ai:official-source-draft", limit: 10, windowMs: 60 * 60 * 1000, key: (req: any) => String(req.user?.id || req.ip || "unknown") }),
+    asyncRoute(async (req: any, res) => {
+      z.object({}).strict().parse(req.body || {});
+      res.setHeader("Cache-Control", "private, no-store");
+      const result = await createOwnerAiOfficialSourceDraft(String(req.user.id), z.string().uuid().parse(req.params.restaurantId));
+      res.status(result.draft ? 201 : 200).json(result);
     }),
   );
 
