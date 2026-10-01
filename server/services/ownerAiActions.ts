@@ -1940,7 +1940,7 @@ async function processApprovedSocialIntents(draftId: string) {
   }
 }
 
-export async function approveOwnerAiDraft(input: { userId: string; draftId: string; expectedRevision: number }) {
+export async function approveOwnerAiDraft(input: { userId: string; draftId: string; expectedRevision: number; connectorPrincipal?: OwnerAiConnectorPrincipal }) {
   const initial = await getOwnerAiDraftForOwner(input.userId, input.draftId);
   if (initial.status === "cancelled") throw new OwnerAiActionError(409, "DRAFT_CANCELLED", "Cancelled drafts cannot be approved");
   if (initial.status === "draft" && initial.revision !== input.expectedRevision) throw new OwnerAiActionError(409, "STALE_DRAFT_REVISION", "Draft revision changed; reload before approval", { currentRevision: initial.revision });
@@ -2006,6 +2006,16 @@ export async function approveOwnerAiDraft(input: { userId: string; draftId: stri
     const transactionResult = await db.transaction(async (tx: any) => {
       const [lockedDraft] = await tx.select().from(ownerAiActionDrafts).where(eq(ownerAiActionDrafts.id, input.draftId)).limit(1).for("update");
       if (!lockedDraft) throw new OwnerAiActionError(404, "DRAFT_NOT_FOUND", "Draft not found");
+      if (input.connectorPrincipal) {
+        const principal = input.connectorPrincipal;
+        const [credential] = await tx.select().from(apiKeys).where(eq(apiKeys.id, principal.apiKeyId)).limit(1).for("share");
+        const now = new Date();
+        if (!credential || credential.userId !== input.userId || credential.restaurantId !== lockedDraft.restaurantId || credential.purpose !== "owner_ai_connector" ||
+            credential.isActive !== true || credential.revokedAt || (credential.expiresAt && credential.expiresAt <= now) ||
+            !parseScopes(credential.scope).includes("owner_ai:drafts:approve") || !parseScopes(credential.scope).includes("owner_ai:context")) {
+          throw new OwnerAiActionError(403, "CONNECTOR_APPROVAL_AUTHORITY_CHANGED", "Owner connection was revoked, expired or changed during approval; nothing was applied");
+        }
+      }
       if (lockedDraft.status === "applied") return { alreadyApplied: true };
       if (lockedDraft.status !== "draft") throw new OwnerAiActionError(409, "DRAFT_NOT_APPROVABLE", `Draft status is ${lockedDraft.status}`);
       if (lockedDraft.revision !== input.expectedRevision) throw new OwnerAiActionError(409, "STALE_DRAFT_REVISION", "Draft changed before approval completed", { currentRevision: lockedDraft.revision });

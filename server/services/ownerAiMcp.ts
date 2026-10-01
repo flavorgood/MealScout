@@ -646,6 +646,7 @@ async function callOwnerAiTool(
           userId: principal.userId,
           draftId: args.draftId,
           expectedRevision: args.expectedRevision,
+          connectorPrincipal: principal,
         }),
       );
     }
@@ -727,6 +728,7 @@ async function callOwnerAiTool(
         userId: principal.userId,
         draftId: args.draftId,
         expectedRevision: args.expectedRevision,
+          connectorPrincipal: principal,
       }),
     );
   }

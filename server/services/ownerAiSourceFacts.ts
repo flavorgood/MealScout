@@ -53,7 +53,7 @@ export function extractOfficialSourceFacts(capture: OfficialSourceCapture) {
   const hidden = (el: any) => hiddenSelectors.some(selector => { try { return $(el).closest(selector).length > 0; } catch { return true; } });
   $("script,style,template,noscript").remove();
   $("a[href]").each((_i, el) => {
-    if (hidden(el)) return;
+    if (hidden(el) || $(el).parents().addBack().toArray().some(e => /(?:display\s*:\s*none|visibility\s*:\s*hidden)/i.test($(e).attr("style") || ""))) return;
     if ($(el).closest('[style*="display:none"],[style*="display: none"],[style*="visibility:hidden"],[style*="visibility: hidden"]').length) return;
     const href = String($(el).attr("href") || "").trim();
     if (/^tel:[+\d ()-]+$/i.test(href)) { const phone = href.slice(4).replace(/[ ()-]/g, ""); if (/^\+?\d{7,15}$/.test(phone)) add("profile.phone", phone); return; }

@@ -28,6 +28,7 @@ registerHooks({ load(url, context, nextLoad) {
   if (/\/server\/utils\/pinnedPublicSourceCheck\.ts$/.test(url)) return { format: "module", source: `export { sourceCheckUrl } from "./pinnedPublicSourceCheck.ts?actual";
     export async function checkPinnedPublicSource(url, options={}) {
       const html=globalThis.__sourceHtmlByUrl?.[url] || globalThis.__sourceHtml;
+      if (globalThis.__duringSourceCapture) await globalThis.__duringSourceCapture();
       if (globalThis.__sourceUnavailable) return { sourceUrl:url, availability:"unavailable" };
       if (options.capture) options.capture({ sourceUrl:url, finalUrl:url, body:Buffer.from(html), contentType:"text/html", checkedAt:new Date().toISOString(), bodyHash:globalThis.__fixtureHash(html) });
       return { sourceUrl:url, availability:"reachable", bodyHash:globalThis.__fixtureHash(html) };
@@ -58,7 +59,7 @@ const approve=(d:any,p:any)=>call("approve_mealscout_draft",{draftId:d.id,expect
 try {
   const capture = (body: string) => ({sourceUrl:"https://official.example/",finalUrl:"https://official.example/",body:Buffer.from(body),contentType:"text/html",checkedAt:new Date().toISOString(),bodyHash:hash(body)});
   assert.equal(sources.extractOfficialSourceFacts(capture(html)).fields[0].value,"https://official.example/menu.pdf");
-  for (const body of ['<script><a href="/menu.pdf">Menu</a></script>','<div hidden><a href="/menu.pdf">Menu</a></div>','<div style="display: none"><a href="/menu.pdf">Menu</a></div>','<a href="/file.pdf">Download</a>','<a href="http://127.0.0.1/menu">Menu</a>', '<style>.secret {display:none}</style><a class="secret" href="/menu">Menu</a>']) assert.equal(sources.extractOfficialSourceFacts(capture(body)).fields.length,0,body);
+  for (const body of ['<script><a href="/menu.pdf">Menu</a></script>','<div hidden><a href="/menu.pdf">Menu</a></div>','<div style="display: none"><a href="/menu.pdf">Menu</a></div>','<a href="/file.pdf">Download</a>','<a href="http://127.0.0.1/menu">Menu</a>', '<style>.secret {display:none}</style><a class="secret" href="/menu">Menu</a>', '<div style="DISPLAY : NONE"><a href="/menu">Menu</a></div>']) assert.equal(sources.extractOfficialSourceFacts(capture(body)).fields.length,0,body);
   const conflict=sources.extractOfficialSourceFacts(capture('<a href="/one">Menu</a><a href="/two">Menu</a>'));
   assert.equal(conflict.fields.length,0); assert.ok(conflict.holds.includes("CONFLICT:profile.menuUrl"));
   const redirected={...capture(html),finalUrl:"https://other.example/"};assert.equal(sources.extractOfficialSourceFacts(redirected).fields.length,0);
@@ -108,6 +109,11 @@ try {
   const replaced=await draft(), replacedP=await prepare(replaced);await database.update(schema.restaurants).set({websiteUrl:"https://new.example/"}).where(eq(schema.restaurants.id,principal.restaurantId));fails(await approve(replaced,replacedP),"SOURCE_FACT_OFFICIAL_SOURCE_SET_CHANGED");await database.update(schema.restaurants).set({websiteUrl:"https://official.example/"}).where(eq(schema.restaurants.id,principal.restaurantId));
   const altered=await draft(), alteredP=await prepare(altered); const edited=structuredClone(altered.packet); edited.sourceFacts.fields[0].captureSha256="b".repeat(64);await database.update(schema.ownerAiActionDrafts).set({packet:edited}).where(eq(schema.ownerAiActionDrafts.id,altered.id));fails(await approve(altered,alteredP),"OWNER_CONSENT_HANDLE_STALE");
   fails(await call("get_mealscout_official_source_facts",{restaurantId:"other"}),"MCP_TOOL_ARGUMENTS_INVALID");fails(await call("get_mealscout_official_source_facts",{}, {...principal,scopes:[]}),"CONNECTOR_SCOPE_REQUIRED");
+  const inFlight=await draft(),inFlightP=await prepare(inFlight);
+  (globalThis as any).__duringSourceCapture=async()=>{(globalThis as any).__duringSourceCapture=null;await database.update(schema.apiKeys).set({revokedAt:new Date()}).where(eq(schema.apiKeys.id,principal.apiKeyId));};
+  fails(await approve(inFlight,inFlightP),"CONNECTOR_APPROVAL_AUTHORITY_CHANGED");
+  assert.equal((await database.select().from(schema.ownerAiActionDrafts).where(eq(schema.ownerAiActionDrafts.id,inFlight.id)))[0].status,"draft");
+  await database.update(schema.apiKeys).set({revokedAt:null}).where(eq(schema.apiKeys.id,principal.apiKeyId));
   await database.update(schema.apiKeys).set({revokedAt:new Date()}).where(eq(schema.apiKeys.id,principal.apiKeyId));fails(await call("get_mealscout_official_source_facts",{}),"PRINCIPAL_INACTIVE");
   console.log("PASS all five native types; source changes, expiry, unavailability, field mismatch, forged official URL, unproven changes, hidden/removed official sources, exact evidence consent, revoked/missing scope/cross-target requests fail closed");
   console.log("PASS disposable in-memory native proof only; no production owner writes or grants");
