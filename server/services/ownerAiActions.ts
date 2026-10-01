@@ -63,6 +63,8 @@ import { resolveCityTimeZoneSync } from "./cityTimeZone";
 import { isPublicDiscoveryEligibleEntity } from "@shared/publicDiscoveryIntegrity";
 import { buildSlotDateTimes } from "./timeIntent";
 import { verifyOwnerAiSourceFacts, loadSourceFactAuthority, assertSourceFactAuthority } from "./ownerAiSourceFacts";
+import { finalizeMealScoutReverseOsmosisDraftPacket, validateMealScoutReverseOsmosisPacket, applyMealScoutReverseOsmosisWithinApproval, publishMealScoutReverseOsmosisSocialIntent } from "./reverseOsmosis";
+import { verifyMealScoutBusinessAsset } from "./reverseOsmosisBusinessAssets";
 
 const DRAFT_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const PUBLIC_BASE_URL = () =>
@@ -971,6 +973,7 @@ export async function createOwnerAiDraft(input: {
           "Idempotency-Key was already used with different draft content",
         );
       }
+      if ((replay.packet as any)?.reverseOsmosis) await validateMealScoutReverseOsmosisPacket(ownerAiActionPacketSchema.parse(replay.packet), replay.restaurantId, input.createdByUserId, replay.expectedVersions as OwnerAiExpectedVersions);
       return { ...toOwnerAiDraftResponse(replay), idempotencyReplay: true };
     }
   }
@@ -998,14 +1001,18 @@ export async function createOwnerAiDraft(input: {
   const normalizedPlan = normalizeOwnerAiPlan(packet).map(step => ({ ...step, nativeAdapter: (currentSnapshot as any).nativeAdapter, ...(step.section === "settings" ? { review: (currentSnapshot as any).settings } : {}) }));
   const socialDrafts = buildOwnerAiSocialDrafts({ draftId: id, restaurantId: input.restaurantId, restaurantName: packet.profile?.name || restaurant.name, packet });
   const mediaManifest = await buildOwnerAiMediaManifest(id, packet);
+  await finalizeMealScoutReverseOsmosisDraftPacket(packet, input.restaurantId, input.createdByUserId, expectedVersions, id, socialDrafts, mediaManifest);
   const inserted = await db.transaction(async (tx: any) => {
-    if (packet.sourceFacts) {
+    if (packet.sourceFacts || packet.reverseOsmosis) {
       // Parent update lock also blocks FK-backed child insertions during version capture.
       await tx.select({ id: restaurants.id }).from(restaurants).where(eq(restaurants.id, input.restaurantId)).for("update");
-      let authority;
-      try { authority = await loadSourceFactAuthority(input.restaurantId, input.createdByUserId, tx, true); }
-      catch { throw new OwnerAiActionError(409, "SOURCE_FACT_HOLD", "Source authority changed while the native draft was prepared"); }
-      assertSourceFactAuthority(packet, authority);
+      if (packet.sourceFacts) {
+        let authority;
+        try { authority = await loadSourceFactAuthority(input.restaurantId, input.createdByUserId, tx, true); }
+        catch { throw new OwnerAiActionError(409, "SOURCE_FACT_HOLD", "Source authority changed while the native draft was prepared"); }
+        assertSourceFactAuthority(packet, authority);
+      }
+      await validateMealScoutReverseOsmosisPacket(packet, input.restaurantId, input.createdByUserId, expectedVersions, tx, true);
       if (!versionsEqual(expectedVersions, await computeOwnerAiExpectedVersions(input.restaurantId, tx, { forUpdate: true }))) throw new OwnerAiActionError(409, "STALE_CONTEXT", "MealScout changed while official source evidence was prepared");
     }
     return tx.insert(ownerAiActionDrafts).values({
@@ -1393,6 +1400,7 @@ export async function updateOwnerAiDraft(input: { userId: string; draftId: strin
   const request = ownerAiDraftRequestSchema.parse(input.request);
   const [existing] = await db.select().from(ownerAiActionDrafts).where(eq(ownerAiActionDrafts.id, input.draftId)).limit(1);
   if (!existing) throw new OwnerAiActionError(404, "DRAFT_NOT_FOUND", "Draft not found");
+  if ((existing.packet as any)?.reverseOsmosis || request.packet.reverseOsmosis) throw new OwnerAiActionError(409, "REVERSE_OSMOSIS_IMMUTABLE", "Prepare a fresh source draft to change a captured Reverse Osmosis proposal");
   const restaurant = await assertActualRestaurantOwner(input.userId, existing.restaurantId);
   if (existing.status !== "draft") throw new OwnerAiActionError(409, "DRAFT_NOT_EDITABLE", "Only draft-status proposals can be edited");
   if (existing.revision !== input.expectedRevision) throw new OwnerAiActionError(409, "STALE_DRAFT_REVISION", "Draft revision changed; reload before editing", { currentRevision: existing.revision });
@@ -1937,6 +1945,28 @@ async function processApprovedSocialIntents(draftId: string) {
       updatedAt: leaseStartedAt,
     }).where(and(eq(socialPostQueue.id, row.id), eq(socialPostQueue.status, "approved"))).returning();
     if (!claimed) continue;
+    if ((draft.packet as any)?.reverseOsmosis) {
+      try {
+        const roOutcome = await publishMealScoutReverseOsmosisSocialIntent({ draft, row: claimed, execute: async (tx, connection) => {
+          const socialDraft = socialDrafts.find(value => value.platform === row.platform) || {};
+          let imageUrl = await validateAndPrepareRemoteImage(socialDraft.suppliedImageUrl, "owner-ai-social", socialDraft.suppliedImageUrl ? findMediaManifestEntry(draft.mediaManifest, `social-${row.platform}`) : null);
+          if (!imageUrl && socialDraft.generatedSvg) imageUrl = await uploadGeneratedSvg(socialDraft.generatedSvg, "owner-ai-social", `${draftId}-${row.platform}`);
+          if (!imageUrl) throw new Error("Approved social image could not be hosted");
+          const [withImage] = await tx.update(socialPostQueue).set({ imageUrl, metadata: { ...asRecord(claimed.metadata), hostedImageUrl: imageUrl, hostedAt: new Date().toISOString() }, updatedAt: new Date() }).where(eq(socialPostQueue.id, claimed.id)).returning();
+          const proposal = (draft.packet as any).reverseOsmosis.outbound.find((p: any) => p.scope.provider === row.platform);
+          // Hosting may take time. Reverify actual grants immediately before the provider call while native authority locks remain held.
+          await verifyMealScoutBusinessAsset(proposal, connection, draft.approvedByUserId!);
+          const result = await publishSocialQueueItem(withImage, { connection, database: tx });
+          await markSocialPostResult(withImage, result, tx);
+          return result;
+        } });
+        if (roOutcome.status === "held") await markSocialPostResult(claimed, { ok: false, manualRequired: true, error: "Publication delivery is held for trusted reconciliation; no retry was initiated" });
+      } catch (error) {
+        // Every ambiguous/crashed native claim remains held. A queue status never grants a new attempt.
+        await markSocialPostResult(claimed, { ok: false, manualRequired: true, error: error instanceof OwnerAiActionError ? error.message : "Reverse Osmosis publication is held for reconciliation; no retry was initiated" });
+      }
+      continue;
+    }
     let providerResult: Awaited<ReturnType<typeof publishSocialQueueItem>> | null = null;
     try {
       const socialDraft = socialDrafts.find((value) => value.platform === row.platform) || {};
@@ -2000,6 +2030,7 @@ export async function approveOwnerAiDraft(input: { userId: string; draftId: stri
   let applied = initial.status === "applied";
   if (!applied) {
     const packet = ownerAiActionPacketSchema.parse(initial.packet);
+    await validateMealScoutReverseOsmosisPacket(packet, initial.restaurantId, input.userId, initial.expectedVersions as OwnerAiExpectedVersions);
     await validateSourceFacts(packet, initial.restaurantId, input.userId, false);
     const socialDrafts = asArray<Record<string, any>>(initial.socialDrafts);
     const requestedSocialPlatforms = [
@@ -2119,6 +2150,7 @@ export async function approveOwnerAiDraft(input: { userId: string; draftId: stri
       const expectedVersions = lockedDraft.expectedVersions as OwnerAiExpectedVersions;
       if (!versionsEqual(expectedVersions, currentVersions)) throw new OwnerAiActionError(409, "STALE_CONTEXT", "MealScout content changed after this draft was prepared. Nothing was applied or published.", { expected: expectedVersions, current: currentVersions });
       await assertOwnerAiSettingsAccess(input.userId, restaurant, preparedPacket, tx, true);
+      return applyMealScoutReverseOsmosisWithinApproval({ tx, draft: lockedDraft, userId: input.userId, execute: async () => {
       const now = new Date();
       const canonicalCounts = await applyCanonicalPacket(tx, restaurant, preparedPacket, now);
       for (const social of socialDrafts) {
@@ -2140,6 +2172,7 @@ export async function approveOwnerAiDraft(input: { userId: string; draftId: stri
       const result = { canonicalCommitted: true, canonicalCounts, socialRequested: socialDrafts.map((social) => social.platform) };
       await tx.update(ownerAiActionDrafts).set({ status: "applied", revision: lockedDraft.revision + 1, approvedByUserId: input.userId, approvedAt: now, appliedAt: now, result, errors: [], updatedAt: now }).where(eq(ownerAiActionDrafts.id, lockedDraft.id));
       return { alreadyApplied: false, result };
+      } });
     });
     applied = !transactionResult.alreadyApplied || applied;
   }

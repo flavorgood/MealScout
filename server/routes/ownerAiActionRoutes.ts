@@ -1,3 +1,5 @@
+import { ReverseOsmosisError } from "@tradescout-infinity/reverse-osmosis";
+import { registerReverseOsmosisRoutes } from "./reverseOsmosisRoutes";
 import { registerOwnerAiNativeProfileRoutes } from "./ownerAiNativeProfileRoutes";
 import type { Express, NextFunction, Request, Response } from "express";
 import { and, eq } from "drizzle-orm";
@@ -363,6 +365,7 @@ const openApiDocument = {
 
 export function registerOwnerAiActionRoutes(app: Express) {
   registerOwnerAiNativeProfileRoutes(app);
+  registerReverseOsmosisRoutes(app);
   const connectorRateKey = (req: ConnectorRequest) =>
     req.ownerAiConnector?.apiKeyId || "owner-ai-connector-unresolved";
   const connectorContextLimiter = distributedRateLimit({
@@ -968,6 +971,9 @@ export function registerOwnerAiActionRoutes(app: Express) {
   app.use(
     "/api/owner-ai",
     (error: unknown, _req: Request, res: Response, next: NextFunction) => {
+      if (error instanceof ReverseOsmosisError) {
+        return res.status(409).json({ code: error.code, error: "Reverse Osmosis held this operation. Refresh the source and review a new draft; uncertain delivery requires reconciliation." });
+      }
       if (error instanceof ZodError) {
         return res.status(400).json({
           error: "Invalid owner AI request",

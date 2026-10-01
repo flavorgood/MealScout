@@ -1,4 +1,6 @@
+import ReverseOsmosisDraftEvidence from "@/components/reverse-osmosis-draft-evidence";
 import { officialSourceHoldMessage } from "@shared/ownerAiSourceHolds";
+import ReverseOsmosisBusinessPostControl from "@/components/reverse-osmosis-business-post-control";
 import NativeProfileSourceControl from "@/components/native-profile-source-control";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
@@ -1229,6 +1231,12 @@ export default function OwnerAiActionsPage() {
           </Card>
         ) : null}
 
+        {ownsBusiness ? <ReverseOsmosisBusinessPostControl restaurantId={restaurantId} ready={ownsBusiness && Boolean(contextQuery.data) && !contextQuery.isError && !contextQuery.isFetching} onPrepared={({ restaurantId: target, draftId }) => {
+          if (activeSourceBusiness.current !== target) return;
+          setSelectedDraftId(draftId);
+          setLocation(buildOwnerAiHref({ restaurantId: target, source: entrySource, focus: requestedFocus, menuSource, draftId }));
+        }} /> : null}
+
         <Card data-testid="owner-ai-connection-readiness">
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
@@ -1784,6 +1792,8 @@ export default function OwnerAiActionsPage() {
                       <AlertDescription>{selectedDraft.lastError}</AlertDescription>
                     </Alert>
                   ) : null}
+
+                  <ReverseOsmosisDraftEvidence envelope={selectedDraft.packet?.reverseOsmosis} />
 
                   <section aria-labelledby="meal-changes-heading">
                     <h2
