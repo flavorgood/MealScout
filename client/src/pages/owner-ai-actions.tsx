@@ -1,3 +1,4 @@
+import NativeProfileSourceControl from "@/components/native-profile-source-control";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { useLocation, useSearch } from "wouter";
@@ -1032,7 +1033,8 @@ export default function OwnerAiActionsPage() {
 
   if (!selectedBusiness) {
     return (
-      <main className="mx-auto max-w-2xl px-4 py-16">
+      <main className="mx-auto max-w-2xl space-y-6 px-4 py-16">
+        <NativeProfileSourceControl />
         <Card>
           <CardHeader>
             <CardTitle>Connect a business first</CardTitle>
@@ -1087,6 +1089,7 @@ export default function OwnerAiActionsPage() {
         noIndex
       />
       <div className="mx-auto max-w-7xl space-y-6 px-4 py-6 sm:px-6 lg:px-8">
+        <NativeProfileSourceControl />
         <section className="overflow-hidden rounded-3xl border border-orange-200 bg-gradient-to-br from-orange-50 via-amber-50 to-rose-50 p-5 sm:p-7">
           <div className="grid gap-6 lg:grid-cols-[1fr_380px] lg:items-center">
             <div>

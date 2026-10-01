@@ -1,3 +1,6 @@
+import { runNativeOwnerSourceReviews } from "../services/ownerAiNativeProfiles";
+import { summarizeOwnerAiSourceReviewReasons } from "../services/ownerAiSourceReviews";
+import { sourceCheckDay } from "../services/publicProfileSourceChecks";
 /**
  * registerSchedulers.ts
  *
@@ -71,9 +74,13 @@ function shouldRunMarketingEmailJobs(now = new Date()): boolean {
 
 export async function registerSchedulers(app: Express): Promise<void> {
   const sourceReviews = ownerAiSourceReviewSchedule();
+  try { console.info("[official-source-review-reasons] receipts", await summarizeOwnerAiSourceReviewReasons(sourceCheckDay(new Date()))); }
+  catch { console.error("[official-source-review-reasons] receipt aggregate unavailable; no customer content changed"); }
   console.info("[official-source-reviews] scheduled", sourceReviews);
   cron.schedule(sourceReviews.expression, async () => {
-    try { const run = await runOwnerAiSourceReviews(); console.info("[official-source-reviews] completed", { day: run.day, profiles: run.results.length, proposals: run.results.filter(r => r.status === "proposal_ready").length, held: run.results.filter(r => r.status.startsWith("held")).length, publishes: false, createsOwnerDrafts: false }); }
+    try { const run = await runOwnerAiSourceReviews(); console.info("[official-source-reviews] completed", { day: run.day, profiles: run.results.length, proposals: run.results.filter(r => r.status === "proposal_ready").length, held: run.results.filter(r => r.status.startsWith("held")).length, publishes: false, createsOwnerDrafts: false });
+      const native = await runNativeOwnerSourceReviews(); console.info("[native-official-source-reviews] completed", { day: native.day, profiles: native.results.length, proposals: native.results.filter(r => r.status === "proposal_ready").length, held: native.results.filter(r => r.status.startsWith("held")).length, publishes: false, createsOwnerDrafts: false });
+      console.info("[official-source-review-reasons] receipts", await summarizeOwnerAiSourceReviewReasons(run.day)); }
     catch { console.error("[official-source-reviews] failed; no owner approval or canonical changes"); }
   }, { timezone: sourceReviews.timezone });
   const sourceChecks = publicSourceCheckSchedule();

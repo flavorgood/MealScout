@@ -478,6 +478,8 @@ export const suppliers = pgTable(
     countyFips: varchar("county_fips"),
     countyName: varchar("county_name"),
     geoEnrichedAt: timestamp("geo_enriched_at"),
+    websiteUrl: text("website_url"),
+    logoUrl: text("logo_url"),
     contactPhone: varchar("contact_phone"),
     contactEmail: varchar("contact_email"),
     isActive: boolean("is_active").default(true),
@@ -3390,6 +3392,12 @@ export const hosts = pgTable(
     locationType: varchar("location_type").notNull(), // 'office' | 'bar' | 'brewery' | 'other'
     expectedFootTraffic: integer("expected_foot_traffic"),
     amenities: jsonb("amenities"), // { power: boolean, wifi: boolean, seating: boolean, etc }
+    websiteUrl: text("website_url"),
+    instagramUrl: text("instagram_url"),
+    facebookPageUrl: text("facebook_page_url"),
+    xUrl: text("x_url"),
+    logoUrl: text("logo_url"),
+    coverImageUrl: text("cover_image_url"),
     contactPhone: varchar("contact_phone"),
     notes: text("notes"),
     isVerified: boolean("is_verified").default(false),
