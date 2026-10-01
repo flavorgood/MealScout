@@ -177,7 +177,7 @@ try {
     const initial=await outcomes(draft);assert.equal(initial.status,200,JSON.stringify(initial.body));
     assert.deepEqual(initial.body.outcomes.filter((o:any)=>o.operationKey===draft.packet.reverseOsmosis.outbound[0].operationKey).map((o:any)=>o.status),["held"],name+" durable held");
     const queue=(await database.select().from(schema.socialPostQueue).where(eq(schema.socialPostQueue.ownerAiActionDraftId,draft.id)))[0];
-    assert.equal(queue.status,"manual_required",name+" queue held");assert.equal(queue.providerPostId,null,name+" no verified receipt");
+    assert.equal(queue.status,"manual_required",name+" queue held");assert.equal((queue.metadata as any).providerPostId,null,name+" no verified receipt");
     assert.equal(postWrites,before+1,name+" one initial provider POST");
     success(await approve(draft,draft.revision+1),200);assert.equal(postWrites,before+1,name+" replay never posts");
     const reconciled=await request(`/api/owner-ai/drafts/${draft.id}/reverse-osmosis/reconcile`,{});
@@ -190,7 +190,7 @@ try {
   const validProof=await outcomes(validAfterHeld);assert.equal(validProof.status,200,JSON.stringify(validProof.body));
   assert.ok(validProof.body.outcomes.every((o:any)=>o.status==="completed"),"valid string acknowledgement remains completed");
   const validQueue=(await database.select().from(schema.socialPostQueue).where(eq(schema.socialPostQueue.ownerAiActionDraftId,validAfterHeld.id)))[0];
-  assert.equal(validQueue.status,"posted");assert.equal(typeof validQueue.providerPostId,"string");assert.equal(postWrites,validBefore+1);
+  assert.equal(validQueue.status,"posted");assert.equal(typeof (validQueue.metadata as any).providerPostId,"string");assert.equal(postWrites,validBefore+1);
   success(await approve(validAfterHeld,validAfterHeld.revision+1),200);assert.equal(postWrites,validBefore+1);
   console.log("PASS malformed receipt counterexamples retain native held/queue manual_required and valid string happy path/replay");
   const beforeTransfer=postWrites;
