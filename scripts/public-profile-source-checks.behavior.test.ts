@@ -11,6 +11,23 @@ import { checkPinnedPublicSource, hasPublicSourceAccessBarrier, sourceCheckUrl }
 
 process.env.NODE_ENV = "development";
 const service = await import("../server/services/publicProfileSourceChecks");
+assert.equal(service.PUBLIC_SOURCE_CHECK_TIMEZONE, "America/Chicago");
+assert.equal(service.publicSourceCheckSchedule().timezone, "America/Chicago");
+assert.equal(service.publicSourceCheckSchedule().expression, "0 0 * * *");
+for (const [instant, day] of [
+  ["2026-07-01T04:59:59Z", "2026-06-30"],
+  ["2026-07-01T05:00:00Z", "2026-07-01"],
+  ["2026-01-01T05:59:59Z", "2025-12-31"],
+  ["2026-01-01T06:00:00Z", "2026-01-01"],
+  ["2026-03-08T05:59:59Z", "2026-03-07"],
+  ["2026-03-08T06:00:00Z", "2026-03-08"],
+  ["2026-03-08T08:00:00Z", "2026-03-08"],
+  ["2026-03-09T05:00:00Z", "2026-03-09"],
+  ["2026-11-01T04:59:59Z", "2026-10-31"],
+  ["2026-11-01T05:00:00Z", "2026-11-01"],
+  ["2026-11-01T07:00:00Z", "2026-11-01"],
+  ["2026-11-02T06:00:00Z", "2026-11-02"],
+] as const) assert.equal(service.sourceCheckDay(new Date(instant)), day, instant);
 const { registerPublicProfileSourceCheckRoutes } = await import("../server/routes/publicProfileSourceCheckRoutes");
 const pg = new PGlite();
 for (const table of [schema.users, schema.restaurants, schema.telemetryEvents]) {
@@ -30,6 +47,8 @@ const check = async (sourceUrl: string) => { reads++; return { sourceUrl, checke
 const options = { database, restaurantIds: [restaurantId], check, now: new Date("2026-09-30T00:00:00Z") };
 assert.equal((await service.runPublicProfileSourceChecks(options)).results[0].status, "checked_unverified");
 assert.equal((await service.runPublicProfileSourceChecks(options)).results[0].status, "already_checked");
+assert.equal((await service.runPublicProfileSourceChecks({ ...options,
+  now: new Date("2026-09-30T04:59:59Z") })).results[0].status, "already_checked");
 assert.equal(reads, 1);
 await service.runPublicProfileSourceChecks({ ...options, now: new Date("2026-10-01T00:00:00Z") });
 let ownerResponse: any = await service.readPublicProfileSourceChecks(ownerId, restaurantId, database);
@@ -81,6 +100,20 @@ assert.deepEqual(service.projectPublicSourceUrls({ ...native, rawData: { evidenc
   status: "quarantined", decisions: { website_link: { status: "rejected" }, social_links: { status: "rejected" } },
 } } }, { id: ownerId, isDisabled: false }), []);
 const beforeBusy = reads;
+// Preserve the old UTC receipt and its ID: the corrected local-day run must
+// respect it even though the old cron checked at 7pm Central the prior evening.
+const legacyId = service.sourceCheckId(restaurantId, "2026-10-01");
+const [legacyReceipt] = await database.select().from(schema.telemetryEvents).where(eq(schema.telemetryEvents.id, legacyId));
+assert.ok(legacyReceipt);
+await database.update(schema.telemetryEvents).set({ properties: {
+  ...legacyReceipt.properties, timezone: "Etc/UTC", checkedAt: "2026-10-01T00:00:00.000Z",
+}, createdAt: new Date("2026-10-01T00:00:00Z") }).where(eq(schema.telemetryEvents.id, legacyId));
+assert.equal((await service.runPublicProfileSourceChecks({ ...options,
+  now: new Date("2026-10-01T05:00:00Z") })).results[0].status, "already_checked");
+assert.equal(reads, beforeBusy, "legacy UTC-day receipt must suppress transition-day fetch");
+const [preservedLegacy] = await database.select().from(schema.telemetryEvents).where(eq(schema.telemetryEvents.id, legacyId));
+assert.equal((preservedLegacy.properties as any).timezone, "Etc/UTC");
+assert.equal((preservedLegacy.properties as any).checkedAt, "2026-10-01T00:00:00.000Z");
 const busyDatabase = { transaction: (fn: any, config: any) => database.transaction(tx => fn(new Proxy(tx, {
   get(target, key) { return key === "execute" ? async () => ({ rows: [{ acquired: false }] }) : (target as any)[key]; },
 })), config) };
@@ -153,7 +186,7 @@ try {
   assert.equal(anonymous.headers.get("cache-control"), "private, no-store");
   assert.equal((await fetch(base, { headers: { "x-test-user": "administrator" } })).status, 403);
   const owner = await fetch(base, { headers: { "x-test-user": ownerId } }); assert.equal(owner.status, 200);
-  assert.equal((await owner.json()).schedule.timezone, "Etc/UTC");
+  assert.equal((await owner.json()).schedule.timezone, "America/Chicago");
   assert.equal((await fetch(base, { method: "POST" })).status, 404);
 } finally { server.close(); await pg.close(); }
-console.log("PASS public-profile-source-checks: real PGlite native/dedup/visibility/forgery/hash comparison; pinned transport SSRF/DNS deadline/socket timeout/size/redirect/login; real loopback owner-only route");
+console.log("PASS public-profile-source-checks: Central midnight summer/winter/DST boundaries and same-local-day/legacy-UTC receipt dedup; real PGlite native/visibility/forgery/hash comparison; pinned transport SSRF/DNS deadline/socket timeout/size/redirect/login; real loopback owner-only route");

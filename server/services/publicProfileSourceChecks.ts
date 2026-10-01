@@ -15,7 +15,7 @@ export const PUBLIC_SOURCE_CHECK_TARGETS = Object.freeze([
   "95c4e656-f3cc-46ab-ae18-53f549cecfd1",
 ]);
 // This is the requesting user's explicit timezone, independent of marketing jobs.
-export const PUBLIC_SOURCE_CHECK_TIMEZONE = "Etc/UTC";
+export const PUBLIC_SOURCE_CHECK_TIMEZONE = "America/Chicago";
 export function publicSourceCheckSchedule() {
   new Intl.DateTimeFormat("en-US", { timeZone: PUBLIC_SOURCE_CHECK_TIMEZONE }).format();
   return { expression: "0 0 * * *", timezone: PUBLIC_SOURCE_CHECK_TIMEZONE,
