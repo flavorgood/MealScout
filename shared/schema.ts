@@ -17,3 +17,4 @@ export * from "./schema/moderation";
 export * from "./schema/scoutcoin";
 
 export * from "./schema/ownerAiNativeProfiles";
+export * from "./schema/reverseOsmosis";

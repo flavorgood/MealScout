@@ -1,3 +1,6 @@
+import ReverseOsmosisDraftEvidence from "@/components/reverse-osmosis-draft-evidence";
+import { officialSourceHoldMessage } from "@shared/ownerAiSourceHolds";
+import ReverseOsmosisBusinessPostControl from "@/components/reverse-osmosis-business-post-control";
 import NativeProfileSourceControl from "@/components/native-profile-source-control";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
@@ -70,14 +73,6 @@ import { Textarea } from "@/components/ui/textarea";
 
 type JsonRecord = Record<string, unknown>;
 type OfficialSourceReviews = { reviews: Array<{ day: string; checkedAt: string; packet: JsonRecord | null; holds: string[] }> };
-function officialSourceHoldMessage(hold: string) {
-  if (/EXPIRED/.test(hold)) return "The saved review needs a fresh source check.";
-  if (/UNAVAILABLE/.test(hold)) return "An official source could not be read publicly.";
-  if (/CONFLICT/.test(hold)) return "Official sources disagree; the conflicting change is held.";
-  if (/MENU|menus/.test(hold)) return "Menu contents need explicit current prices, dates and availability.";
-  if (/SCHEDULE|DATED|schedules|EVENT/.test(hold)) return "Events need verified dates, timezone and public attendance.";
-  return "Some source content needs further verification.";
-}
 
 type OwnerAiCredential = {
   id: string;
@@ -660,8 +655,7 @@ export default function OwnerAiActionsPage() {
   });
 
   const createSourceDraftMutation = useMutation({
-    mutationFn: async () => {
-      const requestedRestaurantId = restaurantId;
+    mutationFn: async (requestedRestaurantId: string) => {
       const response = await apiRequest("POST", "/api/owner-ai/restaurants/" + encodeURIComponent(requestedRestaurantId) + "/source-draft", {});
       const payload = await response.json();
       return { restaurantId: requestedRestaurantId, draft: payload.draft ? readDraft(payload.draft) : null, holds: payload.holds as string[] };
@@ -676,7 +670,10 @@ export default function OwnerAiActionsPage() {
       }
       toast({ title: result.draft ? "Official-source draft prepared" : "Source changes held", description: result.draft ? "Review the source evidence and exact changes before approving." : "No supported changes could be verified. See the source holds below." });
     },
-    onError: (error: Error) => toast({ title: "Official-source draft could not be prepared", description: error.message, variant: "destructive" }),
+    onError: (error: Error, requestedRestaurantId: string) => {
+      if (activeSourceBusiness.current !== requestedRestaurantId) return;
+      toast({ title: "Official-source draft could not be prepared", description: error.message, variant: "destructive" });
+    },
   });
 
   const approveDraftMutation = useMutation({
@@ -1084,7 +1081,7 @@ export default function OwnerAiActionsPage() {
       capabilities={workspaceCapabilities}
     >
       <SEOHead
-        title={`AI Control | ${selectedBusiness.name} | MealScout`}
+        title={`Reverse Osmosis | AI Control | ${selectedBusiness.name} | MealScout`}
         description="Review and approve model-neutral AI drafts for MealScout business content and connected social publishing."
         noIndex
       />
@@ -1098,10 +1095,10 @@ export default function OwnerAiActionsPage() {
                 One approval for the whole business
               </div>
               <h1 className="mt-2 max-w-3xl text-3xl font-black tracking-tight text-stone-950 sm:text-4xl">
-                Run MealScout from the AI you already use
+                Reverse Osmosis
               </h1>
               <p className="mt-3 max-w-3xl text-sm leading-6 text-stone-700 sm:text-base">
-                Tell any free or paid AI what changed. It prepares menus, prices,
+                Use the AI you already have to prepare MealScout updates. Tell it what changed. It prepares menus, prices,
                 schedules, events, profile copy, logos and images, deals, plus the
                 matching social descriptions and artwork. You see the complete
                 preview before anything changes.
@@ -1221,7 +1218,7 @@ export default function OwnerAiActionsPage() {
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-3">
-              <Button onClick={() => createSourceDraftMutation.mutate()} disabled={createSourceDraftMutation.isPending}>
+              <Button onClick={() => createSourceDraftMutation.mutate(restaurantId)} disabled={createSourceDraftMutation.isPending}>
                 {createSourceDraftMutation.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <RefreshCw className="mr-2 h-4 w-4" />}
                 Prepare official-source draft
               </Button>
@@ -1233,6 +1230,12 @@ export default function OwnerAiActionsPage() {
             </CardContent>
           </Card>
         ) : null}
+
+        {ownsBusiness ? <ReverseOsmosisBusinessPostControl restaurantId={restaurantId} ready={ownsBusiness && Boolean(contextQuery.data) && !contextQuery.isError && !contextQuery.isFetching} onPrepared={({ restaurantId: target, draftId }) => {
+          if (activeSourceBusiness.current !== target) return;
+          setSelectedDraftId(draftId);
+          setLocation(buildOwnerAiHref({ restaurantId: target, source: entrySource, focus: requestedFocus, menuSource, draftId }));
+        }} /> : null}
 
         <Card data-testid="owner-ai-connection-readiness">
           <CardHeader>
@@ -1789,6 +1792,8 @@ export default function OwnerAiActionsPage() {
                       <AlertDescription>{selectedDraft.lastError}</AlertDescription>
                     </Alert>
                   ) : null}
+
+                  <ReverseOsmosisDraftEvidence envelope={selectedDraft.packet?.reverseOsmosis} />
 
                   <section aria-labelledby="meal-changes-heading">
                     <h2

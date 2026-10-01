@@ -80,6 +80,8 @@ const json = (route: Route, body: unknown, status = 200) =>
     body: JSON.stringify(body),
   });
 
+const sourceRequests: any[] = [];
+const sourceDrafts: any[] = [];
 async function installMockApi(page: Page) {
   await page.route("**/api/**", async (route) => {
     const request = route.request();
@@ -128,8 +130,15 @@ async function installMockApi(page: Page) {
         },
       });
     }
+    if (path === `/api/owner-ai/restaurants/${restaurantId}/reverse-osmosis/source-draft`) {
+      const body = request.postDataJSON(); sourceRequests.push(body);
+      if (body.publishPlatforms.length) return json(route, { error: "Synthetic outbound source hold" }, 409);
+      const draft = { id: "44444444-4444-4444-8444-444444444444", restaurantId, status: "draft", revision: 1, intent: "Synthetic business-post source draft", createdAt: new Date().toISOString(), expiresAt: new Date(Date.now()+86400000).toISOString(), packet: { schemaVersion:"1.0", profile:{menuUrl:"https://menus.mealscout-fixture.net/current"}, reverseOsmosis:{ capture:{sourceUrl:"https://www.facebook.com/111111/posts/444444",capturedAt:Date.now()},outbound:[] } }, currentSnapshot:{profile:{menuUrl:null}}, socialDrafts:[], mediaManifest:[], normalizedPlan:[{section:"profile",operation:"update",changes:{menuUrl:"https://menus.mealscout-fixture.net/current"}}] };
+      sourceDrafts.unshift(draft); return json(route, {draft,holds:[]},201);
+    }
+    if (path === "/api/owner-ai/drafts/44444444-4444-4444-8444-444444444444") return json(route,sourceDrafts[0]);
     if (path === `/api/owner-ai/restaurants/${restaurantId}/drafts`) {
-      return json(route, { drafts: [] });
+      return json(route, { drafts: sourceDrafts });
     }
     if (path === `/api/owner-ai/restaurants/${restaurantId}/context`) {
       return json(route, {
@@ -208,7 +217,10 @@ try {
   const browserErrors: string[] = [];
   page.on("pageerror", (error) => browserErrors.push(error.message));
   page.on("console", (message) => {
-    if (message.type() === "error") browserErrors.push(message.text());
+    if (message.type() === "error") {
+      const expectedSourceHold = sourceRequests.length === 2 && message.location().url.endsWith(`/api/owner-ai/restaurants/${restaurantId}/reverse-osmosis/source-draft`) && message.text() === "Failed to load resource: the server responded with a status of 409 (Conflict)";
+      if (!expectedSourceHold) browserErrors.push(message.text());
+    }
   });
   await installMockApi(page);
 
@@ -239,6 +251,26 @@ try {
     path: resolve(outputDir, "mealscout-owner-ai-desktop.png"),
     fullPage: true,
   });
+
+  const sourceCard=page.getByTestId("owner-ai-reverse-osmosis-source");
+  const sourceButton=sourceCard.getByRole("button",{name:"Prepare business-post draft",exact:true});
+  assert.equal(await sourceButton.isDisabled(),true,"an explicit post is required");
+  const returnPost=sourceCard.getByRole("checkbox");assert.equal(await returnPost.isChecked(),false,"return publication defaults off");
+  await sourceCard.getByLabel("Facebook business post link").fill("https://www.facebook.com/111111/posts/444444");
+  await sourceButton.click();
+  await page.getByRole("heading",{name:"Business-post source evidence",exact:true}).waitFor();
+  assert.equal(sourceRequests.length,1);assert.deepEqual(sourceRequests[0].publishPlatforms,[]);
+  assert.equal(sourceRequests[0].postId,"https://www.facebook.com/111111/posts/444444");
+  await page.getByText("No return post was selected.",{exact:false}).waitFor();
+  const sourceLink=page.getByRole("link",{name:"this Facebook business post",exact:true});
+  assert.equal(await sourceLink.getAttribute("href"),"https://www.facebook.com/111111/posts/444444");
+  assert.equal(await sourceLink.getAttribute("rel"),"noopener noreferrer");
+  assert.equal((await page.getByTestId("owner-ai-reverse-osmosis-source").getByRole("checkbox").isChecked()),false);
+  await returnPost.check();await sourceButton.click();
+  await sourceCard.getByRole("status").getByText("The business post could not be verified.",{exact:false}).waitFor();
+  assert.equal(sourceRequests.length,2);assert.deepEqual(sourceRequests[1].publishPlatforms,["facebook"]);
+  await page.screenshot({path:resolve(outputDir,"reverse-osmosis-business-post-review.png"),fullPage:true});
+  console.log("PASS actual owner page business-post entry: explicit source, return-post opt-in off by default, native review evidence, scoped held response; mocked transport only");
 
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto(
@@ -292,7 +324,7 @@ try {
   assert.deepEqual(browserErrors, [], `Browser errors: ${browserErrors.join(" | ")}`);
   await context.close();
   console.log(
-    "mealscout-owner-ai-browser.smoke: PASS (desktop, mobile settings, OAuth ready, OAuth social gate)",
+    "mealscout-reverse-osmosis-owner-ui.browser: PASS (desktop, mobile settings, OAuth ready, OAuth social gate)",
   );
 } finally {
   await browser.close();
