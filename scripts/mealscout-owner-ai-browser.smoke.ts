@@ -86,6 +86,8 @@ async function installMockApi(page: Page) {
     const url = new URL(request.url());
     const path = url.pathname;
     if (path === "/api/auth/user") return json(route, user);
+    if (path === "/api/owner-ai/native-profiles") return json(route, []);
+    if (path === `/api/owner-ai/restaurants/${restaurantId}/source-reviews`) return json(route, { reviews: [] });
     if (path === "/api/restaurants/my-restaurants") {
       return json(route, [business]);
     }
@@ -215,7 +217,7 @@ try {
     { waitUntil: "networkidle" },
   );
   await page.getByRole("heading", {
-    name: "Run MealScout from the AI you already use",
+    name: "Reverse Osmosis",
   }).waitFor();
   await page.getByText("Complete the one-surface connection").waitFor();
   await page.getByText("Copy tool URL", { exact: true }).waitFor();
