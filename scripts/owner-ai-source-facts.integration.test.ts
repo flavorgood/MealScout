@@ -27,7 +27,7 @@ registerHooks({ load(url, context, nextLoad) {
   if (/\/server\/db\.ts(?:\?|$)/.test(url)) return { format: "module", source: "export const db = globalThis.__ownerAiFixtureDb; export const pool = undefined;", shortCircuit: true };
   if (/\/server\/utils\/pinnedPublicSourceCheck\.ts$/.test(url)) return { format: "module", source: `export { sourceCheckUrl } from "./pinnedPublicSourceCheck.ts?actual";
     export async function checkPinnedPublicSource(url, options={}) {
-      const html=globalThis.__sourceHtml;
+      const html=globalThis.__sourceHtmlByUrl?.[url] || globalThis.__sourceHtml;
       if (globalThis.__sourceUnavailable) return { sourceUrl:url, availability:"unavailable" };
       if (options.capture) options.capture({ sourceUrl:url, finalUrl:url, body:Buffer.from(html), contentType:"text/html", checkedAt:new Date().toISOString(), bodyHash:globalThis.__fixtureHash(html) });
       return { sourceUrl:url, availability:"reachable", bodyHash:globalThis.__fixtureHash(html) };
@@ -58,10 +58,15 @@ const approve=(d:any,p:any)=>call("approve_mealscout_draft",{draftId:d.id,expect
 try {
   const capture = (body: string) => ({sourceUrl:"https://official.example/",finalUrl:"https://official.example/",body:Buffer.from(body),contentType:"text/html",checkedAt:new Date().toISOString(),bodyHash:hash(body)});
   assert.equal(sources.extractOfficialSourceFacts(capture(html)).fields[0].value,"https://official.example/menu.pdf");
-  for (const body of ['<script><a href="/menu.pdf">Menu</a></script>','<div hidden><a href="/menu.pdf">Menu</a></div>','<div style="display: none"><a href="/menu.pdf">Menu</a></div>','<a href="/file.pdf">Download</a>','<a href="http://127.0.0.1/menu">Menu</a>']) assert.equal(sources.extractOfficialSourceFacts(capture(body)).fields.length,0,body);
+  for (const body of ['<script><a href="/menu.pdf">Menu</a></script>','<div hidden><a href="/menu.pdf">Menu</a></div>','<div style="display: none"><a href="/menu.pdf">Menu</a></div>','<a href="/file.pdf">Download</a>','<a href="http://127.0.0.1/menu">Menu</a>', '<style>.secret {display:none}</style><a class="secret" href="/menu">Menu</a>']) assert.equal(sources.extractOfficialSourceFacts(capture(body)).fields.length,0,body);
   const conflict=sources.extractOfficialSourceFacts(capture('<a href="/one">Menu</a><a href="/two">Menu</a>'));
   assert.equal(conflict.fields.length,0); assert.ok(conflict.holds.includes("CONFLICT:profile.menuUrl"));
   const redirected={...capture(html),finalUrl:"https://other.example/"};assert.equal(sources.extractOfficialSourceFacts(redirected).fields.length,0);
+  const square = {siteData:{page:{properties:{contentAreas:{userContent:{hidden:false,content:{type:"container",cells:[{type:"cell",content:{type:"block",purpose:"embed-pdf@^1.0.0",properties:{pdfSource:"/official-menu.pdf",text:{content:{quill:{ops:[{insert:"These menu items are subject to availability"}]}}}}}}]}}}}}}};
+  const squareCapture={...capture('<script>window.__BOOTSTRAP_STATE__ = '+JSON.stringify(square)+';</script>'),sourceUrl:"https://test.square.site/",finalUrl:"https://test.square.site/"};
+  assert.equal(sources.extractOfficialSourceFacts(squareCapture).fields[0].value,"https://test.square.site/official-menu.pdf");
+  square.siteData.page.properties.contentAreas.userContent.hidden=true;
+  assert.equal(sources.extractOfficialSourceFacts({...squareCapture,body:Buffer.from('<script>window.__BOOTSTRAP_STATE__ = '+JSON.stringify(square)+';</script>')}).fields.length,0);
   console.log("PASS semantic extraction, hidden/non-menu/private URL/redirect/conflict holds");
   const proposed=await proposal(); assert.equal(proposed.mutationPerformed,false);assert.equal((await database.select().from(schema.ownerAiActionDrafts)).length,0);
   assert.ok(proposed.holds.some((v:string)=>v.includes("EFFECTIVE_DATE")));assert.ok(proposed.holds.some((v:string)=>v.includes("DATED_ATTENDANCE")));
@@ -79,6 +84,17 @@ try {
   for(const type of ["restaurant","food_truck","bar","caterer","private_chef"]) {
     await database.update(schema.restaurants).set({businessType:type,updatedAt:new Date()}).where(eq(schema.restaurants.id,principal.restaurantId));const t=await draft();ok(await approve(t,await prepare(t)));
   }
+  await database.update(schema.restaurants).set({instagramUrl:"https://www.instagram.com/fixture"}).where(eq(schema.restaurants.id,principal.restaurantId));
+  const conflictPacket=(await proposal()).packet;
+  (globalThis as any).__sourceHtmlByUrl={"https://www.instagram.com/fixture":'<a href="https://official.example/conflicting-menu">Menu</a>'};
+  assert.equal((await proposal()).packet,null);
+  await assert.rejects(draft(conflictPacket));
+  (globalThis as any).__sourceHtmlByUrl={};
+  const cross=await draft(),crossP=await prepare(cross);
+  (globalThis as any).__sourceHtmlByUrl={"https://www.instagram.com/fixture":'<a href="https://official.example/conflicting-menu">Menu</a>'};
+  fails(await approve(cross,crossP),"SOURCE_FACT_CHANGED_OR_CONFLICTING");
+  (globalThis as any).__sourceHtmlByUrl={};
+  await database.update(schema.restaurants).set({instagramUrl:null}).where(eq(schema.restaurants.id,principal.restaurantId));
   const changed=await draft(), changedP=await prepare(changed);(globalThis as any).__sourceHtml='<a href="/different">Menu</a>';fails(await approve(changed,changedP),"SOURCE_FACT_CHANGED_OR_CONFLICTING");
   assert.equal((await database.select().from(schema.ownerAiActionDrafts).where(eq(schema.ownerAiActionDrafts.id,changed.id)))[0].status,"draft");
   (globalThis as any).__sourceHtml=html;
@@ -88,8 +104,8 @@ try {
   const mismatch=structuredClone(fresh.packet);mismatch.profile.menuUrl="https://fake.example/";await assert.rejects(draft(mismatch));
   const smuggled=structuredClone(fresh.packet);smuggled.profile.description="Unverified";await assert.rejects(draft(smuggled));
   const forged=structuredClone(fresh.packet);forged.sourceFacts.fields[0].sourceUrl="https://other.example/";await assert.rejects(draft(forged));
-  const hidden=await draft(), hiddenP=await prepare(hidden);await database.update(schema.users).set({publicProfileSettings:{showContact:false}}).where(eq(schema.users.id,principal.userId));fails(await approve(hidden,hiddenP),"SOURCE_FACT_OFFICIAL_SOURCE_REMOVED");await database.update(schema.users).set({publicProfileSettings:{}}).where(eq(schema.users.id,principal.userId));
-  const replaced=await draft(), replacedP=await prepare(replaced);await database.update(schema.restaurants).set({websiteUrl:"https://new.example/"}).where(eq(schema.restaurants.id,principal.restaurantId));fails(await approve(replaced,replacedP),"SOURCE_FACT_OFFICIAL_SOURCE_REMOVED");await database.update(schema.restaurants).set({websiteUrl:"https://official.example/"}).where(eq(schema.restaurants.id,principal.restaurantId));
+  const hidden=await draft(), hiddenP=await prepare(hidden);await database.update(schema.users).set({publicProfileSettings:{showContact:false}}).where(eq(schema.users.id,principal.userId));fails(await approve(hidden,hiddenP),"SOURCE_FACT_OFFICIAL_SOURCE_SET_CHANGED");await database.update(schema.users).set({publicProfileSettings:{}}).where(eq(schema.users.id,principal.userId));
+  const replaced=await draft(), replacedP=await prepare(replaced);await database.update(schema.restaurants).set({websiteUrl:"https://new.example/"}).where(eq(schema.restaurants.id,principal.restaurantId));fails(await approve(replaced,replacedP),"SOURCE_FACT_OFFICIAL_SOURCE_SET_CHANGED");await database.update(schema.restaurants).set({websiteUrl:"https://official.example/"}).where(eq(schema.restaurants.id,principal.restaurantId));
   const altered=await draft(), alteredP=await prepare(altered); const edited=structuredClone(altered.packet); edited.sourceFacts.fields[0].captureSha256="b".repeat(64);await database.update(schema.ownerAiActionDrafts).set({packet:edited}).where(eq(schema.ownerAiActionDrafts.id,altered.id));fails(await approve(altered,alteredP),"OWNER_CONSENT_HANDLE_STALE");
   fails(await call("get_mealscout_official_source_facts",{restaurantId:"other"}),"MCP_TOOL_ARGUMENTS_INVALID");fails(await call("get_mealscout_official_source_facts",{}, {...principal,scopes:[]}),"CONNECTOR_SCOPE_REQUIRED");
   await database.update(schema.apiKeys).set({revokedAt:new Date()}).where(eq(schema.apiKeys.id,principal.apiKeyId));fails(await call("get_mealscout_official_source_facts",{}),"PRINCIPAL_INACTIVE");

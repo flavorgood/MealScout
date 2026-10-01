@@ -13,12 +13,13 @@ export const ownerAiSourceFactSchema = z.object({
 }).strict();
 export const ownerAiSourceFactsSchema = z.object({
   version: z.literal(1),
+  officialSources: z.array(z.string().url().max(2000).refine(v => v.startsWith("https://"))).min(1).max(4),
   fields: z.array(ownerAiSourceFactSchema).min(1).max(50),
 }).strict();
 export type OwnerAiSourceFact = z.infer<typeof ownerAiSourceFactSchema>;
 export const OWNER_AI_SOURCE_FACTS_JSON_SCHEMA = {
-  type: "object", additionalProperties: false, required: ["version", "fields"],
-  properties: { version: { const: 1 }, fields: { type: "array", minItems: 1, maxItems: 50, items: {
+  type: "object", additionalProperties: false, required: ["version", "officialSources", "fields"],
+  properties: { version: { const: 1 }, officialSources: { type: "array", minItems: 1, maxItems: 4, uniqueItems: true, items: { type: "string", format: "uri", pattern: "^https://", maxLength: 2000 } }, fields: { type: "array", minItems: 1, maxItems: 50, items: {
     type: "object", additionalProperties: false,
     required: ["path", "value", "sourceUrl", "capturedAt", "expiresAt", "captureSha256", "access", "qualification"],
     properties: { path: { enum: ["profile.menuUrl", "profile.phone", "profile.instagramUrl", "profile.facebookPageUrl", "profile.xUrl"] },

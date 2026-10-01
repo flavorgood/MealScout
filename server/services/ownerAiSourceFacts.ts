@@ -13,10 +13,47 @@ export type OfficialSourceCapture = { sourceUrl: string; finalUrl: string; body:
 export function extractOfficialSourceFacts(capture: OfficialSourceCapture) {
   if (!capture.contentType.toLowerCase().includes("text/html") || new URL(capture.finalUrl).origin !== new URL(capture.sourceUrl).origin) return { fields: [] as OwnerAiSourceFact[], holds: ["UNSUPPORTED_OR_REDIRECTED_SOURCE"] };
   const $ = cheerio.load(capture.body.toString("utf8"));
-  $("script,style,template,noscript,[hidden],[aria-hidden=true]").remove();
+
   const candidates = new Map<string, Set<string>>();
   const add = (path: string, value: string) => { if (!candidates.has(path)) candidates.set(path, new Set()); candidates.get(path)!.add(value); };
+  // Square publishes its current page as JSON. Parse only the exact assignment;
+  // never execute scripts or read hidden defaults/store settings as public facts.
+  if (new URL(capture.sourceUrl).hostname.endsWith(".square.site")) {
+    $("script:not([src])").each((_i, element) => {
+      const text = ($(element).html() || "").trim();
+      const match = /^window\.__BOOTSTRAP_STATE__\s*=\s*([\s\S]+);$/.exec(text);
+      if (!match) return;
+      try {
+        const state = JSON.parse(match[1]);
+        const visible = state?.siteData?.page?.properties?.contentAreas?.userContent;
+        if (!visible || visible.hidden !== false) return;
+        const visit = (node: any, depth = 0) => {
+          if (!node || depth > 20 || node.hidden === true || node.properties?.hidden === true) return;
+          if (node.type === "block" && node.purpose === "embed-pdf@^1.0.0") {
+            const properties = node.properties;
+            const description = (properties?.text?.content?.quill?.ops || []).filter((op: any) => typeof op.insert === "string").map((op: any) => op.insert).join(" ");
+            if (/\bmenu\b/i.test(description) && typeof properties?.pdfSource === "string") {
+              const url = new URL(properties.pdfSource, capture.finalUrl);
+              const safe = sourceCheckUrl(url.toString());
+              if (safe && url.origin === new URL(capture.sourceUrl).origin && /\.pdf$/i.test(url.pathname)) add("profile.menuUrl", safe);
+            }
+          }
+          if (node.content) visit(node.content, depth + 1);
+          if (Array.isArray(node.cells)) node.cells.slice(0,500).forEach((cell: any) => visit(cell, depth + 1));
+        };
+        visit(visible.content);
+      } catch { /* Unsupported or malformed page data stays held. */ }
+    });
+  }
+  const hiddenSelectors: string[] = ["[hidden]", "[aria-hidden=true]", ".hidden", ".d-none", ".is-hidden", ".sr-only"];
+  $("style").each((_i, element) => {
+    const css = $(element).text().replace(/\/\*[\s\S]*?\*\//g, "");
+    for (const rule of css.matchAll(/([^{}]+)\{([^{}]*)\}/g)) if (/(?:display\s*:\s*none|visibility\s*:\s*hidden)/i.test(rule[2])) hiddenSelectors.push(...rule[1].split(",").map(v => v.trim()));
+  });
+  const hidden = (el: any) => hiddenSelectors.some(selector => { try { return $(el).closest(selector).length > 0; } catch { return true; } });
+  $("script,style,template,noscript").remove();
   $("a[href]").each((_i, el) => {
+    if (hidden(el)) return;
     if ($(el).closest('[style*="display:none"],[style*="display: none"],[style*="visibility:hidden"],[style*="visibility: hidden"]').length) return;
     const href = String($(el).attr("href") || "").trim();
     if (/^tel:[+\d ()-]+$/i.test(href)) { const phone = href.slice(4).replace(/[ ()-]/g, ""); if (/^\+?\d{7,15}$/.test(phone)) add("profile.phone", phone); return; }
@@ -57,6 +94,7 @@ export async function loadSourceFactAuthority(restaurantId: string, ownerId: str
 }
 export function assertSourceFactAuthority(packet: any, authority: { urls: string[]; blockedFields: string[] }, now = new Date()) {
   assertOwnerAiSourceFactBindings(packet, now);
+  if (JSON.stringify([...new Set(packet.sourceFacts.officialSources)].sort()) !== JSON.stringify([...authority.urls].sort())) throw new Error("SOURCE_FACT_OFFICIAL_SOURCE_SET_CHANGED");
   for (const fact of packet.sourceFacts?.fields || []) {
     if (!authority.urls.includes(fact.sourceUrl)) throw new Error("SOURCE_FACT_OFFICIAL_SOURCE_REMOVED");
     if (authority.blockedFields.includes(fact.path.split(".")[1])) throw new Error("SOURCE_FACT_FIELD_NOT_PUBLIC");
@@ -66,20 +104,25 @@ export async function verifyOwnerAiSourceFacts(packet: any, restaurantId: string
   if (!packet.sourceFacts) return;
   const authority = await loadSourceFactAuthority(restaurantId, ownerId, database);
   assertSourceFactAuthority(packet, authority);
-  const extracted = new Map<string, ReturnType<typeof extractOfficialSourceFacts>>();
+  const all: OwnerAiSourceFact[] = [], holds: string[] = [];
+  for (const sourceUrl of authority.urls) {
+    try { const result = extractOfficialSourceFacts(await capture(sourceUrl)); all.push(...result.fields); holds.push(...result.holds); }
+    catch { holds.push("SOURCE_UNAVAILABLE:" + sourceUrl); }
+  }
   for (const fact of packet.sourceFacts.fields) {
-    if (!extracted.has(fact.sourceUrl)) extracted.set(fact.sourceUrl, extractOfficialSourceFacts(await capture(fact.sourceUrl)));
-    // Compare semantic field values rather than dynamic HTML bytes. The original hash
-    // remains in the immutable consent packet as provenance of the first capture.
-    const current = extracted.get(fact.sourceUrl)!.fields.find(f => f.path === fact.path && f.value === fact.value);
-    if (!current) throw new Error("SOURCE_FACT_CHANGED_OR_CONFLICTING");
+    if (holds.includes("SOURCE_UNAVAILABLE:" + fact.sourceUrl)) throw new Error("SOURCE_FACT_UNAVAILABLE");
+    const candidates = all.filter(f => f.path === fact.path);
+    const current = candidates.find(f => f.sourceUrl === fact.sourceUrl && f.value === fact.value);
+    if (!current || candidates.some(f => f.value !== fact.value) || holds.includes("CONFLICT:" + fact.path)) throw new Error("SOURCE_FACT_CHANGED_OR_CONFLICTING");
     if (fact.path === "profile.menuUrl") {
       const linked = await checkPinnedPublicSource(fact.value);
       if (linked.availability !== "reachable") throw new Error("SOURCE_FACT_LINK_UNAVAILABLE");
     }
-    // Caller timestamps/hashes are declarations until replaced with this server capture.
     if (refreshCapture) Object.assign(fact, current);
   }
+  // Ownership, native publication policy and official URL binding may change
+  // during network reads. Approval repeats this check under transaction locks.
+  assertSourceFactAuthority(packet, await loadSourceFactAuthority(restaurantId, ownerId, database));
 }
 export async function proposeOwnerAiSourceFacts(restaurantId: string, ownerId: string) {
   const before = await loadSourceFactAuthority(restaurantId, ownerId);
@@ -89,6 +132,7 @@ export async function proposeOwnerAiSourceFacts(restaurantId: string, ownerId: s
     catch { holds.push("SOURCE_UNAVAILABLE:" + url); }
   }
   const after = await loadSourceFactAuthority(restaurantId, ownerId);
+  if (JSON.stringify([...before.urls].sort()) !== JSON.stringify([...after.urls].sort())) throw new Error("SOURCE_FACT_OFFICIAL_SOURCE_SET_CHANGED");
   const usable = fields.filter(f => after.urls.includes(f.sourceUrl) && !after.blockedFields.includes(f.path.split(".")[1]));
   const selected: OwnerAiSourceFact[] = [];
   for (const key of new Set(usable.map(f => f.path))) {
@@ -97,6 +141,6 @@ export async function proposeOwnerAiSourceFacts(restaurantId: string, ownerId: s
     selected.push(values[0]);
   }
   const profile = Object.fromEntries(selected.map(f => [f.path.split(".")[1], f.value]));
-  return { packet: selected.length ? { schemaVersion: "1.0", intent: "Review values explicitly supplied by official public sources", profile, sourceFacts: { version: 1, fields: selected } } : null,
+  return { packet: selected.length ? { schemaVersion: "1.0", intent: "Review values explicitly supplied by official public sources", profile, sourceFacts: { version: 1, officialSources: [...after.urls].sort(), fields: selected } } : null,
     holds: [...new Set(holds)], mutationPerformed: false, approvalRequired: true, canApply: false };
 }
