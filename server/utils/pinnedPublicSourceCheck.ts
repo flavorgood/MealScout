@@ -32,6 +32,7 @@ export function hasPublicSourceAccessBarrier(url: URL, boundedHtml: string): boo
 // The socket uses the validated address; TLS still authenticates the URL host.
 export async function checkPinnedPublicSource(startUrl: string, options: {
   timeoutMs?: number; resolve?: typeof resolvePublicHostname; request?: typeof https.request;
+  capture?: (value: { sourceUrl: string; finalUrl: string; body: Buffer; contentType: string; checkedAt: string; bodyHash: string }) => void;
 } = {}): Promise<SourceCheckReceipt> {
   const receipt: SourceCheckReceipt = { sourceUrl: sourceCheckUrl(startUrl) || "",
     checkedAt: new Date().toISOString(), httpStatus: null, bodyHash: null,
@@ -55,7 +56,7 @@ export async function checkPinnedPublicSource(startUrl: string, options: {
       if (!records.length || records.some(r => isBlockedIp(r.address))) throw new Error("blocked_address");
       if (controller.signal.aborted) throw new Error("timeout");
       const record = records[0];
-      const result = await Promise.race([new Promise<{ redirect?: string; hash?: string; bytes?: number; login?: boolean }>((resolve, reject) => {
+      const result = await Promise.race([new Promise<{ redirect?: string; hash?: string; bytes?: number; login?: boolean; body?: Buffer; contentType?: string }>((resolve, reject) => {
         const req = request({ hostname: record.address, family: record.family,
           port: 443, servername: url.hostname, rejectUnauthorized: true, agent: false,
           path: url.pathname, method: "GET", signal: controller.signal,
@@ -68,15 +69,16 @@ export async function checkPinnedPublicSource(startUrl: string, options: {
           }
           if (receipt.httpStatus < 200 || receipt.httpStatus >= 300) { res.destroy(); return reject(new Error("http_unavailable")); }
           if (Number(res.headers["content-length"] || 0) > SOURCE_CHECK_MAX_BYTES) { res.destroy(); return reject(new Error("size_limit")); }
-          const hash = createHash("sha256"); let bytes = 0; let snippet = "";
+          const hash = createHash("sha256"); let bytes = 0; let snippet = ""; const chunks: Buffer[] = [];
           res.on("data", (chunk: Buffer) => {
             bytes += chunk.length;
             if (bytes > SOURCE_CHECK_MAX_BYTES) { res.destroy(); reject(new Error("size_limit")); return; }
             hash.update(chunk);
+            if (options.capture) chunks.push(Buffer.from(chunk));
             if (snippet.length < 16384) snippet += chunk.toString("utf8").slice(0, 16384 - snippet.length);
           });
           res.on("end", () => resolve({ hash: hash.digest("hex"), bytes,
-            login: hasPublicSourceAccessBarrier(url, snippet) }));
+            login: hasPublicSourceAccessBarrier(url, snippet), body: options.capture ? Buffer.concat(chunks) : undefined, contentType: String(res.headers["content-type"] || "") }));
           res.on("error", reject);
           res.on("aborted", () => reject(new Error("incomplete_body")));
         });
@@ -86,6 +88,7 @@ export async function checkPinnedPublicSource(startUrl: string, options: {
       receipt.bodyHash = result.hash || null; receipt.byteCount = result.bytes || 0;
       receipt.availability = result.login ? "unavailable" : "reachable";
       receipt.reason = result.login ? "login_or_access_barrier" : "link_response_only_not_verified_facts";
+      if (receipt.availability === "reachable" && options.capture && result.body && receipt.bodyHash) options.capture({ sourceUrl: receipt.sourceUrl, finalUrl: safe, body: result.body, contentType: result.contentType || "", checkedAt: receipt.checkedAt, bodyHash: receipt.bodyHash });
       return receipt;
     }
   } catch (error) {
