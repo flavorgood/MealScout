@@ -325,7 +325,7 @@ async function publishFacebook(
     };
   }
   const providerPostId = data?.post_id || data?.id || null;
-  if (!providerPostId) {
+  if (typeof providerPostId !== "string" || providerPostId.trim().length === 0) {
     return {
       ok: false,
       manualRequired: true,

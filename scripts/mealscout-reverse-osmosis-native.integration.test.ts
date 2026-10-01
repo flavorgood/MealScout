@@ -47,6 +47,7 @@ let message = "Menu: https://menus.mealscout-fixture.net/current";
 let personal = false;
 let revoked = false;
 let uncertain = false;
+let providerAcknowledgementOverride: Record<string,unknown> | null = null;
 let postWrites = 0;
 let providerReads = 0;
 let lastPublished = "";
@@ -59,6 +60,7 @@ globalThis.fetch = async (input,init) => {
     assert.equal(url.pathname.split("/").at(-2),page,"only exact approved Page is published");
     postWrites++;
     if(uncertain) throw Error("synthetic provider lost response after request initiation");
+    if(providerAcknowledgementOverride !== null) return Response.json(providerAcknowledgementOverride);
     lastPublished=`${page}_${9000+postWrites}`;
     return Response.json({post_id:lastPublished});
   }
@@ -164,9 +166,37 @@ try {
   assert.equal(postWrites,2);
   console.log("PASS current authorized owner can read held historical receipts after source expiry or native privacy hide without gaining new effect authority");
 
+  const malformedAcknowledgements: Array<[string,Record<string,unknown>]> = [
+    ["missing-id",{}], ["numeric-post-id",{post_id:9001}], ["numeric-id",{id:9001}],
+    ["empty-id",{post_id:""}], ["blank-id",{post_id:" \n\t "}],
+    ["boolean-id",{post_id:true}], ["object-id",{post_id:{id:"111111_9001"}}], ["array-id",{post_id:["111111_9001"]}],
+  ];
+  for(const [name,response] of malformedAcknowledgements){
+    await resetLimits();const draft=await source(true);const before=postWrites;
+    providerAcknowledgementOverride=response;success(await approve(draft),200);providerAcknowledgementOverride=null;
+    const initial=await outcomes(draft);assert.equal(initial.status,200,JSON.stringify(initial.body));
+    assert.deepEqual(initial.body.outcomes.filter((o:any)=>o.operationKey===draft.packet.reverseOsmosis.outbound[0].operationKey).map((o:any)=>o.status),["held"],name+" durable held");
+    const queue=(await database.select().from(schema.socialPostQueue).where(eq(schema.socialPostQueue.ownerAiActionDraftId,draft.id)))[0];
+    assert.equal(queue.status,"manual_required",name+" queue held");assert.equal(queue.providerPostId,null,name+" no verified receipt");
+    assert.equal(postWrites,before+1,name+" one initial provider POST");
+    success(await approve(draft,draft.revision+1),200);assert.equal(postWrites,before+1,name+" replay never posts");
+    const reconciled=await request(`/api/owner-ai/drafts/${draft.id}/reverse-osmosis/reconcile`,{});
+    assert.equal(reconciled.status,200,JSON.stringify(reconciled.body));
+    assert.deepEqual(reconciled.body.outcomes.filter((o:any)=>o.operationKey===draft.packet.reverseOsmosis.outbound[0].operationKey).map((o:any)=>o.status),["held"],name+" reconciliation remains held");
+    assert.equal(postWrites,before+1,name+" reconciliation never posts");
+    console.log("PASS malformed acknowledgement "+name+": held/manual_required, one POST, no replay/reconcile POST");
+  }
+  await resetLimits();const validAfterHeld=await source(true);const validBefore=postWrites;success(await approve(validAfterHeld),200);
+  const validProof=await outcomes(validAfterHeld);assert.equal(validProof.status,200,JSON.stringify(validProof.body));
+  assert.ok(validProof.body.outcomes.every((o:any)=>o.status==="completed"),"valid string acknowledgement remains completed");
+  const validQueue=(await database.select().from(schema.socialPostQueue).where(eq(schema.socialPostQueue.ownerAiActionDraftId,validAfterHeld.id)))[0];
+  assert.equal(validQueue.status,"posted");assert.equal(typeof validQueue.providerPostId,"string");assert.equal(postWrites,validBefore+1);
+  success(await approve(validAfterHeld,validAfterHeld.revision+1),200);assert.equal(postWrites,validBefore+1);
+  console.log("PASS malformed receipt counterexamples retain native held/queue manual_required and valid string happy path/replay");
+  const beforeTransfer=postWrites;
   const transfer=await source();await database.update(schema.restaurants).set({ownerId:"synthetic-other-owner"}).where(eq(schema.restaurants.id,business));held(await approve(transfer));
   held(await outcomes(complete));held(await request(`/api/owner-ai/drafts/${complete.id}/reverse-osmosis`,undefined,"synthetic-other-owner"));
-  assert.equal(postWrites,2);
+  assert.equal(postWrites,beforeTransfer);
   console.log("PASS current owner transfer prevents native application and old/new-owner receipt disclosure; no customer/provider acceptance claimed");
   await assert.rejects(pg.exec("update reverse_osmosis_operations set status='absent'"),/check constraint/);
   await pg.exec(migration);
