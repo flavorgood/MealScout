@@ -353,8 +353,8 @@ function validateInsuranceGateReferences() {
   requireStaticSnippet(
     "server/routes/hostRoutes.ts",
     [
-      "truck.insuranceVerified === true",
-      "truck.insuranceExpiresAt",
+      "assessParkingPassTruckEligibility",
+      "currentEligibility.storedInsuranceValid",
       "Verify your email and submit business insurance to book Parking Pass spots.",
     ],
     "insurance booking eligibility gate",
