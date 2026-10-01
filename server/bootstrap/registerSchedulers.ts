@@ -11,6 +11,7 @@
 import type { Express } from "express";
 import cron from "node-cron";
 import { publicSourceCheckSchedule, runPublicProfileSourceChecks } from "../services/publicProfileSourceChecks";
+import { ownerAiSourceReviewSchedule, runOwnerAiSourceReviews } from "../services/ownerAiSourceReviews";
 import { DigestService } from "../digestService";
 import { DinerDigestService } from "../dinerDigestService";
 import { OnboardingDripService } from "../onboardingDripService";
@@ -69,6 +70,12 @@ function shouldRunMarketingEmailJobs(now = new Date()): boolean {
 // ---------------------------------------------------------------------------
 
 export async function registerSchedulers(app: Express): Promise<void> {
+  const sourceReviews = ownerAiSourceReviewSchedule();
+  console.info("[official-source-reviews] scheduled", sourceReviews);
+  cron.schedule(sourceReviews.expression, async () => {
+    try { const run = await runOwnerAiSourceReviews(); console.info("[official-source-reviews] completed", { day: run.day, profiles: run.results.length, proposals: run.results.filter(r => r.status === "proposal_ready").length, held: run.results.filter(r => r.status.startsWith("held")).length, publishes: false, createsOwnerDrafts: false }); }
+    catch { console.error("[official-source-reviews] failed; no owner approval or canonical changes"); }
+  }, { timezone: sourceReviews.timezone });
   const sourceChecks = publicSourceCheckSchedule();
   console.info("[public-source-checks] scheduled", sourceChecks);
   cron.schedule(sourceChecks.expression, async () => {

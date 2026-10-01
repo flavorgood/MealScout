@@ -137,14 +137,15 @@ export async function verifyOwnerAiSourceFacts(packet: any, restaurantId: string
   // during network reads. Approval repeats this check under transaction locks.
   assertSourceFactAuthority(packet, await loadSourceFactAuthority(restaurantId, ownerId, database));
 }
-export async function proposeOwnerAiSourceFacts(restaurantId: string, ownerId: string) {
-  const before = await loadSourceFactAuthority(restaurantId, ownerId);
+export async function proposeOwnerAiSourceFacts(restaurantId: string, ownerId: string, options: { database?: any; capture?: typeof captureOfficialSource } = {}) {
+  const database = options.database || db;
+  const before = await loadSourceFactAuthority(restaurantId, ownerId, database);
   const fields: OwnerAiSourceFact[] = [], sections: OwnerAiSourceSection[] = [], holds: string[] = [];
   for (const url of before.urls) {
-    try { const observation=await captureOfficialSource(url); const result=extractOfficialSourceFacts(observation), semantic=extractOfficialSemanticSections(observation); fields.push(...result.fields); sections.push(...semantic.sections); holds.push(...result.holds, ...semantic.holds); }
+    try { const observation=await (options.capture || captureOfficialSource)(url); const result=extractOfficialSourceFacts(observation), semantic=extractOfficialSemanticSections(observation); fields.push(...result.fields); sections.push(...semantic.sections); holds.push(...result.holds, ...semantic.holds); }
     catch { holds.push("SOURCE_UNAVAILABLE:" + url); }
   }
-  const after = await loadSourceFactAuthority(restaurantId, ownerId);
+  const after = await loadSourceFactAuthority(restaurantId, ownerId, database);
   if (JSON.stringify([...before.urls].sort()) !== JSON.stringify([...after.urls].sort())) throw new Error("SOURCE_FACT_OFFICIAL_SOURCE_SET_CHANGED");
   const usable = fields.filter(f => after.urls.includes(f.sourceUrl) && !after.blockedFields.includes(f.path.split(".")[1]));
   const selected: OwnerAiSourceFact[] = [];
@@ -162,5 +163,5 @@ export async function proposeOwnerAiSourceFacts(restaurantId: string, ownerId: s
   }
   const profile = Object.fromEntries(selected.map(f => [f.path.split(".")[1], f.value]));
   return { packet: selected.length || selectedSections.length ? { schemaVersion: "1.0", intent: "Review values explicitly supplied by official public sources", ...(selected.length ? {profile} : {}), ...Object.fromEntries(selectedSections.map(f=>[f.path,JSON.parse(f.value)])), sourceFacts: selectedSections.length ? { version: 2, officialSources: [...after.urls].sort(), fields: selected, sections:selectedSections } : { version: 1, officialSources: [...after.urls].sort(), fields: selected } } : null,
-    holds: [...new Set(holds)], mutationPerformed: false, approvalRequired: true, canApply: false };
+    holds: [...new Set(holds)].filter(hold => !(selectedSections.some(s => s.path === "menus") && hold === "MENU_CONTENT_PRICE_AND_EFFECTIVE_DATE_REQUIRE_SEPARATE_VERIFICATION") && !(selectedSections.some(s => s.path === "schedules") && hold === "DATED_ATTENDANCE_YEAR_TIMEZONE_AND_PUBLIC_ACCESS_REQUIRE_SEPARATE_VERIFICATION")), mutationPerformed: false, approvalRequired: true, canApply: false };
 }
