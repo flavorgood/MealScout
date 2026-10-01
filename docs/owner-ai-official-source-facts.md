@@ -1,0 +1,15 @@
+# Official public source facts in native owner drafts
+
+The authenticated MCP tool `get_mealscout_official_source_facts` reads current public source links for the exact native business attachment. It returns a proposed packet or explicit holds. It performs no canonical write and creates no draft.
+
+Supported extraction is deliberately bounded: explicit public menu links, telephone links, and social profile destinations. A Square published-page adapter parses the exact JSON bootstrap assignment, visits only visible current-page content, and accepts same-origin PDF blocks explicitly described as a menu. It does not execute scripts or use hidden template hours, contact defaults, store settings, filename dates, or guessed prices.
+
+`packet.sourceFacts` preserves the complete current official URL set and each exact field/value, source URL, server capture time, 24-hour expiry, SHA-256, public-access classification, and qualification. Native create/update verifies the facts and replaces caller capture declarations with actual server observations. The stored packet, normalized evidence plan, and exact consent fingerprint include this evidence.
+
+Approval re-fetches all current official sources, checks semantic values and conflicting facts, verifies menu-link reachability, and rejects unavailable cited sources or changed official URL sets. Dynamic HTML changes alone do not invalidate unchanged facts. The canonical transaction rechecks current owner, field visibility/quarantine, the full official URL set, expiry, expected native versions and unchanged draft content. OAuth/MCP approval also locks and rechecks the current credential after source fetching, including revocation, expiry and approval/context scopes.
+
+The owner still must review and explicitly approve the exact native revision. Existing owner-session and connector authorizations remain required; source declarations grant no access. All five existing restaurant-backed native food types use this flow. Location, host, supplier and event adapters remain separate unsupported work.
+
+Menu item contents, prices, stock/availability, dietary claims and effective dates are held for separate verification. Dated attendance, absolute year, timezone and public/private event facts are also held. This slice does not implement those extractors, schedule nightly canonical writes, create standing consent, or demonstrate a live customer write. Existing Central-midnight link checks and their historical unverified receipts are preserved.
+
+Validation: actual native PGlite draft/consent/writer proof and adversarial source/visibility/race checks; existing owner-AI and source-check regressions; typecheck/build results are recorded in the adjacent task evidence. Synthetic fixture owners prove only local behavior. Sweet Love's fresh official page supplies its explicit menu PDF destination; no authenticated customer draft exists from that observation alone.

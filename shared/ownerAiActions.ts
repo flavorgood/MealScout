@@ -1,5 +1,6 @@
 import { DateTime } from "luxon";
 import { z } from "zod";
+import { ownerAiSourceFactsSchema, OWNER_AI_SOURCE_FACTS_JSON_SCHEMA } from "./ownerAiSourceFacts";
 
 export const OWNER_AI_SCHEMA_VERSION = "1.0" as const;
 export const OWNER_AI_PLATFORMS = ["facebook", "instagram", "x"] as const;
@@ -298,6 +299,7 @@ export const ownerAiActionPacketSchema = z
       })
       .strict()
       .optional(),
+    sourceFacts: ownerAiSourceFactsSchema.optional(),
     profile: ownerAiProfileSchema.optional(),
     hours: ownerAiHoursSchema.optional(),
     menus: z.array(ownerAiMenuSchema).max(25).optional(),
@@ -723,6 +725,7 @@ export const OWNER_AI_PACKET_JSON_SCHEMA = {
         schemaVersion: { const: OWNER_AI_SCHEMA_VERSION, default: OWNER_AI_SCHEMA_VERSION },
         intent: { type: "string", minLength: 1, maxLength: 1000 },
         source: { $ref: "#/$defs/source" },
+        sourceFacts: OWNER_AI_SOURCE_FACTS_JSON_SCHEMA,
         mediaRights: { $ref: "#/$defs/mediaRights" },
         profile: { $ref: "#/$defs/profile" },
         hours: { $ref: "#/$defs/hours" },
