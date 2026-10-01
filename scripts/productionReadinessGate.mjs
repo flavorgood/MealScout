@@ -360,6 +360,11 @@ function validateInsuranceGateReferences() {
     "insurance booking eligibility gate",
   );
   requireStaticSnippet(
+    "server/services/parkingPassTruckEligibility.ts",
+    ["input.truck.insuranceVerified === true", "input.truck.insuranceExpiresAt", "Number.isFinite(expirationTime) && expirationTime > now.getTime()"],
+    "canonical insurance eligibility and expiry",
+  );
+  requireStaticSnippet(
     "scripts/admin-insurance-verification.contract.test.ts",
     [INSURANCE_MIGRATION, "Business verification must not bypass insurance expiry."],
     "insurance contract coverage",
