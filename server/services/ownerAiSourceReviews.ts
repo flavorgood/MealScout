@@ -1,3 +1,4 @@
+import { persistSourceReviewRunCoverage, sourceReviewFailureReason } from "./ownerAiSourceReviewCoverage";
 import { sourceReviewReason } from "./sourceReviewReason";
 import { createHash } from "node:crypto";
 import { and, asc, desc, eq, gt, sql } from "drizzle-orm";
@@ -35,10 +36,12 @@ function validReview(row: any, restaurantId: string, ownerId?: string) {
 // deduplicates concurrent schedulers/retries without changing canonical content.
 export async function runOwnerAiSourceReviews(options: { restaurantIds?: readonly string[]; now?: Date; database?: any; capture?: typeof captureOfficialSource } = {}) {
   const database = options.database || db, now = options.now || new Date(), day = sourceCheckDay(now);
-  const results: Array<{ restaurantId: string; status: string }> = [];
+  const startedAt = new Date().toISOString();
+  const results: Array<{ restaurantId: string; status: string; reason?: string }> = [];
   const run = async (restaurantId: string) => {
     const id = ownerAiSourceReviewId(restaurantId, day);
     try {
+      let reason: string | undefined;
       const status = await database.transaction(async (tx: any) => {
         const lock = await tx.execute(sql`select pg_try_advisory_xact_lock(hashtextextended(${id}, 0)) as acquired`);
         if (!(lock.rows || lock)[0]?.acquired) return "in_progress";
@@ -56,10 +59,11 @@ export async function runOwnerAiSourceReviews(options: { restaurantIds?: readonl
           sourceUrls: [...current.urls].sort(), proposal, createsOwnerDrafts: false, publishes: false };
         await tx.insert(telemetryEvents).values({ id, eventName: OWNER_AI_SOURCE_REVIEW_EVENT, userId: null, createdAt: now,
           properties: { ...observation, integritySha256: reviewHash(observation) } }).onConflictDoNothing();
+        if (!proposal.packet) reason = sourceReviewReason(proposal, current.urls);
         return proposal.packet ? "proposal_ready" : "held";
       }, { isolationLevel: "read committed" });
-      results.push({ restaurantId, status });
-    } catch { results.push({ restaurantId, status: "held_authority_or_capture_changed" }); }
+      results.push({ restaurantId, status, ...(reason ? { reason } : {}) });
+    } catch (error) { results.push({ restaurantId, status: "held_authority_or_capture_changed", reason: sourceReviewFailureReason(error) }); }
   };
   if (options.restaurantIds) {
     const ids = [...new Set(options.restaurantIds)];
@@ -76,7 +80,8 @@ export async function runOwnerAiSourceReviews(options: { restaurantIds?: readonl
       cursor = rows[rows.length - 1].id;
     }
   }
-  return { day, results, createsOwnerDrafts: false, publishes: false };
+  const coverage = await persistSourceReviewRunCoverage("food", day, results, startedAt, database);
+  return { day, results, coverage, createsOwnerDrafts: false, publishes: false };
 }
 
 export async function readOwnerAiSourceReviews(userId: string, restaurantId: string, database: any = db) {

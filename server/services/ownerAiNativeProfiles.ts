@@ -1,3 +1,5 @@
+import { persistSourceReviewRunCoverage, sourceReviewFailureReason } from "./ownerAiSourceReviewCoverage";
+import { sourceReviewReason } from "./sourceReviewReason";
 import { buildOwnerAiMediaManifest, validateAndPrepareRemoteImage } from "./ownerAiActions";
 import { fetchOwnerAiRemoteImagePreview } from "../imageUpload";
 import { createHash, randomUUID } from "node:crypto";
@@ -198,7 +200,8 @@ export async function approveNativeOwnerDraft(ownerId: string, draftId: string, 
   });
 }
 export async function runNativeOwnerSourceReviews(database: any = db) {
-  const day = sourceCheckDay(new Date()), results: Array<{ status: string }> = [];
+  const startedAt = new Date().toISOString();
+  const day = sourceCheckDay(new Date()), results: Array<{ status: string; reason?: string }> = [];
   for (const kind of ["host", "supplier"] as const) {
     const table = tableFor(kind); let cursor = "";
     for (;;) {
@@ -207,6 +210,7 @@ export async function runNativeOwnerSourceReviews(database: any = db) {
       for (const row of rows) {
         const id = "native-source-review-v1:" + sha({ kind, id: row.id, day });
         try {
+          let reason: string | undefined;
           const status = await database.transaction(async (tx: any) => {
             const lock = await tx.execute(sql`select pg_try_advisory_xact_lock(hashtextextended(${id}, 0)) as acquired`);
             if (!(lock.rows || lock)[0]?.acquired) return "in_progress";
@@ -218,15 +222,17 @@ export async function runNativeOwnerSourceReviews(database: any = db) {
             if (before.version !== after.version) return fail("STALE_NATIVE_CONTEXT");
             const observation = { version: 1, kind, targetId: row.id, ownerId: row.userId, day, checkedAt: new Date().toISOString(), sourceUrls: after.urls, proposal, createsOwnerDrafts: false, publishes: false };
             await tx.insert(telemetryEvents).values({ id, userId: null, eventName: NATIVE_SOURCE_REVIEW_EVENT, properties: { ...observation, integritySha256: sha(observation) } });
+            if (!proposal.packet) reason = sourceReviewReason(proposal, after.urls);
             return proposal.packet ? "proposal_ready" : "held";
           });
-          results.push({ status });
-        } catch { results.push({ status: "held_authority_or_capture_changed" }); }
+          results.push({ status, ...(reason ? { reason } : {}) });
+        } catch (error) { results.push({ status: "held_authority_or_capture_changed", reason: sourceReviewFailureReason(error) }); }
       }
       cursor = rows[rows.length - 1].id;
     }
   }
-  return { day, results, createsOwnerDrafts: false, publishes: false };
+  const coverage = await persistSourceReviewRunCoverage("native_content", day, results, startedAt, database);
+  return { day, results, coverage, createsOwnerDrafts: false, publishes: false };
 }
 
 export async function getNativeOwnerMediaPreview(ownerId: string, draftId: string, assetKey: string, database: any = db) {

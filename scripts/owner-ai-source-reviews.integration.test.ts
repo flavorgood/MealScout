@@ -75,7 +75,7 @@ try {
   const run=await reviews.runOwnerAiSourceReviews({database:diagnosticDatabase,capture});
   assert.equal(run.results.length,5);assert.ok(run.results.every(r=>r.status==="proposal_ready"));assert.equal(captureCalls,5);
   const repeat=await reviews.runOwnerAiSourceReviews({database,capture});assert.ok(repeat.results.every(r=>r.status==="already_reviewed"));assert.equal(captureCalls,5);
-  const receipts=await database.select().from(schema.telemetryEvents);
+  const receipts=await database.select().from(schema.telemetryEvents).where(eq(schema.telemetryEvents.eventName,reviews.OWNER_AI_SOURCE_REVIEW_EVENT));
   assert.equal(receipts.length,5);assert.ok(receipts.every((r:any)=>r.userId===null&&r.properties.createsOwnerDrafts===false&&r.properties.publishes===false));
   assert.equal((await database.select().from(schema.ownerAiActionDrafts)).length,0);assert.equal((await database.select().from(schema.menuItems)).length,0);assert.equal((await database.select().from(schema.truckManualSchedules)).length,0);
   assert.equal((await database.select().from(schema.restaurants).where(eq(schema.restaurants.id,ids[0])))[0].updatedAt?.toISOString(),"2026-01-01T00:00:00.000Z");
