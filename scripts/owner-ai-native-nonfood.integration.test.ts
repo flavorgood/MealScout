@@ -115,6 +115,15 @@ try {
   (globalThis as any).__nativeProfileHtml = '<a href="tel:+15555550199">Call</a><a href="https://instagram.com/realvenue">Instagram</a>';
   await database.update(schema.hosts).set({ spotCount: 9 }).where(eq(schema.hosts.id, hostId));
   await reject(service.approveNativeOwnerDraft(owner, draft.id, 1, draft.contentHash), "STALE_NATIVE_CONTEXT");
+  // Real Drizzle timestamp values are Dates. Preserve their ISO value in the
+  // fingerprint even when no other native field changes.
+  const dateContext = await service.getNativeOwnerContext(owner, "host", hostId);
+  const dateDraft = await service.createNativeOwnerDraft(owner, "host", hostId, { intent: "My current phone", profile: { phone: "+15555550199" } }, dateContext.version);
+  const dateRow = (await database.select().from(schema.hosts))[0];
+  await database.update(schema.hosts).set({ updatedAt: new Date(dateRow.updatedAt!.getTime() + 1000) }).where(eq(schema.hosts.id, hostId));
+  assert.notEqual((await service.getNativeOwnerContext(owner, "host", hostId)).version, dateContext.version);
+  await reject(service.approveNativeOwnerDraft(owner, dateDraft.id, 1, dateDraft.contentHash), "STALE_NATIVE_CONTEXT");
+  console.log("PASS actual Date-valued updatedAt-only native edit changes context version and holds exact-revision approval");
   const transfer = (await service.createNativeOfficialSourceDraft(owner, "host", hostId)).draft!;
   await database.update(schema.hosts).set({ userId: successor }).where(eq(schema.hosts.id, hostId));
   await reject(service.approveNativeOwnerDraft(owner, transfer.id, 1, transfer.contentHash), "CURRENT_NATIVE_OWNER_REQUIRED");

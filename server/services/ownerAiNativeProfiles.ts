@@ -50,7 +50,7 @@ async function authority(kind: NativeProfileKind, id: string, ownerId: string, d
   // Include the actual row, ownership and publication policy. A timestamp alone
   // cannot detect an out-of-band native edit or transfer.
   return { row, owner, snapshot, urls, blockedFields: visibility.showContact ? [] : contactFields,
-    version: sha({ kind, id, ownerId, row, visibility }) };
+    version: sha({ kind, id, ownerId, row: JSON.parse(JSON.stringify(row)), visibility }) };
 }
 function parsePacket(kind: NativeProfileKind, raw: unknown) {
   const packet = ownerAiActionPacketSchema.parse(raw);
