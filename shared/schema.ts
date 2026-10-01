@@ -1,4 +1,5 @@
 export * from "./schema/core";
+export * from "./schema/foodBusinessAppearances";
 export * from "./schema/users";
 export * from "./schema/restaurants";
 export * from "./schema/deals";

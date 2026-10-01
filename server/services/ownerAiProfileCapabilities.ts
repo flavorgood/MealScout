@@ -1,14 +1,14 @@
 import { OwnerAiCapabilityError, previewOwnerAiPacket, readOwnerAiCapabilities } from "@shared/ownerAiCapabilities";
-import { toCanonicalFoodBusinessType } from "@shared/businessTypes";
+import { resolveOwnerAiNativeAdapter } from "@shared/ownerAiNativeAdapters";
 import type { OwnerAiConnectorPrincipal } from "./ownerAiActions";
 import { deriveProfileEvidenceQuarantineVisibility } from "./profileEvidenceQuarantine";
 import { shouldExposeStaticTruckProfileLocation } from "../utils/truckLocationSemantics";
 
 type Credential = { id: string; userId: string; restaurantId: string | null; purpose: string; scope: string; isActive: boolean | null; expiresAt: Date | null; revokedAt: Date | null };
-type Binding = { credential: Credential | undefined; restaurant: { id: string; ownerId: string | null; businessType: string; publicSurface: boolean; blockedProfileFields: string[]; completeProfileAccess?: boolean } | undefined };
+type Binding = { credential: Credential | undefined; restaurant: { id: string; ownerId: string | null; businessType: string; isFoodTruck?: boolean | null; publicSurface: boolean; blockedProfileFields: string[]; completeProfileAccess?: boolean } | undefined };
 export type OwnerAiProfileDependencies = {
   readBinding(principal: OwnerAiConnectorPrincipal): Promise<Binding>;
-  readContext(restaurantId: string): Promise<{ restaurant: { id: string; businessType: string }; expectedVersions: unknown }>;
+  readContext(restaurantId: string): Promise<{ restaurant: { id: string; businessType: string; isFoodTruck?: boolean | null }; expectedVersions: unknown }>;
   now(): Date;
 };
 
@@ -28,13 +28,13 @@ export function createOwnerAiProfileCapabilities(deps: OwnerAiProfileDependencie
     if (!validBinding({ credential, restaurant }) || !credential || !restaurant) {
       throw new OwnerAiCapabilityError("CURRENT_OWNER_REQUIRED");
     }
-    if (context.restaurant.id !== restaurant.id || context.restaurant.businessType !== restaurant.businessType) throw new OwnerAiCapabilityError("STALE_CONTEXT");
-    const nativeType = toCanonicalFoodBusinessType(restaurant.businessType);
-    if (!nativeType) throw new OwnerAiCapabilityError("UNSUPPORTED_ADAPTER");
-    const target = { profileId: restaurant.id, profileType: nativeType === "food_truck" ? "truck" : nativeType };
+    if (context.restaurant.id !== restaurant.id || context.restaurant.businessType !== restaurant.businessType || context.restaurant.isFoodTruck !== restaurant.isFoodTruck) throw new OwnerAiCapabilityError("STALE_CONTEXT");
+    let native;
+    try { native = resolveOwnerAiNativeAdapter(restaurant); } catch { throw new OwnerAiCapabilityError("UNSUPPORTED_ADAPTER"); }
+    const target = { profileId: restaurant.id, profileType: native.profileType };
     return {
       target, now, blockedProfileFields: restaurant.blockedProfileFields,
-      authority: { target, completeProfileAccess: restaurant.completeProfileAccess === true, currentOwnerId: restaurant.ownerId, adapter: "restaurant_native", backingRestaurantId: restaurant.id, currentVersions: context.expectedVersions,
+      authority: { target, completeProfileAccess: restaurant.completeProfileAccess === true, currentOwnerId: restaurant.ownerId, adapter: native.adapter, backingRestaurantId: restaurant.id, currentVersions: context.expectedVersions,
         // This labels the native public profile publication surface, not private inventory or externally supplied evidence.
         provenance: { source: "MealScout native publication visibility policy", observedAt: now, access: restaurant.publicSurface ? "public" : "private", expiresAt: nowPlusMinute(now) } },
       principal: { apiKeyId: credential.id, userId: credential.userId, target, scopes: credential.scope.split(/[\s,]+/).filter(Boolean), isActive: credential.isActive === true, expiresAt: credential.expiresAt?.toISOString() ?? null, revokedAt: credential.revokedAt?.toISOString() ?? null },

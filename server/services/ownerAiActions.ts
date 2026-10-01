@@ -1,5 +1,7 @@
 import { PROFILE_ACCESS_POLICY } from "@shared/profileAccessPolicy";
 import { toCanonicalFoodBusinessType } from "@shared/businessTypes";
+import { resolveOwnerAiNativeAdapter } from "@shared/ownerAiNativeAdapters";
+import { nativeOwnerAiScheduleStorage } from "./ownerAiNativeAdapters";
 import { DateTime } from "luxon";
 import bcrypt from "bcryptjs";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
@@ -345,7 +347,7 @@ export async function computeOwnerAiExpectedVersions(
   options: { forUpdate?: boolean } = {},
 ): Promise<OwnerAiExpectedVersions> {
   const [restaurant] = await database
-    .select({ id: restaurants.id, updatedAt: restaurants.updatedAt })
+    .select({ id: restaurants.id, ownerId: restaurants.ownerId, businessType: restaurants.businessType, isFoodTruck: restaurants.isFoodTruck, updatedAt: restaurants.updatedAt })
     .from(restaurants)
     .where(eq(restaurants.id, restaurantId))
     .limit(1);
@@ -365,10 +367,9 @@ export async function computeOwnerAiExpectedVersions(
     .select({ id: menuItems.id, updatedAt: menuItems.updatedAt, isAvailable: menuItems.isAvailable })
     .from(menuItems)
     .where(eq(menuItems.restaurantId, restaurantId)));
+  const scheduleStorage = nativeOwnerAiScheduleStorage(restaurant);
   const scheduleRows = await maybeLock(database
-    .select({ id: truckManualSchedules.id, updatedAt: truckManualSchedules.updatedAt, status: truckManualSchedules.status })
-    .from(truckManualSchedules)
-    .where(eq(truckManualSchedules.truckId, restaurantId)));
+    .select().from(scheduleStorage.table).where(scheduleStorage.predicate));
   const dealRows = await maybeLock(database
     .select({ id: deals.id, updatedAt: deals.updatedAt, isActive: deals.isActive })
     .from(deals)
@@ -379,7 +380,7 @@ export async function computeOwnerAiExpectedVersions(
       .map((row) => ({ ...row, updatedAt: dateVersion(row.updatedAt) }))
       .sort((a, b) => String(a.id).localeCompare(String(b.id)));
   return {
-    restaurant: stableHash({ id: restaurant.id, updatedAt: dateVersion(restaurant.updatedAt) }),
+    restaurant: stableHash({ id: restaurant.id, ownerId: restaurant.ownerId, nativeAdapter: resolveOwnerAiNativeAdapter(restaurant), updatedAt: dateVersion(restaurant.updatedAt) }),
     menus: stableHash([...normalizeRows(menuRows), ...normalizeRows(categoryRows), ...normalizeRows(itemRows)]),
     schedules: stableHash(normalizeRows(scheduleRows)),
     deals: stableHash(normalizeRows(dealRows)),
@@ -397,6 +398,8 @@ async function buildOwnerAiCurrentSnapshot(
   packet: OwnerAiActionPacket,
   database: any = db,
 ) {
+  const [nativeRestaurant] = await database.select().from(restaurants).where(eq(restaurants.id, restaurantId)).limit(1);
+  const nativeSchedules = nativeOwnerAiScheduleStorage(nativeRestaurant);
   const [restaurantRows, allMenus, allCategories, allItems, allSchedules, allDeals] =
     await Promise.all([
       database
@@ -432,8 +435,8 @@ async function buildOwnerAiCurrentSnapshot(
         .where(eq(menuItems.restaurantId, restaurantId)),
       database
         .select()
-        .from(truckManualSchedules)
-        .where(eq(truckManualSchedules.truckId, restaurantId)),
+        .from(nativeSchedules.table)
+        .where(nativeSchedules.predicate),
       database.select().from(deals).where(eq(deals.restaurantId, restaurantId)),
     ]);
   const restaurant = restaurantRows[0] || null;
@@ -450,6 +453,7 @@ async function buildOwnerAiCurrentSnapshot(
     dateVersion(value)?.slice(0, 10) || null;
 
   return {
+    nativeAdapter: nativeSchedules.binding,
     settings: settingsReview(settings, packet),
     profile: packet.profile ? profileCurrent : null,
     hours: packet.hours ? restaurant?.operatingHours || null : null,
@@ -544,6 +548,8 @@ async function getOwnerAiContextSnapshot(
       id: restaurants.id,
       name: restaurants.name,
       businessType: restaurants.businessType,
+      ownerId: restaurants.ownerId,
+      isFoodTruck: restaurants.isFoodTruck,
       address: restaurants.address,
       city: restaurants.city,
       state: restaurants.state,
@@ -597,30 +603,31 @@ async function getOwnerAiContextSnapshot(
     : [];
   const itemHasMore = itemPageRows.length > menuItemPageSize;
   const itemRows = itemPageRows.slice(0, menuItemPageSize);
+  const nativeSchedules = nativeOwnerAiScheduleStorage(restaurant);
   const currentScheduleRows = await database
     .select()
-    .from(truckManualSchedules)
+    .from(nativeSchedules.table)
     .where(
       and(
-        eq(truckManualSchedules.truckId, restaurantId),
-        gte(truckManualSchedules.date, todayUtc),
+        nativeSchedules.predicate,
+        gte(nativeSchedules.table.date, todayUtc),
       ),
     )
-    .orderBy(asc(truckManualSchedules.date))
+    .orderBy(asc(nativeSchedules.table.date))
     .limit(currentPageSize + 1)
     .offset(scheduleOffset);
   const scheduleHistoryRows =
     scheduleOffset === 0
       ? await database
           .select()
-          .from(truckManualSchedules)
+          .from(nativeSchedules.table)
           .where(
             and(
-              eq(truckManualSchedules.truckId, restaurantId),
-              lt(truckManualSchedules.date, todayUtc),
+              nativeSchedules.predicate,
+              lt(nativeSchedules.table.date, todayUtc),
             ),
           )
-          .orderBy(desc(truckManualSchedules.date))
+          .orderBy(desc(nativeSchedules.table.date))
           .limit(historyLimit)
       : [];
   const activeDealRows = await database
@@ -693,6 +700,7 @@ async function getOwnerAiContextSnapshot(
         .map((category: any) => ({ ...category, items: itemRows.filter((item: any) => item.categoryId === category.id) })),
       uncategorizedItems: itemRows.filter((item: any) => item.menuId === menu.id && !item.categoryId),
     })),
+    nativeAdapter: nativeSchedules.binding,
     schedules: scheduleRows,
     deals: dealRows,
     contextBounds: {
@@ -987,7 +995,7 @@ export async function createOwnerAiDraft(input: {
     }),
     { isolationLevel: "repeatable read", accessMode: "read only" },
   );
-  const normalizedPlan = normalizeOwnerAiPlan(packet).map(step => step.section === "settings" ? { ...step, review: (currentSnapshot as any).settings } : step);
+  const normalizedPlan = normalizeOwnerAiPlan(packet).map(step => ({ ...step, nativeAdapter: (currentSnapshot as any).nativeAdapter, ...(step.section === "settings" ? { review: (currentSnapshot as any).settings } : {}) }));
   const socialDrafts = buildOwnerAiSocialDrafts({ draftId: id, restaurantId: input.restaurantId, restaurantName: packet.profile?.name || restaurant.name, packet });
   const mediaManifest = await buildOwnerAiMediaManifest(id, packet);
   const inserted = await db.transaction(async (tx: any) => {
@@ -1410,7 +1418,7 @@ export async function updateOwnerAiDraft(input: { userId: string; draftId: strin
   const mediaManifest = await buildOwnerAiMediaManifest(existing.id, packet);
   const [updated] = await db.update(ownerAiActionDrafts).set({
     packet,
-    normalizedPlan: normalizeOwnerAiPlan(packet).map(step => step.section === "settings" ? { ...step, review: (currentSnapshot as any).settings } : step),
+    normalizedPlan: normalizeOwnerAiPlan(packet).map(step => ({ ...step, nativeAdapter: (currentSnapshot as any).nativeAdapter, ...(step.section === "settings" ? { review: (currentSnapshot as any).settings } : {}) })),
     currentSnapshot,
     socialDrafts: buildOwnerAiSocialDrafts({ draftId: existing.id, restaurantId: existing.restaurantId, restaurantName: packet.profile?.name || restaurant.name, packet }),
     mediaManifest,
@@ -1632,6 +1640,7 @@ export const mergeOwnerAiProfileActionLinks = (
 };
 
 export async function applyCanonicalPacket(tx: any, restaurant: any, packet: OwnerAiActionPacket, now: Date) {
+  const nativeSchedules = nativeOwnerAiScheduleStorage(restaurant);
   if (packet.sourceFacts) {
     try { assertSourceFactAuthority(packet, await loadSourceFactAuthority(restaurant.id, restaurant.ownerId, tx, true), now); }
     catch (error) { throw new OwnerAiActionError(409, "SOURCE_FACT_HOLD", String((error as Error).message)); }
@@ -1740,7 +1749,7 @@ export async function applyCanonicalPacket(tx: any, restaurant: any, packet: Own
     if (sourceSchedules) {
       const interval=buildSlotDateTimes({date:stop.date,timeZone:stop.timezone!,startTime:stop.startTime!,endTime:stop.endTime!});
       if (!interval) throw new OwnerAiActionError(409,"SOURCE_FACT_NATIVE_INTERVAL_REQUIRED","Source event interval cannot be represented exactly");
-      const closures = await tx.select().from(truckManualSchedules).where(and(eq(truckManualSchedules.truckId,restaurant.id),eq(truckManualSchedules.status,"closed"),eq(truckManualSchedules.isPublic,true)));
+      const closures = await tx.select().from(nativeSchedules.table).where(and(nativeSchedules.predicate,eq(nativeSchedules.table.status,"closed"),eq(nativeSchedules.table.isPublic,true)));
       for (const closure of closures) {
         if (closure.expiresAt && new Date(closure.expiresAt).getTime() <= now.getTime()) continue;
         const dateKey=new Date(closure.date).toISOString().slice(0,10);
@@ -1750,7 +1759,7 @@ export async function applyCanonicalPacket(tx: any, restaurant: any, packet: Own
       }
     }
     let existing: any = null;
-    if (stop.id) [existing] = await tx.select().from(truckManualSchedules).where(and(eq(truckManualSchedules.id, stop.id), eq(truckManualSchedules.truckId, restaurant.id))).limit(1);
+    if (stop.id) [existing] = await tx.select().from(nativeSchedules.table).where(and(eq(nativeSchedules.table.id, stop.id), nativeSchedules.predicate)).limit(1);
     if (stop.id && !existing) throw new OwnerAiActionError(409, "schedule_not_found", "The requested schedule does not belong to this restaurant or no longer exists");
     const closed = stop.status === "closed";
     if (closed && stop.operation === "upsert") {
@@ -1763,25 +1772,39 @@ export async function applyCanonicalPacket(tx: any, restaurant: any, packet: Own
     }
     const locationName = closed ? "Closed" : stop.locationName || stop.eventName || "Scheduled stop";
     const date = new Date(`${stop.date}T00:00:00.000Z`);
-    if (!existing) [existing] = await tx.select().from(truckManualSchedules).where(and(eq(truckManualSchedules.truckId, restaurant.id), eq(truckManualSchedules.date, date), eq(truckManualSchedules.locationName, locationName))).limit(1);
+    if (!existing) [existing] = await tx.select().from(nativeSchedules.table).where(and(nativeSchedules.predicate, eq(nativeSchedules.table.date, date), eq(nativeSchedules.table.locationName, locationName))).limit(1);
     if (sourceSchedules && existing && existing.isPublic !== true) throw new OwnerAiActionError(409,"SOURCE_FACT_PRIVATE_SCHEDULE_CONFLICT","Public source updates cannot repurpose an existing private schedule");
     if (stop.operation === "archive") {
       if (existing) {
-        await tx.update(truckManualSchedules).set({ status: "cancelled", isPublic: false, mapEligible: false, liveFeedEligible: false, updatedAt: now }).where(eq(truckManualSchedules.id, existing.id));
+        await tx.update(nativeSchedules.table).set({ status: "cancelled", isPublic: false, ...(nativeSchedules.binding.profileType === "truck" ? { mapEligible: false, liveFeedEligible: false } : {}), updatedAt: now }).where(eq(nativeSchedules.table.id, existing.id));
         counts.schedulesArchived += 1;
       }
       continue;
     }
     const city = stop.city || restaurant.city || null;
     const state = stop.state || restaurant.state || null;
-    const values = { truckId: restaurant.id, date, startTime: stop.startTime ?? null, endTime: stop.endTime ?? null, locationName, address: stop.address ?? null, city, state, notes: [stop.eventName && stop.kind === "event_stop" ? `Event: ${stop.eventName}` : null, stop.notes].filter(Boolean).join("\n") || null, isPublic: stop.isPublic, status: stop.status, scheduleType: stop.kind, timezone: closed ? stop.timezone! : stop.timezone || resolveCityTimeZoneSync({ city: city || "", state: state || "" }), sourceType: "owner_ai_approved", sourceArtifact: stop.sourceUrl || null, sourceConfidence: "confirmed", ownerSubmittedEquivalent: true, recurring: false, expiresAt: stop.expiresAt ? new Date(stop.expiresAt) : null, mapEligible: stop.isPublic && !closed, liveFeedEligible: stop.isPublic, lastConfirmedAt: now, updatedAt: now };
-    if (existing) await tx.update(truckManualSchedules).set(values).where(eq(truckManualSchedules.id, existing.id));
-    else await tx.insert(truckManualSchedules).values(values);
+    const values = { [nativeSchedules.idKey]: restaurant.id, date, startTime: stop.startTime ?? null, endTime: stop.endTime ?? null, locationName, address: stop.address ?? null, city, state, notes: [stop.eventName && stop.kind === "event_stop" ? `Event: ${stop.eventName}` : null, stop.notes].filter(Boolean).join("\n") || null, isPublic: stop.isPublic, status: stop.status, scheduleType: stop.kind, timezone: closed ? stop.timezone! : stop.timezone || resolveCityTimeZoneSync({ city: city || "", state: state || "" }), sourceType: "owner_ai_approved", sourceArtifact: stop.sourceUrl || null, sourceConfidence: "confirmed", ownerSubmittedEquivalent: true, recurring: false, expiresAt: stop.expiresAt ? new Date(stop.expiresAt) : null, mapEligible: stop.isPublic && !closed, liveFeedEligible: stop.isPublic, lastConfirmedAt: now, updatedAt: now };
+    if (nativeSchedules.binding.profileType !== "truck") {
+      Object.assign(values, { ownerId: restaurant.ownerId, profileType: nativeSchedules.binding.profileType, sourceEvidence: packet.sourceFacts?.version === 2 ? { section: packet.sourceFacts.sections.find(section => section.path === "schedules"), officialSources: packet.sourceFacts.officialSources } : null });
+      for (const key of ["sourceConfidence", "ownerSubmittedEquivalent", "recurring", "mapEligible", "liveFeedEligible"]) delete (values as any)[key];
+    }
+    if (existing) await tx.update(nativeSchedules.table).set(values).where(eq(nativeSchedules.table.id, existing.id));
+    else await tx.insert(nativeSchedules.table).values(values);
     counts.schedulesUpserted += 1;
   }
 
   // Check the final reviewed schedule state, allowing explicit archives in either packet order.
-  for (const closure of (packet.schedules || []).filter((stop) => stop.status === "closed" && stop.operation === "upsert")) {
+  if (nativeSchedules.binding.profileType !== "truck") for (const closure of (packet.schedules || []).filter(stop => stop.status === "closed" && stop.operation === "upsert" && stop.isPublic)) {
+    const localDay = DateTime.fromISO(closure.date, {zone: closure.timezone || "invalid"}).startOf("day");
+    const rows = await tx.select().from(nativeSchedules.table).where(nativeSchedules.predicate);
+    for (const row of rows) {
+      if (row.isPublic !== true || row.status !== "confirmed" || (row.expiresAt && new Date(row.expiresAt) <= now)) continue;
+      const interval = buildSlotDateTimes({date: new Date(row.date).toISOString().slice(0,10), timeZone: row.timezone || "invalid", startTime: row.startTime, endTime: row.endTime});
+      if (!interval || !localDay.isValid || (interval.startUtc.getTime() < localDay.plus({days:1}).toMillis() && interval.endUtc.getTime() > localDay.toMillis())) throw new OwnerAiActionError(409, "public_appearance_closure_conflict", "A confirmed public appearance overlaps this dated closure; reconcile it in a separate exact owner revision");
+    }
+  }
+
+  for (const closure of (nativeSchedules.binding.profileType === "truck" ? packet.schedules || [] : []).filter((stop) => stop.status === "closed" && stop.operation === "upsert")) {
     const dayStart = DateTime.fromISO(closure.date, { zone: closure.timezone! }).startOf("day");
     const dayEnd = dayStart.plus({ days: 1 });
     // Inventory proof is scoped to the closure day, never to the public feed's

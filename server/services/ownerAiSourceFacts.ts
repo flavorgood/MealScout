@@ -2,7 +2,7 @@ import * as cheerio from "cheerio";
 import { and, eq } from "drizzle-orm";
 import { db } from "../db";
 import { restaurants, users } from "@shared/schema";
-import { toCanonicalFoodBusinessType } from "@shared/businessTypes";
+import { resolveStoredFoodBusinessType } from "@shared/businessTypes";
 import { assertOwnerAiSourceFactBindings, canonicalSourceSection, OWNER_AI_SOURCE_FACT_TTL_MS, type OwnerAiSourceFact, type OwnerAiSourceSection } from "@shared/ownerAiSourceFacts";
 import { checkPinnedPublicSource, sourceCheckUrl } from "../utils/pinnedPublicSourceCheck";
 import { projectPublicSourceUrls } from "./publicProfileSourceChecks";
@@ -88,7 +88,7 @@ export async function loadSourceFactAuthority(restaurantId: string, ownerId: str
   const [restaurant] = await query;
   let oq = database.select().from(users).where(eq(users.id, ownerId)).limit(1); if (lock) oq = oq.for("share");
   const [owner] = await oq;
-  if (!restaurant || owner?.isDisabled !== false || !toCanonicalFoodBusinessType(restaurant.businessType)) throw new Error("SOURCE_FACT_OWNER_OR_ADAPTER_INVALID");
+  if (!restaurant || owner?.isDisabled !== false || !resolveStoredFoodBusinessType(restaurant)) throw new Error("SOURCE_FACT_OWNER_OR_ADAPTER_INVALID");
   const visibility = (await loadPublicRestaurantListingVisibility([restaurant], database)).get(ownerId);
   const policy = deriveOwnerAiPublicationPolicy(restaurant, visibility);
   if (!policy.publicSurface) throw new Error("SOURCE_FACT_PUBLIC_ACCESS_REQUIRED");

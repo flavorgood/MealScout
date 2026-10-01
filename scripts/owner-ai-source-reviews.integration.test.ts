@@ -18,7 +18,7 @@ process.env.OWNER_AI_OAUTH_SECRET = "disposable-local-consent-fixture-0000000000
 let networkCalls = 0;
 globalThis.fetch = async () => { networkCalls++; throw new Error("Settings-only fixture forbids network"); };
 const engine = new PGlite();
-const tables = [schema.users, schema.restaurants, schema.apiKeys, schema.ownerAiActionDrafts, schema.menus, schema.menuCategories, schema.menuItems, schema.truckManualSchedules, schema.deals, schema.socialPostQueue, schema.socialPublishingConnections, schema.telemetryEvents];
+const tables = [schema.users, schema.restaurants, schema.apiKeys, schema.ownerAiActionDrafts, schema.menus, schema.menuCategories, schema.menuItems, schema.truckManualSchedules, schema.foodBusinessAppearances, schema.deals, schema.socialPostQueue, schema.socialPublishingConnections, schema.telemetryEvents];
 for (const table of tables) {
   const columns = Object.values(getTableColumns(table));
   await engine.exec(`create table "${getTableName(table)}" (${columns.map(c => `"${c.name}" ${/^(varchar|text|boolean|timestamp|integer|numeric|json|serial|double|real|bigint)/.test(c.getSQLType()) ? c.getSQLType() : "text"} ${c.name === "id" ? "primary key default gen_random_uuid()" : ""}`).join(",")})`);

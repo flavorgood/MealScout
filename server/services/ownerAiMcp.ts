@@ -428,6 +428,7 @@ const approvalPrompt = (draft: any) => {
   return [
     `Approve MealScout draft revision ${draft.revision}?`,
     `Intent: ${String(draft.packet?.intent || "Business update")}`,
+    ...(draft.currentSnapshot?.nativeAdapter ? [`Native profile and application adapter: ${JSON.stringify(draft.currentSnapshot.nativeAdapter)}`] : []),
     ...(draft.packet?.sourceFacts ? [`Official source field evidence: ${JSON.stringify(draft.packet.sourceFacts)}`, "Source values will be checked again before application. A menu link alone does not verify contents, stock or dated attendance. Source section updates preserve omitted owner metadata and existing items; native classification conflicts stay held."] : []),
     ...(draft.currentSnapshot?.settings ? [
       `Effective social preferences: ${JSON.stringify(draft.currentSnapshot.settings.effectiveSocialPosting)}`,

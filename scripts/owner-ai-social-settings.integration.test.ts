@@ -15,7 +15,7 @@ process.env.OWNER_AI_OAUTH_SECRET = "disposable-local-consent-fixture-0000000000
 let networkCalls = 0;
 globalThis.fetch = async () => { networkCalls++; throw new Error("Settings-only fixture forbids network"); };
 const engine = new PGlite();
-const tables = [schema.users, schema.restaurants, schema.apiKeys, schema.ownerAiActionDrafts, schema.menus, schema.menuCategories, schema.menuItems, schema.truckManualSchedules, schema.deals, schema.socialPostQueue, schema.socialPublishingConnections, schema.telemetryEvents];
+const tables = [schema.users, schema.restaurants, schema.apiKeys, schema.ownerAiActionDrafts, schema.menus, schema.menuCategories, schema.menuItems, schema.truckManualSchedules, schema.foodBusinessAppearances, schema.deals, schema.socialPostQueue, schema.socialPublishingConnections, schema.telemetryEvents];
 for (const table of tables) {
   const columns = Object.values(getTableColumns(table));
   await engine.exec(`create table "${getTableName(table)}" (${columns.map(c => `"${c.name}" ${/^(varchar|text|boolean|timestamp|integer|numeric|json|serial|double|real|bigint)/.test(c.getSQLType()) ? c.getSQLType() : "text"} ${c.name === "id" ? "primary key default gen_random_uuid()" : ""}`).join(",")})`);
@@ -105,7 +105,7 @@ try {
   const current = await actions.getOwnerAiContext(principal.restaurantId);
   const target = { profileType: "truck", profileId: principal.restaurantId };
   const now = new Date().toISOString();
-  const authority = { target, currentOwnerId: principal.userId, adapter: "restaurant_native", backingRestaurantId: principal.restaurantId, currentVersions: current.expectedVersions, completeProfileAccess: true, provenance: { source: "native", access: "private", observedAt: now, expiresAt: null } };
+  const authority = { target, currentOwnerId: principal.userId, adapter: "truck_native", backingRestaurantId: principal.restaurantId, currentVersions: current.expectedVersions, completeProfileAccess: true, provenance: { source: "native", access: "private", observedAt: now, expiresAt: null } };
   const capPrincipal = { apiKeyId: principal.apiKeyId, userId: principal.userId, scopes: principal.scopes, target, isActive: true, revokedAt: null, expiresAt: null };
   const input = { target, authority, principal: capPrincipal, now };
   const cap = readOwnerAiCapabilities(input);

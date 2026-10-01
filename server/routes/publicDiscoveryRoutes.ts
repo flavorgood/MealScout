@@ -607,11 +607,12 @@ const classifyPublicEventType = (eventTypeRaw: unknown, titleRaw: unknown) => {
   return "other" as const;
 };
 
-const buildPublicEventsPayload = async (input: {
+export const buildPublicEventsPayload = async (input: {
   restaurantId?: string;
   hostId?: string;
   restaurantRow?: any;
   showContact?: boolean;
+  showAddress?: boolean;
 }) => {
   const now = new Date();
   const queryStart = new Date(now);
@@ -797,10 +798,10 @@ const buildPublicEventsPayload = async (input: {
     .filter(Boolean)
     .slice(0, 8);
 
-  return {
-    eventsItems: upcoming,
-    upcomingEventCount: upcoming.length,
-  };
+  const { buildPublicNativeFoodAppearances } = await import("../services/publicFoodBusinessAppearances");
+  const nativeAppearances = input.restaurantRow ? await buildPublicNativeFoodAppearances({ restaurantRow: input.restaurantRow, showAddress: input.showAddress }) : [];
+  const combined = [...upcoming, ...nativeAppearances].sort((a,b) => String(a?.startsAt).localeCompare(String(b?.startsAt))).slice(0,8);
+  return { eventsItems: combined, upcomingEventCount: combined.length };
 };
 
 const buildPublicMenuPayloadCore = async (
@@ -2850,6 +2851,7 @@ export function registerPublicDiscoveryRoutes(app: Express) {
           buildPublicEventsPayload({
             restaurantId: String(row.id),
             restaurantRow: row,
+            showAddress,
             showContact,
           }),
         ]);
@@ -2916,6 +2918,7 @@ export function registerPublicDiscoveryRoutes(app: Express) {
           buildPublicEventsPayload({
             restaurantId: String(row.id),
             restaurantRow: row,
+            showAddress,
             showContact,
           }),
         ]);
@@ -3039,6 +3042,7 @@ export function registerPublicDiscoveryRoutes(app: Express) {
             buildPublicEventsPayload({
               restaurantId: String(row.id),
               restaurantRow: row,
+              showAddress,
               showContact,
             }),
           ]);
