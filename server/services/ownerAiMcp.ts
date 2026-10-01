@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { ownerAiProfileCapabilities } from "./ownerAiProfileCapabilities";
 import { readPublicProfileSourceChecks } from "./publicProfileSourceChecks";
+import { proposeOwnerAiSourceFacts } from "./ownerAiSourceFacts";
 import { OWNER_AI_PROFILE_PREVIEW_JSON_SCHEMA } from "@shared/ownerAiCapabilities";
 import {
   createHash,
@@ -125,6 +126,12 @@ const approveDraftInputSchema = {
 };
 
 export const OWNER_AI_MCP_TOOLS = [
+  {
+    name: "get_mealscout_official_source_facts",
+    description: "Fetch visible official public sources for this authenticated native business and propose explicit field facts with source URL, server capture time, expiry and content hash. Conflicts and unsupported menu prices or dated attendance stay held. This creates no draft and cannot apply; create_mealscout_draft and exact owner consent remain required.",
+    inputSchema: { type: "object", additionalProperties: false, properties: {} },
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+  },
   {
     name: "get_mealscout_public_source_checks",
     description: "Read private midnight public-link check receipts for this current owner's business. Responses and byte changes remain unverified; this never fetches on demand, approves evidence, changes profile facts, or publishes.",
@@ -421,6 +428,7 @@ const approvalPrompt = (draft: any) => {
   return [
     `Approve MealScout draft revision ${draft.revision}?`,
     `Intent: ${String(draft.packet?.intent || "Business update")}`,
+    ...(draft.packet?.sourceFacts ? [`Official source field evidence: ${JSON.stringify(draft.packet.sourceFacts)}`, "Source values will be checked again before application. Menu contents, stock and dated attendance are not verified by a menu link."] : []),
     ...(draft.currentSnapshot?.settings ? [
       `Effective social preferences: ${JSON.stringify(draft.currentSnapshot.settings.effectiveSocialPosting)}`,
       ...(draft.currentSnapshot.settings.warning ? [draft.currentSnapshot.settings.warning] : []),
@@ -457,6 +465,14 @@ async function callOwnerAiTool(
   argumentsValue: unknown,
   callContext: McpToolCallContext,
 ) {
+  if (name === "get_mealscout_official_source_facts") {
+    requireScope(principal, "owner_ai:context");
+    z.object({}).strict().parse(argumentsValue || {});
+    await ownerAiProfileCapabilities.read(principal);
+    const proposal = await proposeOwnerAiSourceFacts(principal.restaurantId, principal.userId);
+    await ownerAiProfileCapabilities.read(principal);
+    return toolResult(proposal);
+  }
   if (name === "get_mealscout_public_source_checks") {
     requireScope(principal, "owner_ai:context");
     z.object({}).strict().parse(argumentsValue || {});

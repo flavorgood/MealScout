@@ -60,6 +60,7 @@ import {
 import { resolveCityTimeZoneSync } from "./cityTimeZone";
 import { isPublicDiscoveryEligibleEntity } from "@shared/publicDiscoveryIntegrity";
 import { buildSlotDateTimes } from "./timeIntent";
+import { verifyOwnerAiSourceFacts, loadSourceFactAuthority, assertSourceFactAuthority } from "./ownerAiSourceFacts";
 
 const DRAFT_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const PUBLIC_BASE_URL = () =>
@@ -299,6 +300,7 @@ export function buildOwnerAiSocialDrafts(input: {
 
 export function normalizeOwnerAiPlan(packet: OwnerAiActionPacket) {
   const plan: Array<Record<string, unknown>> = [];
+  if (packet.sourceFacts) plan.push({ section: "source_evidence", action: "review_exact_field_provenance", proposed: packet.sourceFacts });
   if (packet.settings) plan.push({ section: "settings", action: "merge_social_posting_preferences", proposed: packet.settings });
   if (packet.profile) {
     plan.push({
@@ -917,6 +919,12 @@ const assertRequestVersions = async (
   return current;
 };
 
+async function validateSourceFacts(packet: OwnerAiActionPacket, restaurantId: string, ownerId: string, refresh: boolean) {
+  if (!packet.sourceFacts) return;
+  try { await verifyOwnerAiSourceFacts(packet, restaurantId, ownerId, db, undefined, refresh); }
+  catch (error) { throw new OwnerAiActionError(409, "SOURCE_FACT_HOLD", String((error as Error).message)); }
+}
+
 export async function createOwnerAiDraft(input: {
   restaurantId: string;
   createdByUserId: string;
@@ -963,6 +971,7 @@ export async function createOwnerAiDraft(input: {
   const id = randomUUID();
   const packet = ownerAiActionPacketSchema.parse(request.packet);
   await assertOwnerAiSettingsAccess(input.createdByUserId, restaurant, packet);
+  await validateSourceFacts(packet, input.restaurantId, input.createdByUserId, true);
   const { expectedVersions, currentSnapshot } = await db.transaction(
     async (tx: any) => ({
       expectedVersions: await assertRequestVersions(
@@ -1370,6 +1379,7 @@ export async function updateOwnerAiDraft(input: { userId: string; draftId: strin
   if (existing.revision !== input.expectedRevision) throw new OwnerAiActionError(409, "STALE_DRAFT_REVISION", "Draft revision changed; reload before editing", { currentRevision: existing.revision });
   const packet = ownerAiActionPacketSchema.parse(request.packet);
   await assertOwnerAiSettingsAccess(input.userId, restaurant, packet);
+  await validateSourceFacts(packet, existing.restaurantId, input.userId, true);
   const { expectedVersions, currentSnapshot } = await db.transaction(
     async (tx: any) => ({
       expectedVersions: await assertRequestVersions(
@@ -1611,6 +1621,10 @@ export const mergeOwnerAiProfileActionLinks = (
 };
 
 export async function applyCanonicalPacket(tx: any, restaurant: any, packet: OwnerAiActionPacket, now: Date) {
+  if (packet.sourceFacts) {
+    try { assertSourceFactAuthority(packet, await loadSourceFactAuthority(restaurant.id, restaurant.ownerId, tx, true), now); }
+    catch (error) { throw new OwnerAiActionError(409, "SOURCE_FACT_HOLD", String((error as Error).message)); }
+  }
   const counts = { profile: 0, settings: 0, hours: 0, menusUpserted: 0, menusArchived: 0, categoriesUpserted: 0, categoriesArchived: 0, itemsUpserted: 0, itemsArchived: 0, schedulesUpserted: 0, schedulesArchived: 0, dealsUpserted: 0, dealsArchived: 0 };
   if (packet.profile || packet.hours || packet.settings) {
     const updates: Record<string, any> = { updatedAt: now };
@@ -1935,6 +1949,7 @@ export async function approveOwnerAiDraft(input: { userId: string; draftId: stri
   let applied = initial.status === "applied";
   if (!applied) {
     const packet = ownerAiActionPacketSchema.parse(initial.packet);
+    await validateSourceFacts(packet, initial.restaurantId, input.userId, false);
     const socialDrafts = asArray<Record<string, any>>(initial.socialDrafts);
     const requestedSocialPlatforms = [
       ...new Set(
@@ -1994,6 +2009,7 @@ export async function approveOwnerAiDraft(input: { userId: string; draftId: stri
       if (lockedDraft.status === "applied") return { alreadyApplied: true };
       if (lockedDraft.status !== "draft") throw new OwnerAiActionError(409, "DRAFT_NOT_APPROVABLE", `Draft status is ${lockedDraft.status}`);
       if (lockedDraft.revision !== input.expectedRevision) throw new OwnerAiActionError(409, "STALE_DRAFT_REVISION", "Draft changed before approval completed", { currentRevision: lockedDraft.revision });
+      if (stableHash(lockedDraft.packet) !== stableHash(initial.packet)) throw new OwnerAiActionError(409, "STALE_DRAFT_CONTENT", "Draft content changed while source facts were rechecked");
       const [restaurant] = await tx.select().from(restaurants).where(eq(restaurants.id, lockedDraft.restaurantId)).limit(1).for("update");
       if (!restaurant || restaurant.ownerId !== input.userId) throw new OwnerAiActionError(403, "ACTUAL_OWNER_REQUIRED", "Only the current actual restaurant owner can approve");
       if (requestedSocialPlatforms.length) {

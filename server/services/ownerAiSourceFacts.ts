@@ -23,7 +23,7 @@ export function extractOfficialSourceFacts(capture: OfficialSourceCapture) {
     let url: URL; try { url = new URL(href, capture.finalUrl); } catch { return; }
     const safe = sourceCheckUrl(url.toString()); if (!safe) return;
     const label = $(el).text().replace(/\s+/g," ").trim();
-    if (/^(menu|view menu|download menu|our menu)$/i.test(label) || (/^download$/i.test(label) && /\.pdf$/i.test(url.pathname) && /\bmenu\b/i.test($(el).parent().parent().text()))) add("profile.menuUrl", safe);
+    if (/^(menu|view menu|download menu|our menu)$/i.test(label) || (/^download$/i.test(label) && /\.pdf$/i.test(url.pathname) && ($(el).closest("section").length ? $(el).closest("section") : $(el).parent().parent()).find("h1,h2,h3,h4").toArray().some(h => /^menu$/i.test($(h).text().trim())))) add("profile.menuUrl", safe);
     if (/^(www\.)?instagram\.com$/i.test(url.hostname) && /^\/[A-Za-z0-9._]+\/?$/.test(url.pathname) && !/\/(accounts|explore|reels|p)\/?$/i.test(url.pathname)) add("profile.instagramUrl", safe);
     if (/^(www\.)?facebook\.com$/i.test(url.hostname) && !/\/(sharer|login|dialog|share|watch)(\/|$)/i.test(url.pathname) && url.pathname !== "/") add("profile.facebookPageUrl", safe);
     if (/^(www\.)?(x|twitter)\.com$/i.test(url.hostname) && /^\/[A-Za-z0-9_]+\/?$/.test(url.pathname) && !/\/(intent|home|login|share)\/?$/i.test(url.pathname)) add("profile.xUrl", safe);
@@ -62,7 +62,7 @@ export function assertSourceFactAuthority(packet: any, authority: { urls: string
     if (authority.blockedFields.includes(fact.path.split(".")[1])) throw new Error("SOURCE_FACT_FIELD_NOT_PUBLIC");
   }
 }
-export async function verifyOwnerAiSourceFacts(packet: any, restaurantId: string, ownerId: string, database: any = db, capture = captureOfficialSource) {
+export async function verifyOwnerAiSourceFacts(packet: any, restaurantId: string, ownerId: string, database: any = db, capture = captureOfficialSource, refreshCapture = false) {
   if (!packet.sourceFacts) return;
   const authority = await loadSourceFactAuthority(restaurantId, ownerId, database);
   assertSourceFactAuthority(packet, authority);
@@ -71,7 +71,14 @@ export async function verifyOwnerAiSourceFacts(packet: any, restaurantId: string
     if (!extracted.has(fact.sourceUrl)) extracted.set(fact.sourceUrl, extractOfficialSourceFacts(await capture(fact.sourceUrl)));
     // Compare semantic field values rather than dynamic HTML bytes. The original hash
     // remains in the immutable consent packet as provenance of the first capture.
-    if (!extracted.get(fact.sourceUrl)!.fields.some(f => f.path === fact.path && f.value === fact.value)) throw new Error("SOURCE_FACT_CHANGED_OR_CONFLICTING");
+    const current = extracted.get(fact.sourceUrl)!.fields.find(f => f.path === fact.path && f.value === fact.value);
+    if (!current) throw new Error("SOURCE_FACT_CHANGED_OR_CONFLICTING");
+    if (fact.path === "profile.menuUrl") {
+      const linked = await checkPinnedPublicSource(fact.value);
+      if (linked.availability !== "reachable") throw new Error("SOURCE_FACT_LINK_UNAVAILABLE");
+    }
+    // Caller timestamps/hashes are declarations until replaced with this server capture.
+    if (refreshCapture) Object.assign(fact, current);
   }
 }
 export async function proposeOwnerAiSourceFacts(restaurantId: string, ownerId: string) {
