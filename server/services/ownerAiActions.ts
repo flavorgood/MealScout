@@ -1141,7 +1141,7 @@ const resolveOwnerAiDraftMediaSource = (
   return null;
 };
 
-async function buildOwnerAiMediaManifest(
+export async function buildOwnerAiMediaManifest(
   draftId: string,
   packet: OwnerAiActionPacket,
 ): Promise<OwnerAiMediaManifestEntry[]> {
@@ -1464,7 +1464,7 @@ export async function cancelOwnerAiDraft(userId: string, draftId: string, expect
   return toOwnerAiDraftResponse(cancelled);
 }
 
-async function validateAndPrepareRemoteImage(
+export async function validateAndPrepareRemoteImage(
   value: string | null | undefined,
   folder: string,
   manifestEntry: OwnerAiMediaManifestEntry | null,

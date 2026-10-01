@@ -1,3 +1,4 @@
+import { sourceReviewReason } from "./sourceReviewReason";
 import { createHash } from "node:crypto";
 import { and, asc, desc, eq, gt, sql } from "drizzle-orm";
 import { restaurants, telemetryEvents } from "@shared/schema";
@@ -109,4 +110,25 @@ export async function createOwnerAiOfficialSourceDraft(userId: string, restauran
   if (!proposal.packet) return { draft: null, holds: proposal.holds, approvalRequired: true, canonicalMutationPerformed: false };
   const draft = await createOwnerAiDraft({ restaurantId, createdByUserId: userId, request: { packet: proposal.packet, expectedVersions } });
   return { draft, holds: proposal.holds, approvalRequired: true, canonicalMutationPerformed: false };
+}
+
+// Read only existing source-review receipts. No customer identifiers, URLs or
+// packet values leave this aggregate. Historical failures without receipts
+// cannot be assigned reasons from the completion total.
+export async function summarizeOwnerAiSourceReviewReasons(day: string, database: any = db) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) throw new Error("Invalid source review day");
+  const reasons: Record<string, number> = { missing_official_source: 0, source_unavailable_or_redirected: 0, conflicting_public_facts: 0, date_identity_or_public_access_verification: 0, unsupported_or_incomplete_extraction: 0, unclassified_receipt_hold: 0, owner_consent_required: 0 };
+  let cursor = "", receipts = 0, validReceipts = 0, invalidReceipts = 0;
+  for (;;) {
+    const rows = await database.select().from(telemetryEvents).where(and(eq(telemetryEvents.eventName, OWNER_AI_SOURCE_REVIEW_EVENT), sql`${telemetryEvents.properties}->>'day' = ${day}`, gt(telemetryEvents.id, cursor))).orderBy(asc(telemetryEvents.id)).limit(100);
+    if (!rows.length) break;
+    for (const row of rows) {
+      receipts++;
+      if (!validReview(row, row.properties?.restaurantId)) { invalidReceipts++; continue; }
+      validReceipts++;
+      reasons[sourceReviewReason(row.properties.proposal, row.properties.sourceUrls)]++;
+    }
+    cursor = rows[rows.length - 1].id;
+  }
+  return { day, receipts, validReceipts, invalidReceipts, heldReceipts: validReceipts - reasons.owner_consent_required, proposalReceipts: reasons.owner_consent_required, reasons, reasonsAreExclusive: true, unrecordedFailuresClassified: false, readsOnly: true };
 }

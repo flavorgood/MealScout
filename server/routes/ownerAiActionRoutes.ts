@@ -1,3 +1,4 @@
+import { registerOwnerAiNativeProfileRoutes } from "./ownerAiNativeProfileRoutes";
 import type { Express, NextFunction, Request, Response } from "express";
 import { and, eq } from "drizzle-orm";
 import { z, ZodError } from "zod";
@@ -361,6 +362,7 @@ const openApiDocument = {
 };
 
 export function registerOwnerAiActionRoutes(app: Express) {
+  registerOwnerAiNativeProfileRoutes(app);
   const connectorRateKey = (req: ConnectorRequest) =>
     req.ownerAiConnector?.apiKeyId || "owner-ai-connector-unresolved";
   const connectorContextLimiter = distributedRateLimit({
