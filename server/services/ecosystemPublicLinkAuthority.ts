@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
-import { projectAdmittedRestaurantLink } from "../publicProfiles/admitPublicRestaurant";
+import { projectAdmittedFoodProfileLink, type NativePublicFoodProfileType } from "../publicProfiles/admitPublicRestaurant";
 import { deriveProfileEvidenceQuarantineVisibility } from "./profileEvidenceQuarantine";
 import { assertPublicResponseSafe } from "../publicProfiles/assertPublicResponseSafe";
 
@@ -46,13 +46,15 @@ const asIso = (value: any) => new Date(value).toISOString();
 const validId = (value: unknown): value is string => typeof value === "string"
   && value.length > 0 && value.length <= 160 && !/[\s/\\?#%\u0000-\u001f]/.test(value);
 
-function isNativeRestaurantDestination(canonicalUrl: string, sourceId: string) {
+export function isNativeFoodProfileDestination(canonicalUrl: string, sourceId: string, profileType: NativePublicFoodProfileType) {
+  const prefix = profileType === "private_chef" ? "private-chef" : profileType;
+  if (!["restaurant", "truck", "bar", "caterer", "private-chef"].includes(prefix)) return false;
   try {
     const destination = new URL(canonicalUrl);
     const tail = destination.pathname.split("/").at(-1) ?? "";
     return destination.origin === "https://www.mealscout.us"
       && /^[a-zA-Z0-9_-]{1,80}$/.test(sourceId)
-      && /^\/restaurant\/[a-z0-9][a-z0-9-]{0,119}$/.test(destination.pathname)
+      && new RegExp(`^/${prefix}/[a-z0-9][a-z0-9-]{0,119}$`).test(destination.pathname)
       && destination.href === canonicalUrl && !destination.username && !destination.password
       && !/%|\\|\/\//.test(destination.pathname)
       && tail.lastIndexOf("--") >= 1
@@ -67,7 +69,7 @@ function project(view: any) {
   const owner = camelRow(view.owner);
   const authority = view.authority;
   if (authority.owner_id !== row.ownerId || authority.state === "deleted") return null;
-  const admitted = projectAdmittedRestaurantLink(row, owner);
+  const admitted = projectAdmittedFoodProfileLink(row, owner);
   const dto = admitted?.dto;
   const contentDigest = dto ? createHash("sha256").update(JSON.stringify([
     "mealscout-public-link-v1", row.id, authority.generation_id,
@@ -77,7 +79,7 @@ function project(view: any) {
     eligible: Boolean(dto && typeof dto.displayName === "string"
       && dto.displayName.trim() && dto.displayName.length <= 120
       && !/[<>\x00-\x1f]/.test(dto.displayName)
-      && isNativeRestaurantDestination(dto.seo.canonicalUrl, row.id)
+      && isNativeFoodProfileDestination(dto.seo.canonicalUrl, row.id, dto.profileType)
       && !deriveProfileEvidenceQuarantineVisibility(row).isQuarantined),
     readAt: new Date(view.read_at).getTime() };
 }
@@ -192,7 +194,7 @@ export function createPublicLinkAuthority(database: LinkDatabase, options: {
         || !Number.isFinite(expiry) || expiry <= now
         || new Date(a.approved_at).getTime() > view.readAt) return null;
       const dto = view.dto;
-      if (!isNativeRestaurantDestination(dto.seo.canonicalUrl, sourceId)) return null;
+      if (!isNativeFoodProfileDestination(dto.seo.canonicalUrl, sourceId, dto.profileType)) return null;
       const envelope = {
         app: "mealscout", tenantId: publicTenantId, sourceId,
         publication: "published", exportApproval: "approved",
