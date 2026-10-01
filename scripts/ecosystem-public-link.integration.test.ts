@@ -5,9 +5,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PGlite } from "@electric-sql/pglite";
 import express from "express";
-import { createPublicLinkAuthority, type LinkDatabase } from "../server/services/ecosystemPublicLinkAuthority";
+import { createPublicLinkAuthority, isNativeFoodProfileDestination, type LinkDatabase } from "../server/services/ecosystemPublicLinkAuthority";
 import { registerEcosystemPublicLinkRoutes } from "../server/routes/ecosystemPublicLinkRoutes";
-import { projectAdmittedRestaurantLink, isNativePublicRestaurant } from "../server/publicProfiles/admitPublicRestaurant";
+import { projectAdmittedRestaurantLink, isNativePublicRestaurant, projectAdmittedFoodProfileLink, canonicalPublicRestaurantProfileEntity } from "../server/publicProfiles/admitPublicRestaurant";
 
 const migration = await readFile(new URL("../migrations/143_ecosystem_public_link_authority.sql", import.meta.url), "utf8");
 const sourceRevision = "3b14686ed1cb9b88c502d071513e38cc5774e84d";
@@ -355,4 +355,63 @@ test("actual native API registration: anonymous/other-owner isolation, approved 
     await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
     if (!f.pg.closed) await f.pg.close();
   }
+});
+
+test("five native food profiles voluntarily approve with matching types; grants fail closed on native changes", async () => {
+  const f = await fixture();
+  try {
+    // These are synthetic database owners and profiles, never customer identity evidence.
+    const types = ["restaurant", "truck", "bar", "caterer", "private_chef"] as const;
+    for (const type of types) {
+      const id = `fixture-${type.replace("_", "-")}`;
+      const businessType = type === "truck" ? "food_truck" : type;
+      await f.pg.query("INSERT INTO restaurants(id,owner_id,name,business_type,address,phone,private_notes) VALUES($1,'native-owner','Cedar Kitchen',$2,'PRIVATE_ADDRESS','PRIVATE_PHONE','PRIVATE_NOTES')", [id, businessType]);
+      const native = () => projectAdmittedFoodProfileLink({ id, ownerId: "native-owner", name: "Cedar Kitchen", isActive: true, businessType, address: "PRIVATE_ADDRESS", phone: "PRIVATE_PHONE" }, { id: "native-owner", isDisabled: false, publicProfileSettings: { showContact: false, showAddress: false } });
+      assert.equal(native()?.dto.profileType, type);
+      assert.equal(native()?.dto.seo.entityType, type);
+      assert.equal(native()?.dto.phonePublic, null);
+      assert.equal(native()?.dto.addressPublicLabel, null);
+      if (type !== "restaurant") assert.equal(projectAdmittedRestaurantLink({ id, ownerId: "native-owner", name: "Cedar Kitchen", isActive: true, businessType }, { id: "native-owner", isDisabled: false }), null);
+      const preview = await f.authority.getOwnerPreview(id, "native-owner");
+      assert.equal(preview.eligible, true, type);
+      assert.equal(await f.authority.readPublicLink(preview.publicTenantId, id), null);
+      await assert.rejects(f.authority.approve(id, "other-owner", approval(preview)), (e: any) => e.status === 403);
+      const grant = await f.authority.approve(id, "native-owner", approval(preview));
+      const link = await f.authority.readPublicLink(grant.publicTenantId, id);
+      const prefix = type === "private_chef" ? "private-chef" : type;
+      assert.equal(link?.canonicalUrl, `https://www.mealscout.us/${prefix}/cedar-kitchen--${id}`);
+      assert.doesNotMatch(JSON.stringify(link), /PRIVATE_|ownerId|phone|address|private_notes/);
+      assert.equal(isNativeFoodProfileDestination(link!.canonicalUrl, id, type), true);
+      for (const other of types.filter(value => value !== type)) assert.equal(isNativeFoodProfileDestination(link!.canonicalUrl, id, other), false);
+      for (const bad of [link!.canonicalUrl + "?q=1", link!.canonicalUrl + "#hash", link!.canonicalUrl.replace("www.mealscout", "mealscout"), link!.canonicalUrl.replace("https://", "https://user@"), link!.canonicalUrl.replace("cedar-kitchen", "%63edar-kitchen"), link!.canonicalUrl.replace(`/${prefix}/`, `/${prefix}//`), link!.canonicalUrl.replace(`/${prefix}/`, `/restaurant/../${prefix}/`), link!.canonicalUrl.replace(id, "other-id")]) assert.equal(isNativeFoodProfileDestination(bad, id, type), false, bad);
+      const expiry = createPublicLinkAuthority(f.database, { sourceRevision, nowMs: () => Date.now() + 8 * 86400000 });
+      assert.equal(await expiry.readPublicLink(grant.publicTenantId, id), null);
+      await f.pg.query("UPDATE restaurants SET raw_data='{\"evidenceQuarantine\":{\"active\":true}}' WHERE id=$1", [id]);
+      assert.equal((await f.authority.getOwnerPreview(id, "native-owner")).eligible, false);
+      assert.equal(await f.authority.readPublicLink(grant.publicTenantId, id), null);
+      await f.pg.query("UPDATE restaurants SET raw_data='{}' WHERE id=$1", [id]);
+      assert.equal(await f.authority.readPublicLink(grant.publicTenantId, id), null);
+      const fresh = await f.authority.approve(id, "native-owner", approval(await f.authority.getOwnerPreview(id, "native-owner")));
+      await f.pg.query("UPDATE restaurants SET business_type=$2 WHERE id=$1", [id, type === "restaurant" ? "bar" : "restaurant"]);
+      assert.equal(await f.authority.readPublicLink(fresh.publicTenantId, id), null);
+      await assert.rejects(f.authority.approve(id, "native-owner", approval(fresh)), (e: any) => e.status === 409);
+      const retyped = await f.authority.approve(id, "native-owner", approval(await f.authority.getOwnerPreview(id, "native-owner")));
+      assert.ok((await f.authority.readPublicLink(retyped.publicTenantId, id))?.canonicalUrl.includes(type === "restaurant" ? "/bar/" : "/restaurant/"));
+      await f.pg.query("UPDATE users SET is_disabled=true WHERE id='native-owner'");
+      assert.equal(await f.authority.readPublicLink(retyped.publicTenantId, id), null);
+      await f.pg.query("UPDATE users SET is_disabled=false WHERE id='native-owner'");
+      const enabled = await f.authority.approve(id, "native-owner", approval(await f.authority.getOwnerPreview(id, "native-owner")));
+      await f.pg.query("UPDATE restaurants SET owner_id='other-owner' WHERE id=$1", [id]);
+      assert.equal(await f.authority.readPublicLink(enabled.publicTenantId, id), null);
+      const transferred = await f.authority.getOwnerPreview(id, "other-owner");
+      assert.notEqual(transferred.generationId, enabled.generationId);
+      await f.pg.query("UPDATE restaurants SET is_active=false WHERE id=$1", [id]);
+      assert.equal((await f.authority.getOwnerPreview(id, "other-owner")).eligible, false);
+    }
+    for (const businessType of ["food_truck", "truck", "food-truck", "foodtruck", "mobile_food_vendor"]) assert.equal(canonicalPublicRestaurantProfileEntity({ businessType }), "truck");
+    for (const businessType of ["bar", "brewery", "taproom", "brewery_taproom", "nightlife", "venue"]) assert.equal(canonicalPublicRestaurantProfileEntity({ businessType }), "bar");
+    assert.equal(canonicalPublicRestaurantProfileEntity({ businessType: "private_chef", isFoodTruck: true }), "truck");
+    for (const businessType of ["host_venue", "supplier", "event", "location"]) assert.equal(canonicalPublicRestaurantProfileEntity({ businessType }), null);
+    assert.equal(projectAdmittedFoodProfileLink({ id: "hidden", ownerId: "native-owner", name: "Test Restaurant", isActive: true, businessType: "truck" }, { id: "native-owner", isDisabled: false }), null);
+  } finally { await f.pg.close(); }
 });

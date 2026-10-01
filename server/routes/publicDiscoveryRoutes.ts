@@ -109,6 +109,7 @@ import { buildAnonymousPublicEventFeed } from "./eventRoutes";
 import { collectPublicSeoRowsInBatches } from "../services/publicSeoBatchTraversal";
 import { resolvePublicCanonicalOrigin } from "../seo/publicCanonicalOrigin";
 import { toPublicRestaurantListingWithVisibility } from "../publicProfiles/toPublicRestaurantListingWithVisibility";
+import { canonicalPublicRestaurantProfileEntity } from "../publicProfiles/admitPublicRestaurant";
 import { projectPublicDealRows } from "../services/publicDealProjection";
 import { isPublicBusinessVisible } from "../utils/publicBusinessVisibility";
 import { isNativePublicRestaurant } from "../publicProfiles/admitPublicRestaurant";
@@ -455,18 +456,6 @@ type PublicRestaurantProfileEntity =
   | "bar"
   | "caterer"
   | "private_chef";
-
-const canonicalPublicRestaurantProfileEntity = (
-  row: any,
-): PublicRestaurantProfileEntity | null => {
-  if (!row) return null;
-  const discoveryProfileType = publicSeoBusinessProfileType(row);
-  if (discoveryProfileType) return discoveryProfileType;
-  const serviceType = toCanonicalFoodBusinessType(row.businessType);
-  return serviceType === "caterer" || serviceType === "private_chef"
-    ? serviceType
-    : null;
-};
 
 const isTruckRestaurantRow = (row: any) =>
   canonicalPublicRestaurantProfileEntity(row) === "truck";
