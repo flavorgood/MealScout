@@ -1010,6 +1010,7 @@ function HostDashboard() {
           </h1>
           <p className="text-[color:var(--text-secondary)]">{host.address}</p>
           <div className="mt-3 flex flex-wrap gap-2">
+            <Link href="/owner-ai"><Button size="sm" variant="outline">Review AI profile updates</Button></Link>
             <Link href="/restaurant-signup?businessType=bar">
               <Button size="sm" variant="outline">
                 Add Bar/Restaurant Profile

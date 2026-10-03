@@ -103,6 +103,33 @@ for (const snippet of [
 }
 
 for (const snippet of [
+  "publicIdentityStatus",
+  '"role_scoped_entity_profiles_only"',
+  "linkedEntityProfileCount: profileLinks.length",
+  "tierNeutral: true",
+  "paidTierRequired: false",
+]) {
+  if (!accountRoutes.includes(snippet)) {
+    throw new Error(`Public identity status contract missing: ${snippet}`);
+  }
+}
+if (/subscription|premium|membership|billing/.test(
+  accountRoutes.slice(
+    accountRoutes.indexOf("publicIdentityStatus"),
+    accountRoutes.indexOf("media:", accountRoutes.indexOf("publicIdentityStatus")),
+  ),
+)) {
+  throw new Error("Public identity status must not depend on paid-tier state");
+}
+if (
+  !settings.includes("Public profile status") ||
+  !settings.includes("role-scoped public identity") ||
+  !settings.includes("does not require a paid profile tier")
+) {
+  throw new Error("Settings must explain why account-level public identity is unavailable");
+}
+
+for (const snippet of [
   "resolvePublicProfileVisibility(",
   "ownerUser?.publicProfileSettings",
 ]) {

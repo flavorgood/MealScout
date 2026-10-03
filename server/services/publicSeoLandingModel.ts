@@ -11,6 +11,8 @@ export type PublicSeoLandingRouteKey =
   | "food-trucks"
   | "food-trucks-cuisine"
   | "food-trucks-today"
+  | "food-truck-catering"
+  | "book-food-truck"
   | "deals-today"
   | "events-today"
   | "city"
@@ -331,6 +333,34 @@ export async function resolvePublicSeoLanding(
         items,
         emptyMessage:
           "No food trucks are listed here yet. Check nearby food or come back soon.",
+      }) };
+    }
+    case "food-truck-catering": {
+      const items = await repository.loadFoodTrucks(city!);
+      const cityLabel = [city!.name, city!.state].filter(Boolean).join(", ");
+      return { kind: "found", payload: buildPayload({
+        routeKey: request.routeKey,
+        city,
+        cuisineSlug: null,
+        title: `Food truck catering in ${cityLabel}`,
+        description: `Browse public food truck profiles in ${cityLabel} for catering, office lunches, weddings, private parties, and community events. Check menus, public schedule details, and each truck's profile before sending a request.`,
+        items,
+        emptyMessage:
+          "No public food truck profiles are available for this city yet. Check nearby food or come back soon.",
+      }) };
+    }
+    case "book-food-truck": {
+      const items = await repository.loadFoodTrucks(city!);
+      const cityLabel = [city!.name, city!.state].filter(Boolean).join(", ");
+      return { kind: "found", payload: buildPayload({
+        routeKey: request.routeKey,
+        city,
+        cuisineSlug: null,
+        title: `Book a food truck in ${cityLabel}`,
+        description: `Find public food truck profiles in ${cityLabel} for events and catering. Compare menus and profile details, then use the contact or request options each business has made public on MealScout.`,
+        items,
+        emptyMessage:
+          "No public food truck profiles are available for this city yet. Check nearby food or come back soon.",
       }) };
     }
     case "food-trucks-cuisine": {

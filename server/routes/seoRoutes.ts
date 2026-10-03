@@ -43,6 +43,7 @@ import {
 import { buildPublicProfilePath as buildCanonicalPublicProfilePath } from "../publicProfiles/publicProfileUtils";
 import { scanPublicSeoRowsInBatches } from "../services/publicSeoBatchTraversal";
 import { isPublicDiscoveryEligibleEntity } from "@shared/publicDiscoveryIntegrity";
+import { toCanonicalFoodBusinessType } from "@shared/businessTypes";
 import { canExposeAnonymousEventDetail } from "../publicProfiles/publicEventDetailAccess";
 import { publicTruckClassificationWhere } from "../seo/publicTruckClassification";
 import {
@@ -101,7 +102,7 @@ const sitemapCityIdentityWhere = (
 const toSlug = toPublicSeoSlug;
 
 const buildPublicProfilePath = (input: {
-  profileType: "restaurant" | "truck" | "bar" | "location" | "supplier";
+  profileType: "restaurant" | "truck" | "bar" | "caterer" | "private_chef" | "location" | "supplier";
   id: string;
   name: string;
 }) => buildCanonicalPublicProfilePath({
@@ -155,6 +156,53 @@ const isIndexableRestaurantRow = (row: {
     ownerId: row.ownerId,
     ownerEmail: row.ownerEmail,
     address: row.address,
+    cuisineType: row.cuisineType,
+    description: row.description,
+    city: row.city,
+    state: row.state,
+    rawData: row.rawData,
+    phone: row.phone,
+    websiteUrl: row.websiteUrl,
+  });
+
+type PublicServiceProfileType = "caterer" | "private_chef";
+
+const publicServiceProfileType = (row: {
+  businessType?: unknown;
+  isFoodTruck?: unknown;
+}): PublicServiceProfileType | null => {
+  if (row.isFoodTruck === true) return null;
+  const canonical = toCanonicalFoodBusinessType(row.businessType);
+  return canonical === "caterer" || canonical === "private_chef"
+    ? canonical
+    : null;
+};
+
+const isIndexableServiceProfileRow = (row: {
+  name?: unknown;
+  isActive?: unknown;
+  ownerId?: unknown;
+  ownerEmail?: unknown;
+  ownerDisabled?: unknown;
+  cuisineType?: unknown;
+  description?: unknown;
+  city?: unknown;
+  state?: unknown;
+  rawData?: unknown;
+  phone?: unknown;
+  websiteUrl?: unknown;
+  isFoodTruck?: boolean | null;
+  businessType?: string | null;
+}) =>
+  row.ownerDisabled === false &&
+  publicServiceProfileType(row) !== null &&
+  isPublicRestaurantIndexable({
+    name: row.name,
+    isActive: row.isActive !== false,
+    ownerId: row.ownerId,
+    ownerEmail: row.ownerEmail,
+    // Service-area businesses do not need a public street address to qualify.
+    address: null,
     cuisineType: row.cuisineType,
     description: row.description,
     city: row.city,
@@ -320,6 +368,9 @@ export function registerSeoRoutes(
       const restaurantRows = allRestaurantRows.filter((row: any) =>
         isIndexableRestaurantRow(row),
       );
+      const serviceProfileRows = allRestaurantRows.filter((row: any) =>
+        isIndexableServiceProfileRow(row),
+      );
       const hostRows = allHostRows.filter((row: any) =>
         row.ownerDisabled === false && isPublicDiscoveryEligibleEntity({
           name: row.name,
@@ -413,6 +464,14 @@ export function registerSeoRoutes(
             `${baseUrl}/food-trucks/${encodeURIComponent(city.slug)}`,
             city.updatedAt || city.createdAt,
           );
+          mergeUrl(
+            `${baseUrl}/food-truck-catering/${encodeURIComponent(city.slug)}`,
+            city.updatedAt || city.createdAt,
+          );
+          mergeUrl(
+            `${baseUrl}/book-food-truck/${encodeURIComponent(city.slug)}`,
+            city.updatedAt || city.createdAt,
+          );
         }
         if (
           indexableTruckRows.some((row: any) =>
@@ -439,11 +498,24 @@ export function registerSeoRoutes(
 
       restaurantRows.forEach((row: any) => {
         const profileType = publicSeoBusinessProfileType(row);
-        // Trucks/bars have dedicated sitemaps; service types are deferred.
+        // Trucks/bars have dedicated sitemaps.
         if (profileType !== "restaurant") return;
         mergeUrl(
           `${baseUrl}${buildPublicProfilePath({
             profileType: "restaurant",
+            id: String(row.id),
+            name: String(row.name || ""),
+          })}`,
+          row.updatedAt,
+        );
+      });
+
+      serviceProfileRows.forEach((row: any) => {
+        const profileType = publicServiceProfileType(row);
+        if (!profileType) return;
+        mergeUrl(
+          `${baseUrl}${buildPublicProfilePath({
+            profileType,
             id: String(row.id),
             name: String(row.name || ""),
           })}`,
@@ -817,6 +889,39 @@ export function registerSeoRoutes(
       sendUrlsetXml(res, { entries });
     } catch (e) {
       console.error("sitemap-bars failed", e);
+      res.status(500).send("<error>failed</error>");
+    }
+  });
+
+  app.get("/sitemap-services.xml", async (_req, res) => {
+    try {
+      const baseUrl = resolveSitemapSiteUrl();
+      const rows = await db
+        .select(restaurantSitemapSelect)
+        .from(restaurants)
+        .innerJoin(users, eq(restaurants.ownerId, users.id))
+        .where(eq(restaurants.isActive, true))
+        .orderBy(desc(restaurants.updatedAt))
+        .limit(50000);
+
+      const entries = rows
+        .filter((row: any) => isIndexableServiceProfileRow(row))
+        .flatMap((row: any) => {
+          const profileType = publicServiceProfileType(row);
+          if (!profileType) return [];
+          return [{
+            loc: `${baseUrl}${buildPublicProfilePath({
+              profileType,
+              id: String(row.id),
+              name: String(row.name || ""),
+            })}`,
+            lastmod: row.updatedAt,
+          }];
+        });
+
+      sendUrlsetXml(res, { entries });
+    } catch (e) {
+      console.error("sitemap-services failed", e);
       res.status(500).send("<error>failed</error>");
     }
   });
@@ -1384,12 +1489,20 @@ export function registerSeoRoutes(
         "## City & Cuisine Discovery Pages",
         "Pattern: /food-trucks/{city-slug}",
         "Pattern: /food-trucks/{city-slug}/{cuisine-slug}",
-        "Cuisine child pages are discoverable only when published in MealScout's sitemap.",
+        "Pattern: /food-truck-catering/{city-slug}",
+        "Pattern: /book-food-truck/{city-slug}",
+        "City and cuisine child pages are discoverable only when published in MealScout's sitemap.",
         "",
         "## Business Profile Pages",
         "Pattern: /restaurant/{slug}--{id}",
+        "Pattern: /truck/{slug}--{id}",
+        "Pattern: /bar/{slug}--{id}",
+        "Pattern: /caterer/{slug}--{id}",
+        "Pattern: /private-chef/{slug}--{id}",
         "Pattern: /location/{slug}--{id}",
         "Pattern: /supplier/{slug}--{id}",
+        "Eligible profile pages are canonical public entity pages. Use the canonical URL in the first HTML response and sitemap.",
+        "Public profile facts may include category, city/state, menu or schedule context, business website/social identities, and public contact details when the owner has allowed them. Private account fields are never discovery facts.",
         "",
         "## Policies",
         "Public marketing, discovery, and profile pages may be indexed and summarized.",
@@ -1445,6 +1558,8 @@ export function registerSeoRoutes(
         "Allow: /cuisine/",
         "Allow: /deal/",
         "Allow: /bar/",
+        "Allow: /caterer/",
+        "Allow: /private-chef/",
         "Allow: /supplier/",
         "Allow: /video/",
         "Allow: /food-trucks/",
@@ -1462,6 +1577,7 @@ export function registerSeoRoutes(
         `Sitemap: ${baseUrl}/sitemap.xml`,
         `Sitemap: ${baseUrl}/sitemap-trucks.xml`,
         `Sitemap: ${baseUrl}/sitemap-bars.xml`,
+        `Sitemap: ${baseUrl}/sitemap-services.xml`,
         `Sitemap: ${baseUrl}/sitemap-locations.xml`,
         `Sitemap: ${baseUrl}/sitemap-cities.xml`,
         `Sitemap: ${baseUrl}/sitemap-cuisines.xml`,

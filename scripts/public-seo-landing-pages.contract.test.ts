@@ -22,6 +22,29 @@ const publicRestaurantIndexability = readFileSync(
   "server/seo/publicRestaurantIndexability.ts",
   "utf8",
 );
+const publicIndexabilityStart = publicRestaurantIndexability.indexOf(
+  "export function evaluatePublicRestaurantIndexability",
+);
+const publicIndexabilityEnd = publicRestaurantIndexability.indexOf(
+  "export function isPublicRestaurantIndexable",
+  publicIndexabilityStart,
+);
+const publicIndexabilityPolicy = publicRestaurantIndexability.slice(
+  publicIndexabilityStart,
+  publicIndexabilityEnd,
+);
+if (
+  publicIndexabilityStart < 0 ||
+  publicIndexabilityEnd <= publicIndexabilityStart ||
+  /subscription|premium|membership|billing|stripe|payment/i.test(
+    publicIndexabilityPolicy,
+  )
+) {
+  throw new Error(
+    "Public profile indexability must remain tier-neutral and independent of payment state",
+  );
+}
+
 const publicSeoImplementation = `${publicSeoRoutes}\n${publicSeoData}\n${publicSeoModel}`;
 const routerRegistry = readFileSync("server/routes.ts", "utf8");
 const seoRoutes = readFileSync("server/routes/seoRoutes.ts", "utf8");
@@ -95,6 +118,8 @@ const requiredClientRoutes = [
   '"/food-trucks/:citySlug"',
   '"/food-trucks/:citySlug/:cuisineSlug"',
   '"/food-trucks-today/:city"',
+  '"/food-truck-catering/:city"',
+  '"/book-food-truck/:city"',
   '"/deals-today/:city"',
   '"/events-today/:city"',
   '"/city/:city/food"',
@@ -116,6 +141,8 @@ const requiredApiRoutes = [
   "/api/public/seo/food-trucks/:city/:cuisine",
   "/api/public/seo/food-trucks/:city",
   "/api/public/seo/food-trucks-today/:city",
+  "/api/public/seo/food-truck-catering/:city",
+  "/api/public/seo/book-food-truck/:city",
   "/api/public/seo/deals-today/:city",
   "/api/public/seo/events-today/:city",
   "/api/public/seo/city/:city/food",
@@ -134,6 +161,8 @@ for (const snippet of requiredApiRoutes) {
 
 const requiredSitemapSnippets = [
   "/food-trucks-today/",
+  "/food-truck-catering/",
+  "/book-food-truck/",
   "/deals-today/",
   "/events-today/",
   "/city/",
@@ -258,12 +287,25 @@ if (/`\$\{baseUrl\}\/deals\/\$\{encodeURIComponent\(slug\)\}`/.test(seoRoutes)) 
     "The root sitemap must not advertise the legacy JS-only city deals route",
   );
 }
+for (const snippet of [
+  "Pattern: /food-truck-catering/{city-slug}",
+  "Pattern: /book-food-truck/{city-slug}",
+  "Pattern: /truck/{slug}--{id}",
+  "Pattern: /bar/{slug}--{id}",
+  "Eligible profile pages are canonical public entity pages.",
+  "Private account fields are never discovery facts.",
+]) {
+  if (!seoRoutes.includes(snippet)) {
+    throw new Error(`AI public profile guidance missing: ${snippet}`);
+  }
+}
+
 if (
   seoRoutes.includes("/food-trucks/pensacola-fl") ||
   seoRoutes.includes("/food-trucks/pensacola-fl/bbq") ||
   !seoRoutes.includes("Pattern: /food-trucks/{city-slug}") ||
   !seoRoutes.includes(
-    "Cuisine child pages are discoverable only when published in MealScout's sitemap.",
+    "City and cuisine child pages are discoverable only when published in MealScout's sitemap.",
   )
 ) {
   throw new Error(
@@ -351,10 +393,42 @@ if (
   );
 }
 
+function resolveConfiguredRoute(profilePath: string) {
+  const route = vercel.routes.find(
+    (candidate: { src?: string }) =>
+      candidate.src && new RegExp(`^(?:${candidate.src})$`).test(profilePath),
+  );
+  const captures = route && profilePath.match(new RegExp(`^(?:${route.src})$`));
+  const destination = route?.dest?.replace(
+    /\$(\d+)/g,
+    (_: string, index: string) => captures?.[Number(index)] ?? "",
+  );
+  return { route, destination };
+}
+
+for (const kind of ["caterer", "private-chef", "chef"]) {
+  const profilePath = `/${kind}/fixture-profile--fixture-id`;
+  const { route, destination } = resolveConfiguredRoute(profilePath);
+  const rewrite = vercel.rewrites.find((candidate: { source: string }) => {
+    const match = candidate.source.match(/^\/:kind\(([^)]+)\)\/:path\*$/);
+    return match?.[1].split("|").includes(kind);
+  });
+  if (
+    route?.has || route?.continue ||
+    destination !== `https://mealscout.onrender.com${profilePath}` ||
+    rewrite?.has ||
+    rewrite?.destination !== "https://mealscout.onrender.com/:kind/:path*"
+  ) {
+    throw new Error(`Vercel service profile routing must preserve kind and id: ${kind}`);
+  }
+}
+
 for (const snippet of [
   '"/food-trucks/:city/:cuisine"',
   '"/food-trucks/:city"',
   '"/food-trucks-today/:city"',
+  '"/food-truck-catering/:city"',
+  '"/book-food-truck/:city"',
   '"/city/:city/food"',
   '"/deals-today/:city"',
   '"/events-today/:city"',
@@ -384,10 +458,36 @@ if (
   );
 }
 
+for (const snippet of [
+  '"/caterer/:slug"',
+  '"/private-chef/:slug"',
+  '"/chef/:slug"',
+  '"caterer"',
+  '"private_chef"',
+]) {
+  if (!prerender.includes(snippet)) {
+    throw new Error(`Canonical service profile prerender contract missing: ${snippet}`);
+  }
+}
+for (const snippet of [
+  'app.get("/sitemap-services.xml"',
+  "isIndexableServiceProfileRow",
+  "serviceProfileRows.forEach",
+  '"Allow: /caterer/"',
+  '"Allow: /private-chef/"',
+  "sitemap-services.xml",
+]) {
+  if (!seoRoutes.includes(snippet)) {
+    throw new Error(`Service profile sitemap/crawler contract missing: ${snippet}`);
+  }
+}
+
 const requiredPrerenderRoutes = [
   "/food-trucks/:city/:cuisine",
   "/food-trucks/:city",
   "/food-trucks-today/:city",
+  "/food-truck-catering/:city",
+  "/book-food-truck/:city",
   "/deals-today/:city",
   "/events-today/:city",
   "/city/:city/food",
@@ -412,10 +512,12 @@ if (!publicSeoPage.includes("canonicalUrl")) {
   throw new Error("Public SEO page is missing canonical metadata wiring");
 }
 if (
-  (prerender.match(/label: "List or claim your food truck"/g) || []).length !== 3 ||
+  (prerender.match(/label: "List or claim your food truck"/g) || []).length < 5 ||
   (prerender.match(/href: "\/for-food-trucks"/g) || []).length < 3 ||
   !publicSeoPage.includes('"food-trucks-cuisine"') ||
   !publicSeoPage.includes('"food-trucks-today"') ||
+  !publicSeoPage.includes('"food-truck-catering"') ||
+  !publicSeoPage.includes('"book-food-truck"') ||
   !publicSeoPage.includes('href="/for-food-trucks"') ||
   !publicSeoPage.includes("List or claim your food truck") ||
   !publicSeoPage.includes('eventType: "discovery_cta_click"') ||
@@ -535,7 +637,7 @@ if (
 }
 if (
   !publicRestaurantIndexability.includes(
-    'SITEMAP_MEMBERSHIP_VERSION = "pd-v1-indexability-3"',
+    'SITEMAP_MEMBERSHIP_VERSION = "pd-v1-indexability-4"',
   ) ||
   !publicRestaurantIndexability.includes(
     'res.setHeader("X-MealScout-Sitemap-Membership", SITEMAP_MEMBERSHIP_VERSION)',
@@ -615,6 +717,26 @@ for (const snippet of [
     throw new Error(`Canonical typed public profile identity missing: ${snippet}`);
   }
 }
+for (const snippet of [
+  "resolveCanonicalProfileCity",
+  '"@type": "WebPage"',
+  '"@type": "BreadcrumbList"',
+  '"@id": profileEntityId',
+  'mainEntityOfPage: { "@id": profilePageId }',
+  "dateModified: profileUpdatedAt",
+  "/food-truck-catering/",
+  "/book-food-truck/",
+  "const locationSchema = {",
+  "const supplierSchema = {",
+  "#location",
+  "#supplier",
+  'sameAs: [publicProfile.websiteUrl].filter(Boolean)',
+]) {
+  if (!prerender.includes(snippet)) {
+    throw new Error(`Profile discoverability graph missing: ${snippet}`);
+  }
+}
+
 for (const snippet of [
   "resolveOwnerPublicProfile",
   "users.publicProfileSettings",
@@ -848,8 +970,10 @@ const publicEventsRouteIndex = vercel.routes.findIndex(
   (entry: any) => entry.src === "/events/public",
 );
 const broadProfileRouteIndex = vercel.routes.findIndex(
-  (entry: any) =>
-    String(entry.src || "").startsWith("/(restaurant|truck|bar|chef|location|event|events|deal|"),
+  (entry: { src?: string }) => {
+    const match = entry.src?.match(/^\/\(([^)]+)\)\/\(\.\*\)$/);
+    return match?.[1].split("|").includes("events");
+  },
 );
 if (
   featuredDealRewriteIndex < 0 ||
@@ -888,7 +1012,10 @@ if (
   !String(vercel.routes[broadProfileRouteIndex]?.src).includes("events") ||
   !String(vercel.routes[broadProfileRouteIndex]?.dest).startsWith(
     "https://mealscout.onrender.com/",
-  )
+  ) ||
+  resolveConfiguredRoute("/events/public").destination !== "/index.html" ||
+  resolveConfiguredRoute("/events/fixture-profile--fixture-id").destination !==
+    "https://mealscout.onrender.com/events/fixture-profile--fixture-id"
 ) {
   throw new Error(
     "Vercel must keep exact /events/public on the local SPA before the unchanged external event-detail proxy",

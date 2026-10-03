@@ -1,8 +1,9 @@
 import type { Express, NextFunction, Request, Response } from "express";
-import { and, desc, eq, gt, isNull, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, isNull, or, sql } from "drizzle-orm";
 
 import { db } from "../db";
 import {
+  cities,
   deals,
   events,
   hosts,
@@ -54,6 +55,7 @@ import {
   resolvePublicProfileVisibility,
 } from "../publicProfiles/publicProfileUtils";
 import { isPublicBusinessVisible } from "../utils/publicBusinessVisibility";
+import { PUBLIC_PROFILE_STYLES, PUBLIC_PROFILE_STYLES_PATH } from "./publicProfileStyles";
 
 type PageLink = { label: string; href: string };
 
@@ -67,6 +69,8 @@ type PrerenderPage = {
   links: PageLink[];
   body: string[];
   listingHtml?: string;
+  // Only restaurantPage sets this after current native public eligibility checks.
+  appProfile?: { id: string; profileType: "restaurant" | "truck" | "bar" | "caterer" | "private_chef" };
   selectiveIntelligence?: {
     manifestUrl: string;
     mcpUrl: string;
@@ -128,6 +132,33 @@ const toSlug = (value: string | null | undefined) =>
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/(^-|-$)+/g, "")
     .slice(0, 80);
+
+async function resolveCanonicalProfileCity(input: {
+  city?: string | null;
+  state?: string | null;
+}) {
+  const cityName = cleanText(input.city);
+  const stateName = cleanText(input.state);
+  if (!cityName || !stateName) return null;
+  const [row] = await db
+    .select({ id: cities.id, name: cities.name, slug: cities.slug, state: cities.state })
+    .from(cities)
+    .where(
+      and(
+        sql`lower(btrim(coalesce(${cities.name}, ''))) = ${cityName.toLowerCase()}`,
+        sql`lower(btrim(coalesce(${cities.state}, ''))) = ${stateName.toLowerCase()}`,
+        sql`btrim(coalesce(${cities.slug}, '')) <> ''`,
+      ),
+    )
+    .orderBy(sql`${cities.createdAt} desc nulls last`, asc(cities.id))
+    .limit(1);
+  if (!row) return null;
+  return {
+    name: cleanText(row.name, cityName),
+    state: cleanText(row.state, stateName),
+    slug: cleanText(row.slug).toLowerCase(),
+  };
+}
 
 const LEGACY_CITY_DEAL_REDIRECT_QUERY_KEYS = new Set([
   "utm_source",
@@ -421,21 +452,7 @@ const buildHtml = (baseUrl: string, page: PrerenderPage) => {
   ${schema
     .map((entry) => buildJsonLdScript(entry))
     .join("\n  ")}
-  <style>
-    body { font-family: -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif; margin: 0; color: #111827; background: #fffaf2; }
-    main { max-width: 860px; margin: 0 auto; padding: 28px 18px 44px; }
-    h1 { font-size: 34px; line-height: 1.15; margin: 0 0 12px; }
-    p { font-size: 16px; line-height: 1.65; margin: 0 0 14px; }
-    img { max-width: 100%; border-radius: 12px; margin: 14px 0; }
-    .links { margin-top: 20px; padding-top: 14px; border-top: 1px solid #fed7aa; }
-    .links a { display: inline-block; margin: 8px 12px 0 0; color: #9a3412; font-weight: 700; text-decoration: none; }
-    .listing-results { margin-top: 24px; }
-    .listing-results ul { display: grid; grid-template-columns: repeat(auto-fit,minmax(230px,1fr)); gap: 14px; padding: 0; list-style: none; }
-    .listing-results li { border: 1px solid #fed7aa; border-radius: 12px; padding: 14px; background: #fff; }
-    .listing-results li > a, .listing-results li > span { display: block; margin-bottom: 8px; }
-    .listing-results li > a { color: #9a3412; }
-    .listing-results li p { font-size: 14px; margin-bottom: 6px; }
-  </style>
+  <link rel="stylesheet" href="${PUBLIC_PROFILE_STYLES_PATH}">
 </head>
 <body>
   <main>
@@ -460,8 +477,8 @@ const buildHtml = (baseUrl: string, page: PrerenderPage) => {
 async function restaurantPage(
   baseUrl: string,
   restaurantId: string,
-  expectedProfileType?: "restaurant" | "truck" | "bar" | "private_chef",
-) {
+  expectedProfileType?: "restaurant" | "truck" | "bar" | "caterer" | "private_chef",
+): Promise<PrerenderPage | null> {
   const [row] = await db
     .select()
     .from(restaurants)
@@ -472,7 +489,12 @@ async function restaurantPage(
   const canonicalBusinessType = toCanonicalFoodBusinessType(row.businessType);
   const strictRouteProfileType =
     publicProfileType ||
-    (canonicalBusinessType === "private_chef" ? "private_chef" : null);
+    (canonicalBusinessType === "caterer" ||
+    canonicalBusinessType === "private_chef"
+      ? canonicalBusinessType
+      : null);
+  // Untyped recovery must never invent a restaurant for an unsupported type.
+  if (!strictRouteProfileType) return null;
   if (expectedProfileType && strictRouteProfileType !== expectedProfileType) {
     return null;
   }
@@ -498,9 +520,15 @@ async function restaurantPage(
     .map((value) => cleanText(value))
     .filter(Boolean)
     .join(", ");
+  const canonicalCity = await resolveCanonicalProfileCity({
+    city: row.city,
+    state: row.state,
+  });
   const isTruck = publicProfileType === "truck";
   const isBar = publicProfileType === "bar";
+  const isCaterer = canonicalBusinessType === "caterer";
   const isPrivateChef = canonicalBusinessType === "private_chef";
+  const isServiceProfile = isCaterer || isPrivateChef;
   const projectedProfileType =
     publicProfileType ||
     (canonicalBusinessType === "private_chef" ||
@@ -540,11 +568,19 @@ async function restaurantPage(
     ? buildPublicProfilePath({ entityType: "truck", name, id: row.id })
     : isBar
       ? buildPublicProfilePath({ entityType: "bar", name, id: row.id })
-      : isPrivateChef
-        ? `/chef/${encodeURIComponent(`${toSlug(name) || row.id}--${row.id}`)}`
-        : publicProfileType === "restaurant"
-          ? buildPublicProfilePath({ entityType: "restaurant", name, id: row.id })
-          : `/restaurant/${encodeURIComponent(row.id)}/${encodeURIComponent(toSlug(name) || row.id)}`;
+      : isCaterer
+        ? buildPublicProfilePath({ entityType: "caterer", name, id: row.id })
+        : isPrivateChef
+          ? buildPublicProfilePath({ entityType: "private_chef", name, id: row.id })
+          : publicProfileType === "restaurant"
+            ? buildPublicProfilePath({ entityType: "restaurant", name, id: row.id })
+            : `/restaurant/${encodeURIComponent(row.id)}/${encodeURIComponent(toSlug(name) || row.id)}`;
+  const canonicalProfileUrl = absoluteUrl(baseUrl, canonicalPath);
+  const profileEntityId = `${canonicalProfileUrl}#business`;
+  const profilePageId = `${canonicalProfileUrl}#webpage`;
+  const cuisineSlug = toSlug(row.cuisineType);
+  const profileUpdatedAt = isoDate(row.updatedAt);
+
   const videos = await publicVideosFor(ownerType, row.id);
   const menuSnippet = await menuSnippetForRestaurant(row.id);
   const image =
@@ -568,16 +604,18 @@ async function restaurantPage(
 
   const localBusiness = {
     "@context": "https://schema.org",
+    "@id": profileEntityId,
     "@type": isTruck
       ? "FoodTruck"
       : isBar
         ? "BarOrPub"
-        : isPrivateChef
+        : isServiceProfile
           ? "FoodEstablishment"
           : "Restaurant",
     name,
     description,
-    url: absoluteUrl(baseUrl, canonicalPath),
+    url: canonicalProfileUrl,
+    mainEntityOfPage: { "@id": profilePageId },
     image,
     telephone: publicProfile.phonePublic || undefined,
     servesCuisine: row.cuisineType || undefined,
@@ -621,24 +659,122 @@ async function restaurantPage(
     ].filter(Boolean),
   };
 
+  const profilePageSchema = {
+    "@context": "https://schema.org",
+    "@type": "WebPage",
+    "@id": profilePageId,
+    name: `${name}${cityState ? ` in ${cityState}` : ""}${isPrivateChef ? " | MealScout Private Chef" : isCaterer ? " | MealScout Caterer" : " | MealScout"}`,
+    description,
+    url: canonicalProfileUrl,
+    dateModified: profileUpdatedAt,
+    mainEntity: { "@id": profileEntityId },
+    isPartOf: {
+      "@type": "WebSite",
+      name: "MealScout",
+      url: baseUrl,
+    },
+  };
+
+  const breadcrumbItems = [
+    {
+      "@type": "ListItem",
+      position: 1,
+      name: "MealScout",
+      item: baseUrl,
+    },
+    ...(canonicalCity && !isServiceProfile
+      ? [{
+          "@type": "ListItem",
+          position: 2,
+          name: isTruck
+            ? `Food trucks in ${canonicalCity.name}`
+            : `Food in ${canonicalCity.name}`,
+          item: absoluteUrl(
+            baseUrl,
+            isTruck
+              ? `/food-trucks/${encodeURIComponent(canonicalCity.slug)}`
+              : `/city/${encodeURIComponent(canonicalCity.slug)}/food`,
+          ),
+        }]
+      : []),
+    {
+      "@type": "ListItem",
+      position: canonicalCity && !isServiceProfile ? 3 : 2,
+      name,
+      item: canonicalProfileUrl,
+    },
+  ];
+
+  const breadcrumbSchema = {
+    "@context": "https://schema.org",
+    "@type": "BreadcrumbList",
+    itemListElement: breadcrumbItems,
+  };
+
+  const discoveryLinks: PageLink[] = [
+    { label: "Open profile", href: `${canonicalPath}?view=app` },
+    ...(offersCatering
+      ? [{ label: "Catering", href: `${canonicalPath}?service=catering` }]
+      : []),
+    ...(canonicalCity && !isServiceProfile
+      ? [
+          {
+            label: isTruck
+              ? `Food trucks in ${canonicalCity.name}`
+              : `Food in ${canonicalCity.name}`,
+            href: isTruck
+              ? `/food-trucks/${encodeURIComponent(canonicalCity.slug)}`
+              : `/city/${encodeURIComponent(canonicalCity.slug)}/food`,
+          },
+          ...(isTruck
+            ? [
+                {
+                  label: `Food truck catering in ${canonicalCity.name}`,
+                  href: `/food-truck-catering/${encodeURIComponent(canonicalCity.slug)}`,
+                },
+                {
+                  label: `Book a food truck in ${canonicalCity.name}`,
+                  href: `/book-food-truck/${encodeURIComponent(canonicalCity.slug)}`,
+                },
+              ]
+            : []),
+          ...(cuisineSlug
+            ? [{
+                label: `${cleanText(row.cuisineType)} in ${canonicalCity.name}`,
+                href: isTruck
+                  ? `/food-trucks/${encodeURIComponent(canonicalCity.slug)}/${encodeURIComponent(cuisineSlug)}`
+                  : `/cuisine/${encodeURIComponent(cuisineSlug)}/${encodeURIComponent(canonicalCity.slug)}`,
+              }]
+            : []),
+        ]
+      : []),
+    ...(isServiceProfile
+      ? [{ label: "Plan food for an event", href: "/for-events" }]
+      : []),
+    { label: "Find food nearby", href: "/search" },
+    { label: "Scout", href: "/scout" },
+  ];
+
   return {
-    title: `${name}${cityState ? ` in ${cityState}` : ""} | MealScout`,
+    title: `${name}${cityState ? ` in ${cityState}` : ""}${isPrivateChef ? " | MealScout Private Chef" : isCaterer ? " | MealScout Caterer" : " | MealScout"}`,
     description,
     canonicalPath,
+    appProfile: { id: row.id, profileType: strictRouteProfileType },
     imageUrl: image,
     robots,
-    schema: [localBusiness, ...videoSchemas(baseUrl, videos, name)],
-    links: [
-      { label: "Open profile", href: canonicalPath },
-      ...(offersCatering
-        ? [{ label: "Catering", href: `${canonicalPath}?service=catering` }]
-        : []),
-      { label: "Find food nearby", href: "/search" },
-      { label: "Scout", href: "/scout" },
+    schema: [
+      profilePageSchema,
+      localBusiness,
+      breadcrumbSchema,
+      ...videoSchemas(baseUrl, videos, name),
     ],
+    links: discoveryLinks,
     body: [
       row.cuisineType ? `Cuisine: ${row.cuisineType}` : "",
       cityState ? `Area: ${cityState}` : "",
+      profileUpdatedAt
+        ? `Public profile updated: ${profileUpdatedAt.slice(0, 10)}`
+        : "",
       menuSnippet.itemCount
         ? `Menu on MealScout: ${menuSnippet.itemCount} item${menuSnippet.itemCount === 1 ? "" : "s"}${menuHighlights.length ? ` including ${menuHighlights.join(", ")}` : ""}.`
         : row.menuUrl
@@ -674,6 +810,10 @@ async function hostPage(baseUrl: string, hostId: string) {
   const ownerProfile = await resolveOwnerPublicProfile(row.userId);
   if (
     !ownerProfile.ownerEnabled ||
+    !isPublicDiscoveryEligibleEntity({
+      name: row.businessName,
+      isActive: true,
+    }) ||
     !isPublicBusinessVisible({
       name: row.businessName,
       city: row.city,
@@ -697,7 +837,15 @@ async function hostPage(baseUrl: string, hostId: string) {
     .map((value) => cleanText(value))
     .filter(Boolean)
     .join(", ");
+  const canonicalCity = await resolveCanonicalProfileCity({
+    city: row.city,
+    state: row.state,
+  });
   const canonicalPath = `/location/${encodeURIComponent(`${toSlug(name) || row.id}--${row.id}`)}`;
+  const canonicalProfileUrl = absoluteUrl(baseUrl, canonicalPath);
+  const profileEntityId = `${canonicalProfileUrl}#location`;
+  const profilePageId = `${canonicalProfileUrl}#webpage`;
+  const profileUpdatedAt = isoDate(row.updatedAt);
   const videos = await publicVideosFor("host", row.id);
   const image = videos[0]?.thumbnailUrl || resolveHostImage(baseUrl, row);
   const description = cleanText(
@@ -710,6 +858,65 @@ async function hostPage(baseUrl: string, hostId: string) {
     isActive: true,
   });
 
+  const locationSchema = {
+    "@context": "https://schema.org",
+    "@type": "LocalBusiness",
+    "@id": profileEntityId,
+    name,
+    description,
+    url: canonicalProfileUrl,
+    mainEntityOfPage: { "@id": profilePageId },
+    image,
+    telephone: publicPhone || undefined,
+    sameAs: [
+      publicProfile.websiteUrl,
+      publicProfile.socialLinks.instagramUrl,
+      publicProfile.socialLinks.facebookPageUrl,
+      publicProfile.socialLinks.xUrl,
+    ].filter(Boolean),
+    address: {
+      "@type": "PostalAddress",
+      streetAddress: publicProfile.addressPublicLabel
+        ? row.address || undefined
+        : undefined,
+      addressLocality: row.city || undefined,
+      addressRegion: row.state || undefined,
+      addressCountry: "US",
+    },
+  };
+  const profilePageSchema = {
+    "@context": "https://schema.org",
+    "@type": "WebPage",
+    "@id": profilePageId,
+    name: `${name} Food Truck Location${cityState ? ` in ${cityState}` : ""} | MealScout`,
+    description,
+    url: canonicalProfileUrl,
+    dateModified: profileUpdatedAt,
+    mainEntity: { "@id": profileEntityId },
+    isPartOf: { "@type": "WebSite", name: "MealScout", url: baseUrl },
+  };
+  const breadcrumbSchema = {
+    "@context": "https://schema.org",
+    "@type": "BreadcrumbList",
+    itemListElement: [
+      { "@type": "ListItem", position: 1, name: "MealScout", item: baseUrl },
+      ...(canonicalCity
+        ? [{
+            "@type": "ListItem",
+            position: 2,
+            name: `Food in ${canonicalCity.name}`,
+            item: absoluteUrl(baseUrl, `/city/${encodeURIComponent(canonicalCity.slug)}/food`),
+          }]
+        : []),
+      {
+        "@type": "ListItem",
+        position: canonicalCity ? 3 : 2,
+        name,
+        item: canonicalProfileUrl,
+      },
+    ],
+  };
+
   return {
     title: `${name} Food Truck Location${cityState ? ` in ${cityState}` : ""} | MealScout`,
     description,
@@ -719,34 +926,28 @@ async function hostPage(baseUrl: string, hostId: string) {
       ? PUBLIC_RESTAURANT_INDEXABLE_ROBOTS
       : PUBLIC_RESTAURANT_NOINDEX_ROBOTS,
     schema: [
-      {
-        "@context": "https://schema.org",
-        "@type": "LocalBusiness",
-        name,
-        description,
-        url: absoluteUrl(baseUrl, canonicalPath),
-        image,
-        telephone: publicPhone || undefined,
-        address: {
-          "@type": "PostalAddress",
-          streetAddress: publicProfile.addressPublicLabel
-            ? row.address || undefined
-            : undefined,
-          addressLocality: row.city || undefined,
-          addressRegion: row.state || undefined,
-          addressCountry: "US",
-        },
-      },
+      profilePageSchema,
+      locationSchema,
+      breadcrumbSchema,
       ...videoSchemas(baseUrl, videos, name),
     ],
     links: [
       { label: "Open location", href: canonicalPath },
+      ...(canonicalCity
+        ? [{
+            label: `Food in ${canonicalCity.name}`,
+            href: `/city/${encodeURIComponent(canonicalCity.slug)}/food`,
+          }]
+        : []),
       { label: "Host food trucks", href: "/parking-pass" },
       { label: "Explore nearby food", href: "/scout" },
     ],
     body: [
       locationTypeLabel ? `Location type: ${locationTypeLabel}` : "",
       cityState ? `Area: ${cityState}` : "",
+      profileUpdatedAt
+        ? `Public profile updated: ${profileUpdatedAt.slice(0, 10)}`
+        : "",
       videos.length
         ? `${videos.length} public video${videos.length === 1 ? "" : "s"} available for this location.`
         : "",
@@ -1067,39 +1268,79 @@ async function supplierPage(baseUrl: string, supplierId: string) {
     .map((value) => cleanText(value))
     .filter(Boolean)
     .join(", ");
+  const canonicalCity = await resolveCanonicalProfileCity({
+    city: row.city,
+    state: row.state,
+  });
   const canonicalPath = `/supplier/${encodeURIComponent(`${toSlug(name) || row.id}--${row.id}`)}`;
+  const canonicalProfileUrl = absoluteUrl(baseUrl, canonicalPath);
+  const profileEntityId = `${canonicalProfileUrl}#supplier`;
+  const profilePageId = `${canonicalProfileUrl}#webpage`;
+  const profileUpdatedAt = isoDate(row.updatedAt);
   const description = `${name}${cityState ? ` in ${cityState}` : ""} is listed on MealScout Supply Scout for food businesses and operators.`;
+  const supplierSchema = {
+    "@context": "https://schema.org",
+    "@type": "LocalBusiness",
+    "@id": profileEntityId,
+    name,
+    description,
+    url: canonicalProfileUrl,
+    mainEntityOfPage: { "@id": profilePageId },
+    telephone: publicProfile.phonePublic || undefined,
+    sameAs: [publicProfile.websiteUrl].filter(Boolean),
+    address: {
+      "@type": "PostalAddress",
+      streetAddress: publicProfile.addressPublicLabel
+        ? row.address || undefined
+        : undefined,
+      addressLocality: row.city || undefined,
+      addressRegion: row.state || undefined,
+      addressCountry: "US",
+    },
+  };
+  const profilePageSchema = {
+    "@context": "https://schema.org",
+    "@type": "WebPage",
+    "@id": profilePageId,
+    name: `${name}${cityState ? ` in ${cityState}` : ""} | MealScout Supplier`,
+    description,
+    url: canonicalProfileUrl,
+    dateModified: profileUpdatedAt,
+    mainEntity: { "@id": profileEntityId },
+    isPartOf: { "@type": "WebSite", name: "MealScout", url: baseUrl },
+  };
+  const breadcrumbSchema = {
+    "@context": "https://schema.org",
+    "@type": "BreadcrumbList",
+    itemListElement: [
+      { "@type": "ListItem", position: 1, name: "MealScout", item: baseUrl },
+      { "@type": "ListItem", position: 2, name: "Suppliers", item: absoluteUrl(baseUrl, "/suppliers") },
+      { "@type": "ListItem", position: 3, name, item: canonicalProfileUrl },
+    ],
+  };
 
   return {
     title: `${name}${cityState ? ` in ${cityState}` : ""} | MealScout Supplier`,
     description,
     canonicalPath,
-    imageUrl: defaultSocialImagePath,
+    imageUrl: publicProfile.logoUrl || defaultSocialImagePath,
     robots: isSyntheticTestEntity ? noindexRobots : indexableRobots,
-    schema: {
-      "@context": "https://schema.org",
-      "@type": "LocalBusiness",
-      name,
-      description,
-      url: absoluteUrl(baseUrl, canonicalPath),
-      telephone: publicProfile.phonePublic || undefined,
-      address: {
-        "@type": "PostalAddress",
-        streetAddress: publicProfile.addressPublicLabel
-          ? row.address || undefined
-          : undefined,
-        addressLocality: row.city || undefined,
-        addressRegion: row.state || undefined,
-        addressCountry: "US",
-      },
-    },
+    schema: [profilePageSchema, supplierSchema, breadcrumbSchema],
     links: [
       { label: "Open supplier", href: canonicalPath },
       { label: "Browse suppliers", href: "/suppliers" },
-      { label: "Supply Scout", href: "/suppliers" },
+      ...(canonicalCity
+        ? [{
+            label: `Food in ${canonicalCity.name}`,
+            href: `/city/${encodeURIComponent(canonicalCity.slug)}/food`,
+          }]
+        : []),
     ],
     body: [
       cityState ? `Area: ${cityState}` : "",
+      profileUpdatedAt
+        ? `Public profile updated: ${profileUpdatedAt.slice(0, 10)}`
+        : "",
       row.offersDelivery ? "Delivery available" : "",
     ].filter(Boolean),
   } satisfies PrerenderPage;
@@ -1175,8 +1416,10 @@ const sendPage = (
   res: Response,
   page: PrerenderPage | null,
 ) => {
+  res.setHeader("Cache-Control", "no-store");
   if (!page) {
     res.status(404).setHeader("Content-Type", "text/html; charset=utf-8");
+    res.setHeader("X-Robots-Tag", "noindex,follow");
     res.send(
       '<!DOCTYPE html><html><head><title>Not found | MealScout</title><meta name="robots" content="noindex,follow"></head><body>Not found</body></html>',
     );
@@ -1218,6 +1461,24 @@ export function registerPublicProfilePrerenderRoutes(
 ) {
   const loadRestaurantPage = dependencies.restaurantPage || restaurantPage;
   const renderPage = dependencies.sendPage || sendPage;
+  app.get(PUBLIC_PROFILE_STYLES_PATH, (_req, res) => {
+    res.setHeader("Content-Type", "text/css; charset=utf-8");
+    res.setHeader("Cache-Control", "public, max-age=3600");
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.send(PUBLIC_PROFILE_STYLES);
+  });
+  const canonicalAppTarget = (req: Request, page: PrerenderPage, expectedType: NonNullable<PrerenderPage["appProfile"]>["profileType"], id: string) => {
+    const routeKind = expectedType === "private_chef" ? "private-chef" : expectedType;
+    const match = /^\/(restaurant|truck|bar|caterer|private-chef)\/([^/?#\\\s]+)$/.exec(page.canonicalPath);
+    if (!page.appProfile || page.appProfile.id !== id || page.appProfile.profileType !== expectedType || !match || match[1] !== routeKind) return false;
+    let slug: string;
+    try { slug = decodeURIComponent(match[2]); } catch { return false; }
+    return slug.includes("--") && extractId(slug) === id && req.path === page.canonicalPath;
+  };
+  const appViewUrl = (req: Request, canonicalPath: string) => {
+    const attribution = legacyCityDealRedirectQuery(req);
+    return `${canonicalPath}?view=app${attribution ? `&${attribution.slice(1)}` : ""}`;
+  };
   const gate =
     (handler: (req: Request) => Promise<PrerenderPage | null>) =>
     async (req: Request, res: Response) => {
@@ -1228,6 +1489,90 @@ export function registerPublicProfilePrerenderRoutes(
         sendPrerenderUnavailable(res);
       }
     };
+
+  const canonicalRestaurantGate =
+    (
+      expectedProfileType:
+        | "restaurant"
+        | "truck"
+        | "bar"
+        | "caterer"
+        | "private_chef",
+      idFromRequest: (req: Request) => string,
+    ) =>
+    async (req: Request, res: Response, next: NextFunction) => {
+      try {
+        const id = idFromRequest(req);
+        const expected = await loadRestaurantPage(
+          canonicalBaseUrl,
+          id,
+          expectedProfileType,
+        );
+        if (expected) {
+          if (canonicalAppTarget(req, expected, expectedProfileType, id)) {
+            const incoming = new URL(req.originalUrl || req.url, canonicalBaseUrl);
+            const views = incoming.searchParams.getAll("view");
+            if (views.length === 1 && views[0] === "app") {
+              const safeTarget = appViewUrl(req, expected.canonicalPath);
+              res.setHeader("Cache-Control", "no-store");
+              if (incoming.pathname + incoming.search !== safeTarget) return res.redirect(308, safeTarget);
+              const discovery = [`<${absoluteUrl(canonicalBaseUrl, expected.canonicalPath)}>; rel="canonical"`];
+              const manifestUrl = absoluteUrl(canonicalBaseUrl, `/api/owner-ai/profiles/${encodeURIComponent(id)}/selective-intelligence`);
+              const mcpUrl = absoluteUrl(canonicalBaseUrl, `/api/owner-ai/profiles/${encodeURIComponent(id)}/mcp`);
+              if (expected.selectiveIntelligence?.manifestUrl === manifestUrl && expected.selectiveIntelligence.mcpUrl === mcpUrl) {
+                discovery.push(`<${manifestUrl}>; rel="alternate"; type="application/vnd.selective-intelligence+json"; title="Selective Intelligence"`, `<${mcpUrl}>; rel="alternate"; type="application/mcp+json"; title="MealScout owner actions"`);
+              }
+              res.setHeader("Link", discovery.join(", "));
+              // Server-owned handoff marker; never derived directly from query flags downstream.
+              res.locals.mealScoutPublicProfileAppView = true;
+              return next();
+            }
+            return renderPage(canonicalBaseUrl, res, { ...expected, links: expected.links.map(link => link.label === "Open profile" ? { ...link, href: appViewUrl(req, expected.canonicalPath) } : link) });
+          }
+          return renderPage(canonicalBaseUrl, res, expected);
+        }
+
+        const current = await loadRestaurantPage(canonicalBaseUrl, id);
+        if (current) {
+          return safeCanonicalRedirect(req, res, current);
+        }
+
+        return renderPage(canonicalBaseUrl, res, null);
+      } catch (error) {
+        console.error("[seo-prerender] canonical profile recovery failed", error);
+        return sendPrerenderUnavailable(res);
+      }
+    };
+
+  const legacyProfileRedirectQuery = (req: Request) =>
+    legacyCityDealRedirectQuery(req);
+
+  const safeCanonicalRedirect = (
+    req: Request,
+    res: Response,
+    page: PrerenderPage,
+    preserveAttribution = true,
+  ) => {
+    const incomingPath = String(req.path || "").replace(/\/+$/, "") || "/";
+    const targetPath = String(page.canonicalPath || "");
+    const directives = String(page.robots || "").toLowerCase().split(",").map(value => value.trim());
+    const id = extractId(req.params.profileId || req.params.id || req.params.slug);
+    const match = /^\/(restaurant|truck|bar|caterer|private-chef|location|supplier|event)\/([^/?#\\\s]+)$/.exec(targetPath);
+    let sameEntity = false;
+    if (match) {
+      const decoded = decodeURIComponent(match[2]);
+      sameEntity = decoded.includes("--") && extractId(decoded) === id;
+    }
+    // A recovered URL needs current public eligibility and the same entity ID.
+    // Never publish an arbitrary destination or a self-loop for unknown types.
+    if (!sameEntity || !directives.includes("index") || directives.includes("noindex") || incomingPath === targetPath.replace(/\/+$/, "")) {
+      return renderPage(canonicalBaseUrl, res, null);
+    }
+    const target = targetPath + (preserveAttribution ? legacyProfileRedirectQuery(req) : "");
+    // Identity can be disabled after this request, so do not cache the redirect.
+    res.setHeader("Cache-Control", "no-store");
+    return res.redirect(308, target);
+  };
 
   const landingGate =
     (handler: (req: Request) => Promise<PrerenderPage | null>) =>
@@ -1240,12 +1585,9 @@ export function registerPublicProfilePrerenderRoutes(
       }
     };
 
-  const restaurantDetailGate = gate((req) =>
-    loadRestaurantPage(
-      canonicalBaseUrl,
-      extractId(req.params.id),
-      "restaurant",
-    ),
+  const restaurantDetailGate = canonicalRestaurantGate(
+    "restaurant",
+    (req) => extractId(req.params.id),
   );
   app.get(
     "/restaurant/:id/:slug",
@@ -1254,7 +1596,7 @@ export function registerPublicProfilePrerenderRoutes(
         res.setHeader("X-Robots-Tag", "noindex,nofollow,noarchive");
         return next();
       }
-      return restaurantDetailGate(req, res);
+      return restaurantDetailGate(req, res, next);
     },
   );
   app.get(
@@ -1263,39 +1605,53 @@ export function registerPublicProfilePrerenderRoutes(
       if (String(req.params.id || "").trim().toLowerCase() === "dashboard") {
         return next();
       }
-      return restaurantDetailGate(req, res);
+      return restaurantDetailGate(req, res, next);
     },
   );
   app.get(
     "/truck/:slug",
-    gate((req) =>
-      loadRestaurantPage(
-        canonicalBaseUrl,
-        extractId(req.params.slug),
-        "truck",
-      ),
+    canonicalRestaurantGate(
+      "truck",
+      (req) => extractId(req.params.slug),
     ),
   );
   app.get(
     "/bar/:slug",
-    gate((req) =>
-      loadRestaurantPage(
-        canonicalBaseUrl,
-        extractId(req.params.slug),
-        "bar",
-      ),
+    canonicalRestaurantGate(
+      "bar",
+      (req) => extractId(req.params.slug),
     ),
   );
   app.get(
-    "/chef/:slug",
-    gate((req) =>
-      loadRestaurantPage(
+    "/caterer/:slug",
+    canonicalRestaurantGate(
+      "caterer",
+      (req) => extractId(req.params.slug),
+    ),
+  );
+  app.get(
+    "/private-chef/:slug",
+    canonicalRestaurantGate(
+      "private_chef",
+      (req) => extractId(req.params.slug),
+    ),
+  );
+  app.get("/chef/:slug", async (req: Request, res: Response) => {
+    try {
+      const page = await loadRestaurantPage(
         canonicalBaseUrl,
         extractId(req.params.slug),
         "private_chef",
-      ),
-    ),
-  );
+      );
+      if (!page) {
+        return renderPage(canonicalBaseUrl, res, null);
+      }
+      return safeCanonicalRedirect(req, res, page);
+    } catch (error) {
+      console.error("[seo-prerender] legacy chef redirect failed", error);
+      return sendPrerenderUnavailable(res);
+    }
+  });
   app.get(
     "/location/:slug",
     gate((req) => hostPage(canonicalBaseUrl, extractId(req.params.slug))),
@@ -1364,29 +1720,52 @@ export function registerPublicProfilePrerenderRoutes(
   );
   app.get(
     ["/p/:profileType/:profileId", "/p/:profileType/:profileId/:profileSlug"],
-    gate((req) => {
-      const type = String(req.params.profileType || "").toLowerCase();
-      const id = extractId(req.params.profileId);
-      if (type === "restaurant") {
-        return loadRestaurantPage(canonicalBaseUrl, id, "restaurant");
+    async (req: Request, res: Response) => {
+      try {
+        const type = String(req.params.profileType || "").toLowerCase();
+        const id = extractId(req.params.profileId);
+        let page: PrerenderPage | null = null;
+        if (type === "restaurant") {
+          page = await loadRestaurantPage(canonicalBaseUrl, id, "restaurant");
+        } else if (type === "food_truck" || type === "truck") {
+          page = await loadRestaurantPage(canonicalBaseUrl, id, "truck");
+        } else if (type === "bar") {
+          page = await loadRestaurantPage(canonicalBaseUrl, id, "bar");
+        } else if (type === "caterer") {
+          page = await loadRestaurantPage(canonicalBaseUrl, id, "caterer");
+        } else if (
+          type === "private_chef" ||
+          type === "private-chef" ||
+          type === "chef"
+        ) {
+          page = await loadRestaurantPage(canonicalBaseUrl, id, "private_chef");
+        } else if (type === "host" || type === "location") {
+          page = await hostPage(canonicalBaseUrl, id);
+        } else if (type === "supplier") {
+          page = await supplierPage(canonicalBaseUrl, id);
+        } else if (type === "event") {
+          page = await eventPage(canonicalBaseUrl, id);
+        }
+
+        if (page) {
+          return safeCanonicalRedirect(req, res, page, true);
+        }
+
+        if (
+          ["restaurant", "food_truck", "truck", "bar", "caterer", "private_chef", "private-chef", "chef"].includes(type)
+        ) {
+          const current = await loadRestaurantPage(canonicalBaseUrl, id);
+          if (current) {
+            return safeCanonicalRedirect(req, res, current, true);
+          }
+        }
+
+        return renderPage(canonicalBaseUrl, res, null);
+      } catch (error) {
+        console.error("[seo-prerender] legacy profile recovery failed", error);
+        return sendPrerenderUnavailable(res);
       }
-      if (type === "food_truck" || type === "truck") {
-        return loadRestaurantPage(canonicalBaseUrl, id, "truck");
-      }
-      if (type === "bar") {
-        return loadRestaurantPage(canonicalBaseUrl, id, "bar");
-      }
-      if (type === "host" || type === "location") {
-        return hostPage(canonicalBaseUrl, id);
-      }
-      if (type === "supplier") {
-        return supplierPage(canonicalBaseUrl, id);
-      }
-      if (type === "event") {
-        return eventPage(canonicalBaseUrl, id);
-      }
-      return Promise.resolve(null);
-    }),
+    },
   );
   app.get(
     "/food-trucks/:city/:cuisine",
@@ -1462,6 +1841,58 @@ export function registerPublicProfilePrerenderRoutes(
     ),
   );
   app.get(
+    "/food-truck-catering/:city",
+    landingGate((req) =>
+      seoLandingPage(
+        canonicalBaseUrl,
+        {
+          ...publicSeoCityRequest("food-truck-catering", req.params.city),
+          links: [
+            {
+              label: "Book a food truck",
+              href: `/book-food-truck/${encodeURIComponent(String(req.params.city || ""))}`,
+            },
+            {
+              label: "Browse food trucks in this city",
+              href: `/food-trucks/${encodeURIComponent(String(req.params.city || ""))}`,
+            },
+            {
+              label: "List or claim your food truck",
+              href: "/for-food-trucks",
+            },
+          ],
+        },
+        loadLanding,
+      ),
+    ),
+  );
+  app.get(
+    "/book-food-truck/:city",
+    landingGate((req) =>
+      seoLandingPage(
+        canonicalBaseUrl,
+        {
+          ...publicSeoCityRequest("book-food-truck", req.params.city),
+          links: [
+            {
+              label: "Food truck catering",
+              href: `/food-truck-catering/${encodeURIComponent(String(req.params.city || ""))}`,
+            },
+            {
+              label: "Browse food trucks in this city",
+              href: `/food-trucks/${encodeURIComponent(String(req.params.city || ""))}`,
+            },
+            {
+              label: "List or claim your food truck",
+              href: "/for-food-trucks",
+            },
+          ],
+        },
+        loadLanding,
+      ),
+    ),
+  );
+  app.get(
     "/deals-today/:city",
     landingGate((req) =>
       seoLandingPage(
@@ -1518,6 +1949,8 @@ export function registerPublicProfilePrerenderRoutes(
       ),
     ),
   );
+  // Missing inventory is not evidence of permanent retirement. Unknown cities
+  // and missing cuisines remain 404; loader failures remain retryable 503.
   app.get(
     "/cuisine/:cuisine/:city?",
     landingGate((req) =>

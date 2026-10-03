@@ -122,6 +122,14 @@ test("browser route mapping keeps the specific truck-cuisine endpoint before cit
     "food_trucks_city",
   );
   assert.equal(
+    mapPublicSeoLandingSourcePageType("food-truck-catering"),
+    "food_truck_catering",
+  );
+  assert.equal(
+    mapPublicSeoLandingSourcePageType("book-food-truck"),
+    "book_food_truck",
+  );
+  assert.equal(
     mapPublicSeoLandingSourcePageType("food-trucks"),
     "food_trucks_city",
   );
@@ -680,3 +688,12 @@ test("JSON-LD serialization cannot be terminated by merchant-controlled text", (
     .replace(/<\/script>$/, "");
   assert.equal(JSON.parse(json).itemListElement[0].name, maliciousName);
 });
+
+assert.equal(
+  mapPublicSeoLandingPathToEndpoint("/food-truck-catering/pensacola"),
+  "/api/public/seo/food-truck-catering/pensacola",
+);
+assert.equal(
+  mapPublicSeoLandingPathToEndpoint("/book-food-truck/pensacola"),
+  "/api/public/seo/book-food-truck/pensacola",
+);

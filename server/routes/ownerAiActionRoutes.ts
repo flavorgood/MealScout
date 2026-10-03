@@ -1,3 +1,6 @@
+import { ReverseOsmosisError } from "@tradescout-infinity/reverse-osmosis";
+import { registerReverseOsmosisRoutes } from "./reverseOsmosisRoutes";
+import { registerOwnerAiNativeProfileRoutes } from "./ownerAiNativeProfileRoutes";
 import type { Express, NextFunction, Request, Response } from "express";
 import { and, eq } from "drizzle-orm";
 import { z, ZodError } from "zod";
@@ -10,6 +13,7 @@ import {
   OWNER_AI_PACKET_JSON_SCHEMA,
 } from "@shared/ownerAiActions";
 import { restaurants } from "@shared/schema";
+import { OWNER_AI_PROFILE_PREVIEW_JSON_SCHEMA } from "@shared/ownerAiCapabilities";
 import {
   OwnerAiActionError,
   approveOwnerAiDraft,
@@ -44,6 +48,8 @@ import {
   revokeRefreshTokensForAccessKey,
 } from "../services/ownerAiOAuth";
 import { handleOwnerAiMcpRequest } from "../services/ownerAiMcp";
+import { ownerAiProfileCapabilities } from "../services/ownerAiProfileCapabilities";
+import { createOwnerAiOfficialSourceDraft, readOwnerAiSourceReviews } from "../services/ownerAiSourceReviews";
 import { toPublicRestaurantListingWithVisibility } from "../publicProfiles/toPublicRestaurantListingWithVisibility";
 import { deriveProfileEvidenceQuarantineVisibility } from "../services/profileEvidenceQuarantine";
 
@@ -223,6 +229,8 @@ const instructions = {
     authorization:
       "OAuth 2.1 authorization code with PKCE and MealScout owner consent",
     tools: [
+      "get_mealscout_profile_capabilities",
+      "preview_mealscout_profile_changes",
       "get_mealscout_context",
       "create_mealscout_draft",
       "get_mealscout_draft_status",
@@ -262,6 +270,25 @@ const openApiDocument = {
     schemas: { OwnerAiDraftRequest: OWNER_AI_PACKET_JSON_SCHEMA },
   },
   paths: {
+    "/api/owner-ai/restaurants/{restaurantId}/source-reviews": { get: { operationId: "readMealScoutOfficialSourceReviews", security: [{ ownerSession: [] }], summary: "Read current-owner private nightly semantic proposals; removed or hidden evidence is withheld", responses: { "200": { description: "Private proposals and explicit holds; no application authority" }, "403": { description: "Current native owner/public visibility required" } } } },
+    "/api/owner-ai/restaurants/{restaurantId}/source-draft": { post: { operationId: "prepareMealScoutOfficialSourceDraft", security: [{ ownerSession: [] }], summary: "Re-fetch verified official sources and prepare a native draft for exact owner review", requestBody: { content: { "application/json": { schema: { type: "object", additionalProperties: false } } } }, responses: { "201": { description: "Native evidence-bound draft created; exact revision approval still required" }, "200": { description: "No supported facts; explicit holds and no draft" }, "409": { description: "Sources or native versions changed" } } } },
+    "/api/owner-ai/connector/capabilities": {
+      get: {
+        operationId: "getMealScoutProfileCapabilities",
+        summary: "Read persisted owner-bound native profile type, supported capabilities and credential state",
+        security: [{ mealScoutOAuth: ["owner_ai:context"] }, { connectorBearer: [] }],
+        responses: { "200": { description: "Read-only capabilities; no application grant" }, "403": { description: "Current owner or credential state rejected" } },
+      },
+    },
+    "/api/owner-ai/connector/preview": {
+      post: {
+        operationId: "previewMealScoutProfileChanges",
+        summary: "Strict read-only preview; source declarations remain unverified and confer no grants",
+        security: [{ mealScoutOAuth: ["owner_ai:context", "owner_ai:drafts:create"] }, { connectorBearer: [] }],
+        requestBody: { required: true, content: { "application/json": { schema: OWNER_AI_PROFILE_PREVIEW_JSON_SCHEMA } } },
+        responses: { "200": { description: "Read-only preview, approval required, canApply false" }, "409": { description: "Native versions stale" }, "403": { description: "Authority, visibility or scope rejected" } },
+      },
+    },
     "/api/owner-ai/connector/context": {
       get: {
         operationId: "getMealScoutOwnerContext",
@@ -337,6 +364,8 @@ const openApiDocument = {
 };
 
 export function registerOwnerAiActionRoutes(app: Express) {
+  registerOwnerAiNativeProfileRoutes(app);
+  registerReverseOsmosisRoutes(app);
   const connectorRateKey = (req: ConnectorRequest) =>
     req.ownerAiConnector?.apiKeyId || "owner-ai-connector-unresolved";
   const connectorContextLimiter = distributedRateLimit({
@@ -665,12 +694,34 @@ export function registerOwnerAiActionRoutes(app: Express) {
     connectorAuth("owner_ai:context"),
     connectorContextLimiter,
     asyncRoute(async (req: ConnectorRequest, res) => {
+      res.setHeader("Cache-Control", "private, no-store");
       res.json(
         await getOwnerAiContext(
           req.ownerAiConnector!.restaurantId,
           contextOffsets(req),
         ),
       );
+    }),
+  );
+
+  app.get(
+    "/api/owner-ai/connector/capabilities",
+    requireOwnerAiRemoteConnector,
+    connectorAuth("owner_ai:context"),
+    connectorContextLimiter,
+    asyncRoute(async (req: ConnectorRequest, res) => {
+      res.setHeader("Cache-Control", "private, no-store");
+      res.json(await ownerAiProfileCapabilities.read(req.ownerAiConnector!));
+    }),
+  );
+  app.post(
+    "/api/owner-ai/connector/preview",
+    requireOwnerAiRemoteConnector,
+    connectorAuth("owner_ai:drafts:create"),
+    connectorDraftCreateLimiter,
+    asyncRoute(async (req: ConnectorRequest, res) => {
+      res.setHeader("Cache-Control", "private, no-store");
+      res.json(await ownerAiProfileCapabilities.preview(req.ownerAiConnector!, req.body));
     }),
   );
 
@@ -721,6 +772,26 @@ export function registerOwnerAiActionRoutes(app: Express) {
           contextOffsets(req),
         ),
       );
+    }),
+  );
+
+  app.get(
+    "/api/owner-ai/restaurants/:restaurantId/source-reviews",
+    isAuthenticated,
+    asyncRoute(async (req: any, res) => {
+      res.setHeader("Cache-Control", "private, no-store");
+      res.json(await readOwnerAiSourceReviews(String(req.user.id), z.string().uuid().parse(req.params.restaurantId)));
+    }),
+  );
+  app.post(
+    "/api/owner-ai/restaurants/:restaurantId/source-draft",
+    isAuthenticated,
+    distributedRateLimit({ scope: "owner-ai:official-source-draft", limit: 10, windowMs: 60 * 60 * 1000, key: (req: any) => String(req.user?.id || req.ip || "unknown") }),
+    asyncRoute(async (req: any, res) => {
+      z.object({}).strict().parse(req.body || {});
+      res.setHeader("Cache-Control", "private, no-store");
+      const result = await createOwnerAiOfficialSourceDraft(String(req.user.id), z.string().uuid().parse(req.params.restaurantId));
+      res.status(result.draft ? 201 : 200).json(result);
     }),
   );
 
@@ -900,6 +971,9 @@ export function registerOwnerAiActionRoutes(app: Express) {
   app.use(
     "/api/owner-ai",
     (error: unknown, _req: Request, res: Response, next: NextFunction) => {
+      if (error instanceof ReverseOsmosisError) {
+        return res.status(409).json({ code: error.code, error: "Reverse Osmosis held this operation. Refresh the source and review a new draft; uncertain delivery requires reconciliation." });
+      }
       if (error instanceof ZodError) {
         return res.status(400).json({
           error: "Invalid owner AI request",

@@ -1,13 +1,16 @@
 import { parseAcquisitionQualityReport } from "../../shared/acquisitionQuality";
+import { readOriginRequestTraffic } from "./originRequestTraffic";
 
 /** Stored request evidence only. Profile errors never create entry/action facts. */
 export const ACQUISITION_QUALITY_SQL = `
 WITH rows AS (
   SELECT id, created_at,
     coalesce(nullif(metadata->>'anonymousJourneyId',''),nullif(anonymous_actor_id,''),nullif(session_id,'')) AS journey,
-    CASE WHEN metadata#>>'{trafficQuality,version}'='1'
-      AND metadata#>>'{trafficQuality,basis}'='server_observed_request_signals'
-      AND metadata#>>'{trafficQuality,classification}' IN ('browser_candidate','automation_signal','qa_signal','unclassified')
+    CASE WHEN metadata#>>'{trafficQuality,basis}'='server_observed_request_signals'
+      AND ((metadata#>>'{trafficQuality,version}'='1'
+        AND metadata#>>'{trafficQuality,classification}' IN ('browser_candidate','automation_signal','qa_signal','unclassified'))
+        OR (metadata#>>'{trafficQuality,version}'='2'
+        AND metadata#>>'{trafficQuality,classification}' IN ('browser_candidate','discovery_crawler','infrastructure_monitor','automation_signal','qa_signal','unclassified')))
       THEN metadata#>>'{trafficQuality,classification}'
       WHEN coalesce(metadata,'{}'::jsonb) ? 'trafficQuality' THEN 'unclassified' ELSE 'legacy_unclassified' END AS classification,
     CASE WHEN metadata->>'evidenceKind'='client_reported_profile_quality'
@@ -36,16 +39,17 @@ WITH rows AS (
 ), entries AS (
   SELECT DISTINCT ON (e.journey) e.journey,e.source,e.created_at
   FROM rows e WHERE e.kind='entry' AND e.classification='browser_candidate' AND e.journey IS NOT NULL
-    -- Inspect all retained events on the same discovery surfaces, not only this window.
-    -- Identity precedence is unchanged; unrelated operational sessions are not joined.
-    -- Expired history stays unavailable. This query does not extend raw-log retention.
+    -- All retained events on the same discovery surfaces can exclude a journey.
+    -- This preserves existing identity precedence and raw-log retention.
     AND NOT EXISTS(
       SELECT 1 FROM public.request_logs bad
       WHERE bad.surface IN ('public_profile','public_discovery','discovery_observatory')
         AND coalesce(nullif(bad.metadata->>'anonymousJourneyId',''),nullif(bad.anonymous_actor_id,''),nullif(bad.session_id,''))=e.journey
-        AND bad.metadata#>>'{trafficQuality,version}'='1'
         AND bad.metadata#>>'{trafficQuality,basis}'='server_observed_request_signals'
-        AND bad.metadata#>>'{trafficQuality,classification}' IN ('automation_signal','qa_signal')
+        AND ((bad.metadata#>>'{trafficQuality,version}'='1'
+          AND bad.metadata#>>'{trafficQuality,classification}' IN ('automation_signal','qa_signal'))
+          OR (bad.metadata#>>'{trafficQuality,version}'='2'
+          AND bad.metadata#>>'{trafficQuality,classification}' IN ('automation_signal','qa_signal','discovery_crawler','infrastructure_monitor')))
     )
   ORDER BY e.journey,e.created_at,e.id
 ), candidates AS (
@@ -55,7 +59,8 @@ WITH rows AS (
   SELECT source,count(*)::int AS journeys,count(*) FILTER(WHERE acted)::int AS "journeysWithAction"
   FROM candidates GROUP BY source
 ), classified AS (
-  SELECT count(*)::int AS total FROM rows WHERE kind IN ('entry','action') AND classification <> 'legacy_unclassified'
+  SELECT count(*)::int AS total FROM rows WHERE kind IN ('entry','action')
+    AND classification NOT IN ('unclassified','legacy_unclassified')
 )
 SELECT jsonb_build_object(
   'recordedRows',(SELECT count(*) FROM rows),
@@ -72,7 +77,12 @@ SELECT jsonb_build_object(
 ) AS report;
 `;
 export type AcquisitionQueryClient = { query: (text: string, values?: any[]) => Promise<any>; release: () => void };
-export async function readAcquisitionQuality(client: AcquisitionQueryClient, hours: 6 | 24 | 48, now = new Date()) {
+export async function readAcquisitionQuality(
+  client: AcquisitionQueryClient,
+  hours: 6 | 24 | 48,
+  now = new Date(),
+  options: { includeOriginRequests?: boolean } = {},
+) {
   if (![6,24,48].includes(hours) || !Number.isFinite(now.getTime())) throw new Error("Invalid report window.");
   const from = new Date(now.getTime() - hours * 3600000).toISOString(), toExclusive = now.toISOString();
   await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
@@ -80,7 +90,10 @@ export async function readAcquisitionQuality(client: AcquisitionQueryClient, hou
     await client.query("SET LOCAL statement_timeout='8s'");
     await client.query("SET LOCAL TIME ZONE 'UTC'");
     const result = await client.query(ACQUISITION_QUALITY_SQL, [from,toExclusive]);
-    const report = parseAcquisitionQualityReport({ ...result.rows?.[0]?.report, version:1, product:"mealscout", hours, from, toExclusive, coverage:"available_retained_records_not_guaranteed_complete" });
+    const originRequests = options.includeOriginRequests
+      ? await readOriginRequestTraffic(client, from, toExclusive)
+      : null;
+    const report = parseAcquisitionQualityReport({ ...result.rows?.[0]?.report, originRequests, version:1, product:"mealscout", hours, from, toExclusive, coverage:"available_retained_records_not_guaranteed_complete" });
     await client.query("COMMIT");
     return report;
   } catch(error) { await client.query("ROLLBACK").catch(() => {}); throw error; }

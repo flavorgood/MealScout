@@ -15,7 +15,7 @@ Entry routes:
 - `/deals`, `/deals/featured`, `/deals/:city`, `/deal/:id` - deal discovery/detail.
 - `/restaurant/:id`, `/truck/:slug`, `/bar/:slug`, `/location/:slug` - public detail pages.
 - `/p/:profileType/:profileId` and `/p/:profileType/:profileId/:profileSlug` - public profile routes.
-- `/food-trucks/:citySlug`, `/food-trucks/:citySlug/:cuisineSlug`, `/food-trucks-today/:city`, `/deals-today/:city`, `/events-today/:city`, `/locations-with-trucks/:city` - SEO/city discovery routes.
+- `/food-trucks/:citySlug`, `/food-trucks/:citySlug/:cuisineSlug`, `/food-trucks-today/:city`, `/food-truck-catering/:city`, `/book-food-truck/:city`, `/deals-today/:city`, `/events-today/:city`, `/locations-with-trucks/:city` - SEO/city discovery routes.
 - `/category/:category`, `/cuisine/:type`, `/cuisine/:cuisine/:city`, `/city/:city`, `/city/:city/:mode`, `/city/:city/food` - category, cuisine, and city landing routes.
 - `/events`, `/events/public`, `/event/:slug` - public event discovery/detail.
 - `/menu/:restaurantId`, `/checkout/:restaurantId`, `/order-confirmation/:orderId` - public menu and pickup checkout surfaces.

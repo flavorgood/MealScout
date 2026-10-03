@@ -1,0 +1,11 @@
+import assert from "node:assert/strict";
+import { officialSourceHoldMessage } from "../shared/ownerAiSourceHolds";
+const secret="https://private.example/customer-token";
+assert.match(officialSourceHoldMessage("MISSING_OFFICIAL_SOURCE"),/Add and approve an official public website/);
+assert.match(officialSourceHoldMessage("SOURCE_UNAVAILABLE:"+secret),/page is public and current/);
+assert.match(officialSourceHoldMessage("CONFLICT:profile.phone"),/Resolve the conflicting details/);
+assert.match(officialSourceHoldMessage("SOURCE_REVIEW_EXPIRED_OR_VISIBILITY_CHANGED"),/new source draft/);
+assert.match(officialSourceHoldMessage("MENU_CONTENT_PRICE_AND_EFFECTIVE_DATE_REQUIRE_SEPARATE_VERIFICATION"),/prices and effective dates/);
+assert.match(officialSourceHoldMessage("DATED_ATTENDANCE_YEAR_TIMEZONE_AND_PUBLIC_ACCESS_REQUIRE_SEPARATE_VERIFICATION"),/Events need verified dates, timezone and public attendance/);
+for(const held of ["SOURCE_UNAVAILABLE:"+secret, "UNKNOWN_FAILURE:"+secret])assert.ok(!officialSourceHoldMessage(held).includes(secret));
+console.log("PASS actionable owner source guidance for missing/inaccessible/conflicting/stale/menu/event holds; raw sensitive source and error details are never displayed");

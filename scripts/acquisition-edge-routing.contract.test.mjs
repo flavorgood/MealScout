@@ -6,6 +6,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
+import { spawnSync } from "node:child_process";
 
 const config = JSON.parse(
   readFileSync(process.env.ACQUISITION_ROUTING_CONFIG || "vercel.json", "utf8"),
@@ -77,3 +78,10 @@ for (const [key, source, destination, fallback] of [
 
 // Exercise the actual daily callback with isolated imports and provider responses.
 await import("./indexnow-scheduler.contract.test.mjs");
+
+test("host application requires a saved receipt and preserves persistence on email failure", () => {
+  const result = spawnSync(process.execPath, ["--import", "tsx", "--test", "scripts/host-partner-confirmation.contract.test.mjs"], {
+    encoding: "utf8", timeout: 30000,
+  });
+  assert.equal(result.status, 0, result.error?.message || result.stdout + result.stderr);
+});

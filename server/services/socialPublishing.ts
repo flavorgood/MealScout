@@ -116,13 +116,16 @@ export async function listSocialConnectionStatus(restaurantId: string) {
 async function updateConnectionPublishState(
   connection: SocialPublishingConnection,
   result: PublishResult,
+  database: any = db,
+  preserveBindingTimestamp = false,
 ) {
-  await db
+  await database
     .update(socialPublishingConnections)
     .set({
       lastPublishAt: result.ok ? new Date() : connection.lastPublishAt,
       lastError: result.ok ? null : result.error,
-      updatedAt: new Date(),
+      // A publish receipt does not change account authority or its approved binding.
+      updatedAt: preserveBindingTimestamp ? connection.updatedAt : new Date(),
     })
     .where(eq(socialPublishingConnections.id, connection.id));
 }
@@ -322,7 +325,7 @@ async function publishFacebook(
     };
   }
   const providerPostId = data?.post_id || data?.id || null;
-  if (!providerPostId) {
+  if (typeof providerPostId !== "string" || providerPostId.trim().length === 0) {
     return {
       ok: false,
       manualRequired: true,
@@ -530,12 +533,13 @@ async function publishX(
 
 export async function publishSocialQueueItem(
   row: SocialPostQueueItem,
+  nativeBoundary?: { connection: SocialPublishingConnection; database: any },
 ): Promise<PublishResult> {
-  const connection = await getActiveSocialConnection(
+  const connection = nativeBoundary?.connection || await getActiveSocialConnection(
     row.restaurantId,
     row.platform,
   );
-  if (!connection) {
+  if (!connection || (nativeBoundary && (connection.restaurantId !== row.restaurantId || connection.platform !== row.platform || connection.status !== "active"))) {
     return {
       ok: false,
       manualRequired: true,
@@ -557,7 +561,7 @@ export async function publishSocialQueueItem(
               error: `Unsupported publishing platform: ${row.platform}`,
             };
   try {
-    await updateConnectionPublishState(connection, result);
+    await updateConnectionPublishState(connection, result, nativeBoundary?.database || db, Boolean(nativeBoundary));
   } catch {
     // The queue row remains the source of truth. A secondary connection-status
     // write must never erase or misreport a provider result.
@@ -568,8 +572,9 @@ export async function publishSocialQueueItem(
 export async function markSocialPostResult(
   row: SocialPostQueueItem,
   result: PublishResult,
+  database: any = db,
 ) {
-  await db
+  await database
     .update(socialPostQueue)
     .set({
       status: result.ok

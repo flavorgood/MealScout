@@ -1,4 +1,5 @@
 export * from "./schema/core";
+export * from "./schema/foodBusinessAppearances";
 export * from "./schema/users";
 export * from "./schema/restaurants";
 export * from "./schema/deals";
@@ -14,3 +15,6 @@ export * from "./schema/growth";
 export * from "./schema/misc";
 export * from "./schema/moderation";
 export * from "./schema/scoutcoin";
+
+export * from "./schema/ownerAiNativeProfiles";
+export * from "./schema/reverseOsmosis";

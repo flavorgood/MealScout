@@ -14,7 +14,7 @@ export const PUBLIC_RESTAURANT_INDEXABLE_ROBOTS =
 export const PUBLIC_RESTAURANT_NOINDEX_ROBOTS = "noindex,follow";
 
 /** Bump when sitemap membership rules change so CDN/browser caches cannot keep excluded URLs. */
-export const SITEMAP_MEMBERSHIP_VERSION = "pd-v1-indexability-3";
+export const SITEMAP_MEMBERSHIP_VERSION = "pd-v1-indexability-4";
 
 export const IMPORT_SYSTEM_EMAIL = (
   process.env.IMPORT_SYSTEM_EMAIL || "system-import@mealscout.us"

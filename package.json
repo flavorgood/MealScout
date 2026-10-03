@@ -274,7 +274,8 @@
     "winston": "^3.18.3",
     "wouter": "^3.3.5",
     "ws": "^8.18.0",
-    "zod": "^3.24.2"
+    "zod": "^3.24.2",
+    "@tradescout-infinity/reverse-osmosis": "file:vendor/infinity-reverse-osmosis-0.1.0-b5cdef4.tgz"
   },
   "devDependencies": {
     "@electric-sql/pglite": "0.5.8",

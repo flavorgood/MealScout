@@ -197,28 +197,35 @@ export async function handleHostPartnerLeadRequest(params: {
     return { ok: false as const, code: "disabled" as const };
   }
 
+  // Persistence failures must still reject the request. Only subsequent email
+  // confirmation failures may return a saved receipt with emailed:false.
   const lead = await upsertHostPartnerLead(params);
-  const cooldownMinutesRaw = Number(
-    process.env.HOST_PARTNER_EMAIL_COOLDOWN_MINUTES ?? 30,
-  );
-  const cooldownMinutes = Number.isFinite(cooldownMinutesRaw)
-    ? Math.max(1, Math.min(Math.floor(cooldownMinutesRaw), 24 * 60))
-    : 30;
-  const cutoff = new Date(Date.now() - cooldownMinutes * 60 * 1000);
-  const shouldSkip = await sentRecently(String(lead.id), 1, cutoff);
-  if (shouldSkip) {
-    return { ok: true as const, leadId: lead.id, emailed: true };
+  if (!lead || typeof lead.id !== "string" || !lead.id.trim()) {
+    throw new Error("Host partner request did not return a saved reference.");
   }
+  const leadId = lead.id;
+  try {
+    const cooldownMinutesRaw = Number(
+      process.env.HOST_PARTNER_EMAIL_COOLDOWN_MINUTES ?? 30,
+    );
+    const cooldownMinutes = Number.isFinite(cooldownMinutesRaw)
+      ? Math.max(1, Math.min(Math.floor(cooldownMinutesRaw), 24 * 60))
+      : 30;
+    const cutoff = new Date(Date.now() - cooldownMinutes * 60 * 1000);
+    const shouldSkip = await sentRecently(leadId, 1, cutoff);
+    if (shouldSkip) {
+      return { ok: true as const, leadId, emailed: true };
+    }
 
-  const emailed = await sendStep1Email(lead);
-  if (emailed) {
-    await markSent(String(lead.id), 1, { kind: "lead", leadId: lead.id });
+    const emailed = await sendStep1Email(lead);
+    if (emailed) {
+      await markSent(leadId, 1, { kind: "lead", leadId });
+    }
+    return { ok: true as const, leadId, emailed };
+  } catch {
+    // No automatic send/retry when provider or prior-send evidence is uncertain.
+    // Do not log email addresses, form values, or provider error payloads here.
+    console.error("[host-partner] Request saved; email confirmation unavailable.");
+    return { ok: true as const, leadId, emailed: false };
   }
-
-  return {
-    ok: true as const,
-    leadId: String(lead.id),
-    emailed,
-  };
 }
-

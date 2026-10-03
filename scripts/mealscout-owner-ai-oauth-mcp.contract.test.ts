@@ -24,6 +24,8 @@ const {
 } = await import("../server/services/ownerAiOAuth");
 const { OWNER_AI_MCP_TOOLS, handleOwnerAiMcpRequest } =
   await import("../server/services/ownerAiMcp");
+const { OWNER_AI_PROFILE_PREVIEW_JSON_SCHEMA } =
+  await import("../shared/ownerAiCapabilities");
 
 assert.deepEqual(OWNER_AI_DRAFT_ONLY_SCOPES, [
   "owner_ai:context",
@@ -191,6 +193,10 @@ const listed = (await handleOwnerAiMcpRequest(principal, {
 assert.deepEqual(
   listed.result.tools.map((tool: any) => tool.name),
   [
+    "get_mealscout_official_source_facts",
+    "get_mealscout_public_source_checks",
+    "get_mealscout_profile_capabilities",
+    "preview_mealscout_profile_changes",
     "get_mealscout_context",
     "create_mealscout_draft",
     "get_mealscout_draft_status",
@@ -199,6 +205,56 @@ assert.deepEqual(
     "approve_mealscout_draft",
   ],
 );
+for (const name of ["get_mealscout_official_source_facts", "get_mealscout_public_source_checks", "get_mealscout_profile_capabilities", "preview_mealscout_profile_changes"]) {
+  const tool = OWNER_AI_MCP_TOOLS.find((tool) => tool.name === name)!;
+  assert.equal(tool.annotations.readOnlyHint, true);
+  assert.equal(tool.annotations.destructiveHint, false);
+}
+const discoveredPreview = listed.result.tools.find(
+  (tool: any) => tool.name === "preview_mealscout_profile_changes",
+);
+assert.deepEqual(
+  discoveredPreview.inputSchema.properties.request,
+  OWNER_AI_PROFILE_PREVIEW_JSON_SCHEMA,
+  "Actual MCP discovery must expose the complete strict preview schema",
+);
+const { default: express } = await import("express");
+const { registerOwnerAiActionRoutes } =
+  await import("../server/routes/ownerAiActionRoutes");
+const discoveryApp = express();
+registerOwnerAiActionRoutes(discoveryApp);
+const discoveryServer = discoveryApp.listen(0, "127.0.0.1");
+try {
+  if (!discoveryServer.listening) {
+    await new Promise<void>((resolve, reject) => {
+      discoveryServer.once("listening", resolve);
+      discoveryServer.once("error", reject);
+    });
+  }
+  const address = discoveryServer.address();
+  assert.ok(address && typeof address !== "string");
+  const response = await fetch(
+    `http://127.0.0.1:${address.port}/api/owner-ai/openapi.json`,
+  );
+  assert.equal(response.status, 200);
+  const discoveredRest = await response.json() as any;
+  const previewSchemas = Object.values(discoveredRest.paths).flatMap(
+    (path: any) => {
+      const schema = path.post?.requestBody?.content?.["application/json"]?.schema;
+      return schema?.$id === OWNER_AI_PROFILE_PREVIEW_JSON_SCHEMA.$id ? [schema] : [];
+    },
+  );
+  assert.equal(previewSchemas.length, 1);
+  assert.deepEqual(
+    previewSchemas[0],
+    OWNER_AI_PROFILE_PREVIEW_JSON_SCHEMA,
+    "Actual REST discovery must match MCP and retain local schema definitions",
+  );
+} finally {
+  await new Promise<void>((resolve, reject) =>
+    discoveryServer.close((error) => error ? reject(error) : resolve()),
+  );
+}
 const approvalTool = OWNER_AI_MCP_TOOLS.find(
   (tool) => tool.name === "approve_mealscout_draft",
 )!;
@@ -428,6 +484,7 @@ assert.match(publicProfilePrerender, /application\/mcp\+json/);
 
 console.log("mealscout-owner-ai-oauth-mcp.contract: PASS");
 // Importing the OAuth service also imports server infrastructure that may own
-// background handles in development. This contract performs no database or
-// network calls, so terminate once every assertion has completed.
+// background handles in development. This contract performs no database calls;
+// its only HTTP request reads the owned loopback discovery server, now closed.
+// Terminate once every assertion has completed.
 process.exit(0);

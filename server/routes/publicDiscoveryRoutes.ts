@@ -109,8 +109,10 @@ import { buildAnonymousPublicEventFeed } from "./eventRoutes";
 import { collectPublicSeoRowsInBatches } from "../services/publicSeoBatchTraversal";
 import { resolvePublicCanonicalOrigin } from "../seo/publicCanonicalOrigin";
 import { toPublicRestaurantListingWithVisibility } from "../publicProfiles/toPublicRestaurantListingWithVisibility";
+import { canonicalPublicRestaurantProfileEntity } from "../publicProfiles/admitPublicRestaurant";
 import { projectPublicDealRows } from "../services/publicDealProjection";
 import { isPublicBusinessVisible } from "../utils/publicBusinessVisibility";
+import { isNativePublicRestaurant } from "../publicProfiles/admitPublicRestaurant";
 import { publicStoryPublicationWhere } from "../services/publicStoryProjection";
 
 const toSlug = (value: string | null | undefined) =>
@@ -376,6 +378,8 @@ const DISCOVERY_ANALYTICS_EVENT_TYPES = new Set([
 const DISCOVERY_SOURCE_PAGE_TYPES = new Set([
   "food_trucks_city",
   "food_trucks_today",
+  "food_truck_catering",
+  "book_food_truck",
   "deals_today",
   "events_today",
   "city_food",
@@ -452,18 +456,6 @@ type PublicRestaurantProfileEntity =
   | "bar"
   | "caterer"
   | "private_chef";
-
-const canonicalPublicRestaurantProfileEntity = (
-  row: any,
-): PublicRestaurantProfileEntity | null => {
-  if (!row) return null;
-  const discoveryProfileType = publicSeoBusinessProfileType(row);
-  if (discoveryProfileType) return discoveryProfileType;
-  const serviceType = toCanonicalFoodBusinessType(row.businessType);
-  return serviceType === "caterer" || serviceType === "private_chef"
-    ? serviceType
-    : null;
-};
 
 const isTruckRestaurantRow = (row: any) =>
   canonicalPublicRestaurantProfileEntity(row) === "truck";
@@ -615,11 +607,12 @@ const classifyPublicEventType = (eventTypeRaw: unknown, titleRaw: unknown) => {
   return "other" as const;
 };
 
-const buildPublicEventsPayload = async (input: {
+export const buildPublicEventsPayload = async (input: {
   restaurantId?: string;
   hostId?: string;
   restaurantRow?: any;
   showContact?: boolean;
+  showAddress?: boolean;
 }) => {
   const now = new Date();
   const queryStart = new Date(now);
@@ -805,10 +798,10 @@ const buildPublicEventsPayload = async (input: {
     .filter(Boolean)
     .slice(0, 8);
 
-  return {
-    eventsItems: upcoming,
-    upcomingEventCount: upcoming.length,
-  };
+  const { buildPublicNativeFoodAppearances } = await import("../services/publicFoodBusinessAppearances");
+  const nativeAppearances = input.restaurantRow ? await buildPublicNativeFoodAppearances({ restaurantRow: input.restaurantRow, showAddress: input.showAddress }) : [];
+  const combined = [...upcoming, ...nativeAppearances].sort((a,b) => String(a?.startsAt).localeCompare(String(b?.startsAt))).slice(0,8);
+  return { eventsItems: combined, upcomingEventCount: combined.length };
 };
 
 const buildPublicMenuPayloadCore = async (
@@ -2858,6 +2851,7 @@ export function registerPublicDiscoveryRoutes(app: Express) {
           buildPublicEventsPayload({
             restaurantId: String(row.id),
             restaurantRow: row,
+            showAddress,
             showContact,
           }),
         ]);
@@ -2924,6 +2918,7 @@ export function registerPublicDiscoveryRoutes(app: Express) {
           buildPublicEventsPayload({
             restaurantId: String(row.id),
             restaurantRow: row,
+            showAddress,
             showContact,
           }),
         ]);
@@ -3028,12 +3023,7 @@ export function registerPublicDiscoveryRoutes(app: Express) {
 
       if (entity === "restaurant") {
         const row = await storage.getRestaurant(id);
-        if (
-          !row ||
-          !row.isActive ||
-          !isPublicBusinessVisible(row) ||
-          canonicalPublicRestaurantProfileEntity(row) !== "restaurant"
-        ) {
+        if (!row || !isNativePublicRestaurant(row)) {
           return res.status(404).json({ message: "Profile not found" });
         }
         const ownerProfile = await loadEnabledPublicProfileOwner(row.ownerId);
@@ -3052,6 +3042,7 @@ export function registerPublicDiscoveryRoutes(app: Express) {
             buildPublicEventsPayload({
               restaurantId: String(row.id),
               restaurantRow: row,
+              showAddress,
               showContact,
             }),
           ]);

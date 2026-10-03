@@ -353,11 +353,16 @@ function validateInsuranceGateReferences() {
   requireStaticSnippet(
     "server/routes/hostRoutes.ts",
     [
-      "truck.insuranceVerified === true",
-      "truck.insuranceExpiresAt",
+      "assessParkingPassTruckEligibility",
+      "currentEligibility.storedInsuranceValid",
       "Verify your email and submit business insurance to book Parking Pass spots.",
     ],
     "insurance booking eligibility gate",
+  );
+  requireStaticSnippet(
+    "server/services/parkingPassTruckEligibility.ts",
+    ["input.truck.insuranceVerified === true", "input.truck.insuranceExpiresAt", "Number.isFinite(expirationTime) && expirationTime > now.getTime()"],
+    "canonical insurance eligibility and expiry",
   );
   requireStaticSnippet(
     "scripts/admin-insurance-verification.contract.test.ts",

@@ -1,10 +1,11 @@
-import { FormEvent, useState } from "react";
+import { FormEvent, useEffect, useRef, useState } from "react";
 import { Link } from "wouter";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { SEOHead } from "@/components/seo-head";
+import { submitHostPartnerRequest, type HostPartnerReceipt } from "@/lib/hostPartnerSubmission";
 
 const locationTypes = [
   { value: "office", label: "Office / Corporate" },
@@ -30,11 +31,21 @@ export default function HostLocationPartnerPage() {
     notes: "",
   });
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [submitted, setSubmitted] = useState(false);
+  const [receipt, setReceipt] = useState<HostPartnerReceipt | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const pending = useRef<AbortController | null>(null);
+
+  useEffect(() => () => {
+    pending.current?.abort();
+    pending.current = null;
+  }, []);
 
   const onSubmit = async (event: FormEvent) => {
     event.preventDefault();
+    // State updates alone do not guard two submits in the same browser turn.
+    if (pending.current || receipt) return;
+    const controller = new AbortController();
+    pending.current = controller;
     setIsSubmitting(true);
     setError(null);
     try {
@@ -56,24 +67,17 @@ export default function HostLocationPartnerPage() {
         notes: form.notes.trim() || undefined,
         source: "host_location_partner_page",
       };
-
-      const response = await fetch("/api/public/host-partner-leads", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok || data?.ok === false) {
-        throw new Error(data?.message || "Unable to submit request");
+      const saved = await submitHostPartnerRequest(payload, { signal: controller.signal });
+      if (pending.current === controller) setReceipt(saved);
+    } catch (submitError: unknown) {
+      if (pending.current === controller) {
+        setError(submitError instanceof Error ? submitError.message : "Unable to confirm your request right now.");
       }
-
-      setSubmitted(true);
-    } catch (submitError: any) {
-      setError(
-        String(submitError?.message || "Unable to submit request right now"),
-      );
     } finally {
-      setIsSubmitting(false);
+      if (pending.current === controller) {
+        pending.current = null;
+        setIsSubmitting(false);
+      }
     }
   };
 
@@ -115,15 +119,17 @@ export default function HostLocationPartnerPage() {
         </div>
 
         <div className="rounded-2xl border border-[color:var(--border-subtle)] bg-[var(--bg-card)] p-6 shadow-clean">
-          {submitted ? (
-            <div className="space-y-3">
+          {receipt ? (
+            <div className="space-y-3" role="status" data-testid="host-partner-receipt">
               <h2 className="text-xl font-bold text-[color:var(--text-primary)]">
                 Request received
               </h2>
               <p className="text-sm text-[color:var(--text-secondary)]">
-                We sent next steps to your email. You can also complete setup
-                now by creating your host profile.
+                {receipt.emailed
+                  ? "Your request is saved and next steps have been submitted for email delivery. You can also complete setup now by creating your host profile."
+                  : "Your request is saved, but email delivery was not confirmed. Continue setup below; you do not need to submit this request again."}
               </p>
+              <p className="break-all text-xs text-[color:var(--text-muted)]">Request reference: {receipt.leadId}</p>
               <div className="flex flex-wrap gap-3">
                 <Link href="/customer-signup?role=host">
                   <Button>Create Host Profile</Button>
@@ -134,9 +140,9 @@ export default function HostLocationPartnerPage() {
               </div>
             </div>
           ) : (
-            <form onSubmit={onSubmit} className="space-y-4">
+            <form onSubmit={onSubmit} className="space-y-4" aria-busy={isSubmitting}>
               {error ? (
-                <div className="rounded-lg border border-[color:var(--status-error)]/40 bg-[color:var(--status-error)]/10 px-3 py-2 text-sm text-[color:var(--status-error)]">
+                <div role="alert" className="rounded-lg border border-[color:var(--status-error)]/40 bg-[color:var(--status-error)]/10 px-3 py-2 text-sm text-[color:var(--status-error)]">
                   {error}
                 </div>
               ) : null}
@@ -144,90 +150,34 @@ export default function HostLocationPartnerPage() {
               <div className="grid gap-4 sm:grid-cols-2">
                 <div className="grid gap-2">
                   <Label htmlFor="firstName">First Name</Label>
-                  <Input
-                    id="firstName"
-                    value={form.firstName}
-                    onChange={(e) =>
-                      setForm((prev) => ({ ...prev, firstName: e.target.value }))
-                    }
-                    placeholder="Your name"
-                  />
+                  <Input id="firstName" value={form.firstName} onChange={(e) => setForm((prev) => ({ ...prev, firstName: e.target.value }))} placeholder="Your name" />
                 </div>
                 <div className="grid gap-2">
                   <Label htmlFor="email">Email *</Label>
-                  <Input
-                    id="email"
-                    type="email"
-                    required
-                    value={form.email}
-                    onChange={(e) =>
-                      setForm((prev) => ({ ...prev, email: e.target.value }))
-                    }
-                    placeholder="you@business.com"
-                  />
+                  <Input id="email" type="email" required value={form.email} onChange={(e) => setForm((prev) => ({ ...prev, email: e.target.value }))} placeholder="you@business.com" />
                 </div>
               </div>
 
               <div className="grid gap-4 sm:grid-cols-2">
                 <div className="grid gap-2">
                   <Label htmlFor="phone">Phone</Label>
-                  <Input
-                    id="phone"
-                    value={form.phone}
-                    onChange={(e) =>
-                      setForm((prev) => ({ ...prev, phone: e.target.value }))
-                    }
-                    placeholder="(555) 555-5555"
-                  />
+                  <Input id="phone" value={form.phone} onChange={(e) => setForm((prev) => ({ ...prev, phone: e.target.value }))} placeholder="(555) 555-5555" />
                 </div>
                 <div className="grid gap-2">
                   <Label htmlFor="businessName">Business Name *</Label>
-                  <Input
-                    id="businessName"
-                    required
-                    value={form.businessName}
-                    onChange={(e) =>
-                      setForm((prev) => ({
-                        ...prev,
-                        businessName: e.target.value,
-                      }))
-                    }
-                    placeholder="Business or property name"
-                  />
+                  <Input id="businessName" required value={form.businessName} onChange={(e) => setForm((prev) => ({ ...prev, businessName: e.target.value }))} placeholder="Business or property name" />
                 </div>
               </div>
 
               <div className="grid gap-4 sm:grid-cols-3">
                 <div className="grid gap-2 sm:col-span-2">
                   <Label htmlFor="address">Address</Label>
-                  <Input
-                    id="address"
-                    value={form.address}
-                    onChange={(e) =>
-                      setForm((prev) => ({ ...prev, address: e.target.value }))
-                    }
-                    placeholder="Street address"
-                  />
+                  <Input id="address" value={form.address} onChange={(e) => setForm((prev) => ({ ...prev, address: e.target.value }))} placeholder="Street address" />
                 </div>
                 <div className="grid gap-2">
                   <Label htmlFor="locationType">Location Type *</Label>
-                  <select
-                    id="locationType"
-                    required
-                    value={form.locationType}
-                    onChange={(e) =>
-                      setForm((prev) => ({
-                        ...prev,
-                        locationType: e.target.value,
-                      }))
-                    }
-                    className="h-10 rounded-md border border-[color:var(--border-subtle)] bg-[var(--field-bg)] px-3 text-sm"
-                  >
-                    {locationTypes.map((option) => (
-                      <option key={option.value} value={option.value}>
-                        {option.label}
-                      </option>
-                    ))}
+                  <select id="locationType" required value={form.locationType} onChange={(e) => setForm((prev) => ({ ...prev, locationType: e.target.value }))} className="h-10 rounded-md border border-[color:var(--border-subtle)] bg-[var(--field-bg)] px-3 text-sm">
+                    {locationTypes.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
                   </select>
                 </div>
               </div>
@@ -235,71 +185,26 @@ export default function HostLocationPartnerPage() {
               <div className="grid gap-4 sm:grid-cols-4">
                 <div className="grid gap-2 sm:col-span-2">
                   <Label htmlFor="city">City</Label>
-                  <Input
-                    id="city"
-                    value={form.city}
-                    onChange={(e) =>
-                      setForm((prev) => ({ ...prev, city: e.target.value }))
-                    }
-                    placeholder="City"
-                  />
+                  <Input id="city" value={form.city} onChange={(e) => setForm((prev) => ({ ...prev, city: e.target.value }))} placeholder="City" />
                 </div>
                 <div className="grid gap-2">
                   <Label htmlFor="state">State</Label>
-                  <Input
-                    id="state"
-                    value={form.state}
-                    onChange={(e) =>
-                      setForm((prev) => ({ ...prev, state: e.target.value }))
-                    }
-                    placeholder="State"
-                  />
+                  <Input id="state" value={form.state} onChange={(e) => setForm((prev) => ({ ...prev, state: e.target.value }))} placeholder="State" />
                 </div>
                 <div className="grid gap-2">
                   <Label htmlFor="parkingSpots">Parking Spots</Label>
-                  <Input
-                    id="parkingSpots"
-                    type="number"
-                    min={1}
-                    value={form.parkingSpots}
-                    onChange={(e) =>
-                      setForm((prev) => ({
-                        ...prev,
-                        parkingSpots: e.target.value,
-                      }))
-                    }
-                    placeholder="20"
-                  />
+                  <Input id="parkingSpots" type="number" min={1} value={form.parkingSpots} onChange={(e) => setForm((prev) => ({ ...prev, parkingSpots: e.target.value }))} placeholder="20" />
                 </div>
               </div>
 
               <div className="grid gap-2">
                 <Label htmlFor="dailyFootTraffic">Estimated Daily Foot Traffic</Label>
-                <Input
-                  id="dailyFootTraffic"
-                  type="number"
-                  min={0}
-                  value={form.dailyFootTraffic}
-                  onChange={(e) =>
-                    setForm((prev) => ({
-                      ...prev,
-                      dailyFootTraffic: e.target.value,
-                    }))
-                  }
-                  placeholder="150"
-                />
+                <Input id="dailyFootTraffic" type="number" min={0} value={form.dailyFootTraffic} onChange={(e) => setForm((prev) => ({ ...prev, dailyFootTraffic: e.target.value }))} placeholder="150" />
               </div>
 
               <div className="grid gap-2">
                 <Label htmlFor="notes">Notes</Label>
-                <Textarea
-                  id="notes"
-                  value={form.notes}
-                  onChange={(e) =>
-                    setForm((prev) => ({ ...prev, notes: e.target.value }))
-                  }
-                  placeholder="Best days/times to host trucks, lot restrictions, etc."
-                />
+                <Textarea id="notes" value={form.notes} onChange={(e) => setForm((prev) => ({ ...prev, notes: e.target.value }))} placeholder="Best days/times to host trucks, lot restrictions, etc." />
               </div>
 
               <Button type="submit" disabled={isSubmitting}>

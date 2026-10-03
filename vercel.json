@@ -113,6 +113,14 @@
       "destination": "https://mealscout.onrender.com/food-trucks-today/:city"
     },
     {
+      "source": "/food-truck-catering/:city",
+      "destination": "https://mealscout.onrender.com/food-truck-catering/:city"
+    },
+    {
+      "source": "/book-food-truck/:city",
+      "destination": "https://mealscout.onrender.com/book-food-truck/:city"
+    },
+    {
       "source": "/city/:city/food",
       "destination": "https://mealscout.onrender.com/city/:city/food"
     },
@@ -153,7 +161,7 @@
       "destination": "https://mealscout.onrender.com/api/$1"
     },
     {
-      "source": "/:kind(restaurant|truck|bar|chef|location|event|events|deal|supplier|suppliers|p|video)/:path*",
+      "source": "/:kind(restaurant|truck|bar|caterer|private-chef|chef|location|event|events|deal|supplier|suppliers|p|video)/:path*",
       "destination": "https://mealscout.onrender.com/:kind/:path*"
     },
     {
@@ -301,6 +309,14 @@
       "dest": "https://mealscout.onrender.com/food-trucks-today/$1"
     },
     {
+      "src": "/food-truck-catering/([^/]+)",
+      "dest": "https://mealscout.onrender.com/food-truck-catering/$1"
+    },
+    {
+      "src": "/book-food-truck/([^/]+)",
+      "dest": "https://mealscout.onrender.com/book-food-truck/$1"
+    },
+    {
       "src": "/city/([^/]+)/food",
       "dest": "https://mealscout.onrender.com/city/$1/food"
     },
@@ -341,7 +357,7 @@
       "dest": "https://mealscout.onrender.com/api/$1"
     },
     {
-      "src": "/(restaurant|truck|bar|chef|location|event|events|deal|supplier|suppliers|p|video)/(.*)",
+      "src": "/(restaurant|truck|bar|caterer|private-chef|chef|location|event|events|deal|supplier|suppliers|p|video)/(.*)",
       "dest": "https://mealscout.onrender.com/$1/$2"
     },
     {

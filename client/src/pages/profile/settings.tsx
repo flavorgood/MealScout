@@ -53,6 +53,19 @@ type SettingsPayload = {
     title: string;
     path: string;
   }>;
+  publicIdentityStatus?: {
+    standaloneUserProfile?: {
+      supported: boolean;
+      public: boolean;
+      reason: string;
+    };
+    linkedEntityProfileCount?: number;
+    linkedEntityProfilesAvailable?: boolean;
+    discoveryParity?: {
+      tierNeutral: boolean;
+      paidTierRequired: boolean;
+    };
+  };
 };
 
 type SettingsTab = "account" | "ai" | "notifications" | "visibility";
@@ -741,6 +754,36 @@ export default function SettingsPage() {
         </TabsContent>
 
         <TabsContent value="visibility" className="space-y-5">
+          <Card className="border-[color:var(--border-subtle)] bg-[var(--bg-surface)] shadow-clean">
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2 text-xl">
+                <Eye className="h-5 w-5 text-orange-700" aria-hidden="true" />
+                Public profile status
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-3 text-sm leading-6 text-stone-700">
+              <p>
+                MealScout customer accounts stay private. Public identity is attached to
+                owned restaurant, food-truck, bar, caterer, private-chef, host, or supplier
+                profiles rather than exposing the account itself.
+              </p>
+              <div className="rounded-2xl bg-stone-50 p-4">
+                {profileLinks.length ? (
+                  <p>
+                    This account currently has {profileLinks.length} linked public profile
+                    {profileLinks.length === 1 ? "" : "s"}. Public discovery does not require
+                    a paid profile tier.
+                  </p>
+                ) : (
+                  <p>
+                    This account has no linked public entity profile yet. The reason is
+                    role-scoped public identity, not a free or default-tier restriction.
+                  </p>
+                )}
+              </div>
+            </CardContent>
+          </Card>
+
           <Card className="border-[color:var(--border-subtle)] bg-[var(--bg-surface)] shadow-clean">
             <CardHeader>
               <CardTitle className="flex items-center gap-2 text-xl">

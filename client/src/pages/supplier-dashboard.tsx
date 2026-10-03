@@ -720,6 +720,7 @@ export default function SupplierDashboardPage() {
     <div className="min-h-screen pb-24">
       <h1 className="sr-only">MealScout supplier dashboard</h1>
       <BackHeader title="Supplier Dashboard" fallbackHref="/" />
+      {supplier ? <div className="px-4 pb-4"><a className="text-sm font-medium underline" href="/owner-ai">Review AI profile updates</a></div> : null}
 
       <div className="px-4 space-y-4">
         {isSupplierError ? (

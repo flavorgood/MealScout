@@ -88,6 +88,8 @@ export default function PublicSeoLandingPage() {
     "food-trucks",
     "food-trucks-cuisine",
     "food-trucks-today",
+    "food-truck-catering",
+    "book-food-truck",
   ].includes(String(data?.page?.routeKey || ""));
 
   const trackDiscoveryEvent = useCallback(
@@ -247,6 +249,12 @@ export default function PublicSeoLandingPage() {
                 </Link>
                 <Link href={`/food-trucks-today/${encodeURIComponent(citySlug)}`} className="text-sm underline">
                   Food trucks today
+                </Link>
+                <Link href={`/food-truck-catering/${encodeURIComponent(citySlug)}`} className="text-sm underline">
+                  Food truck catering
+                </Link>
+                <Link href={`/book-food-truck/${encodeURIComponent(citySlug)}`} className="text-sm underline">
+                  Book a food truck
                 </Link>
                 <Link href={`/deals-today/${encodeURIComponent(citySlug)}`} className="text-sm underline">
                   Deals today

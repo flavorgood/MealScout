@@ -74,6 +74,14 @@ export function registerPublicSeoLandingRoutes(
     cityRequest("food-trucks-today"),
   );
   register(
+    "/api/public/seo/food-truck-catering/:city",
+    cityRequest("food-truck-catering"),
+  );
+  register(
+    "/api/public/seo/book-food-truck/:city",
+    cityRequest("book-food-truck"),
+  );
+  register(
     "/api/public/seo/deals-today/:city",
     cityRequest("deals-today"),
   );

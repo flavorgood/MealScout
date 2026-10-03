@@ -1,0 +1,120 @@
+import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { registerHooks } from "node:module";
+import { PGlite } from "@electric-sql/pglite";
+import { drizzle } from "drizzle-orm/pglite";
+import { getTableColumns, getTableName, eq } from "drizzle-orm";
+import bcrypt from "bcryptjs";
+import * as schema from "../shared/schema";
+import { readOwnerAiCapabilities, previewOwnerAiPacket } from "../shared/ownerAiCapabilities";
+import { ownerAiActionPacketSchema } from "../shared/ownerAiActions";
+
+// No network/production database: replace only the canonical db module in this process.
+delete process.env.DATABASE_URL;
+process.env.NODE_ENV = "development";
+process.env.OWNER_AI_OAUTH_SECRET = "disposable-local-consent-fixture-000000000000";
+let networkCalls = 0;
+globalThis.fetch = async () => { networkCalls++; throw new Error("Settings-only fixture forbids network"); };
+const engine = new PGlite();
+const tables = [schema.users, schema.restaurants, schema.apiKeys, schema.ownerAiActionDrafts, schema.menus, schema.menuCategories, schema.menuItems, schema.truckManualSchedules, schema.foodBusinessAppearances, schema.deals, schema.socialPostQueue, schema.socialPublishingConnections, schema.telemetryEvents];
+for (const table of tables) {
+  const columns = Object.values(getTableColumns(table));
+  await engine.exec(`create table "${getTableName(table)}" (${columns.map(c => `"${c.name}" ${/^(varchar|text|boolean|timestamp|integer|numeric|json|serial|double|real|bigint)/.test(c.getSQLType()) ? c.getSQLType() : "text"} ${c.name === "id" ? "primary key default gen_random_uuid()" : ""}`).join(",")})`);
+}
+const database = drizzle(engine);
+(globalThis as any).__ownerAiFixtureDb = database;
+registerHooks({ load(url, context, nextLoad) {
+  if (/\/server\/db\.ts(?:\?|$)/.test(url)) return { format: "module", source: "export const db = globalThis.__ownerAiFixtureDb; export const pool = undefined;", shortCircuit: true };
+  if (/\/server\/utils\/pinnedPublicSourceCheck\.ts$/.test(url)) return { format: "module", source: `export { sourceCheckUrl } from "./pinnedPublicSourceCheck.ts?actual";
+    export async function checkPinnedPublicSource(url, options={}) {
+      const html=globalThis.__sourceHtmlByUrl?.[url] || globalThis.__sourceHtml;
+      if (globalThis.__duringSourceCapture) await globalThis.__duringSourceCapture();
+      if (globalThis.__sourceUnavailable) return { sourceUrl:url, availability:"unavailable" };
+      if (options.capture) options.capture({ sourceUrl:url, finalUrl:url, body:Buffer.from(html), contentType:"text/html", checkedAt:new Date().toISOString(), bodyHash:globalThis.__fixtureHash(html) });
+      return { sourceUrl:url, availability:"reachable", bodyHash:globalThis.__fixtureHash(html) };
+    }`, shortCircuit: true };
+  return nextLoad(url, context);
+}});
+
+const actions = await import("../server/services/ownerAiActions");
+const sources = await import("../server/services/ownerAiSourceFacts");
+const { handleOwnerAiMcpRequest } = await import("../server/services/ownerAiMcp");
+const hash = (v: string) => createHash("sha256").update(v).digest("hex");
+(globalThis as any).__fixtureHash = hash;
+const html = '<section><h2>Menu</h2><div><a href="/menu.pdf">Download</a></div></section>';
+(globalThis as any).__sourceHtml = html;
+const token = "disposable_source_fact_fixture_123456789";
+await database.insert(schema.users).values({ id: "fixture-owner", isDisabled: false });
+await database.insert(schema.restaurants).values({ id: "fixture-business", name: "Fixture", ownerId: "fixture-owner", businessType: "food_truck", isActive: true, websiteUrl: "https://official.example/", updatedAt: new Date() });
+await database.insert(schema.apiKeys).values({ id: "fixture-key", userId: "fixture-owner", restaurantId: "fixture-business", keyPrefix: token.slice(0,8), keyHash: await bcrypt.hash(token, 4), purpose: "owner_ai_connector", scope: "owner_ai:context owner_ai:drafts:create owner_ai:drafts:read owner_ai:drafts:approve", isActive: true });
+const principal = await actions.authenticateOwnerAiConnector(token, "owner_ai:context");
+let seq=1, key=1;
+const call = async (name: string, args: any, p=principal) => (await handleOwnerAiMcpRequest(p,{jsonrpc:"2.0",id:seq++,method:"tools/call",params:{name,arguments:args}}) as any).result;
+const ok=(r:any)=>{assert.equal(r.isError,undefined,JSON.stringify(r));return r.structuredContent;};
+const fails=(r:any,code:string)=>{assert.equal(r.isError,true,JSON.stringify(r));assert.ok(JSON.stringify(r).includes(code),JSON.stringify(r));};
+const proposal = async()=>ok(await call("get_mealscout_official_source_facts",{}));
+const draft=async(packet?:any)=>{const context=await actions.getOwnerAiContext(principal.restaurantId);return ok(await call("create_mealscout_draft",{idempotencyKey:"source-fixture-"+key++,request:{packet:packet||(await proposal()).packet,expectedVersions:context.expectedVersions}}));};
+const prepare=async(d:any)=>ok(await call("prepare_mealscout_approval",{draftId:d.id}));
+const approve=(d:any,p:any)=>call("approve_mealscout_draft",{draftId:d.id,expectedRevision:d.revision,consentHandle:p.consentHandle,ownerConfirmation:"approved"});
+try {
+  const capture = (body: string) => ({sourceUrl:"https://official.example/",finalUrl:"https://official.example/",body:Buffer.from(body),contentType:"text/html",checkedAt:new Date().toISOString(),bodyHash:hash(body)});
+  assert.equal(sources.extractOfficialSourceFacts(capture(html)).fields[0].value,"https://official.example/menu.pdf");
+  for (const body of ['<script><a href="/menu.pdf">Menu</a></script>','<div hidden><a href="/menu.pdf">Menu</a></div>','<div style="display: none"><a href="/menu.pdf">Menu</a></div>','<a href="/file.pdf">Download</a>','<a href="http://127.0.0.1/menu">Menu</a>', '<style>.secret {display:none}</style><a class="secret" href="/menu">Menu</a>', '<div style="DISPLAY : NONE"><a href="/menu">Menu</a></div>']) assert.equal(sources.extractOfficialSourceFacts(capture(body)).fields.length,0,body);
+  const conflict=sources.extractOfficialSourceFacts(capture('<a href="/one">Menu</a><a href="/two">Menu</a>'));
+  assert.equal(conflict.fields.length,0); assert.ok(conflict.holds.includes("CONFLICT:profile.menuUrl"));
+  const redirected={...capture(html),finalUrl:"https://other.example/"};assert.equal(sources.extractOfficialSourceFacts(redirected).fields.length,0);
+  const square = {siteData:{page:{properties:{contentAreas:{userContent:{hidden:false,content:{type:"container",cells:[{type:"cell",content:{type:"block",purpose:"embed-pdf@^1.0.0",properties:{pdfSource:"/official-menu.pdf",text:{content:{quill:{ops:[{insert:"These menu items are subject to availability"}]}}}}}}]}}}}}}};
+  const squareCapture={...capture('<script>window.__BOOTSTRAP_STATE__ = '+JSON.stringify(square)+';</script>'),sourceUrl:"https://test.square.site/",finalUrl:"https://test.square.site/"};
+  assert.equal(sources.extractOfficialSourceFacts(squareCapture).fields[0].value,"https://test.square.site/official-menu.pdf");
+  square.siteData.page.properties.contentAreas.userContent.hidden=true;
+  assert.equal(sources.extractOfficialSourceFacts({...squareCapture,body:Buffer.from('<script>window.__BOOTSTRAP_STATE__ = '+JSON.stringify(square)+';</script>')}).fields.length,0);
+  console.log("PASS semantic extraction, hidden/non-menu/private URL/redirect/conflict holds");
+  const proposed=await proposal(); assert.equal(proposed.mutationPerformed,false);assert.equal((await database.select().from(schema.ownerAiActionDrafts)).length,0);
+  assert.ok(proposed.holds.some((v:string)=>v.includes("EFFECTIVE_DATE")));assert.ok(proposed.holds.some((v:string)=>v.includes("DATED_ATTENDANCE")));
+  const supplied=structuredClone(proposed.packet); supplied.sourceFacts.fields[0].captureSha256="0".repeat(64);
+  const d=await draft(supplied);assert.notEqual(d.packet.sourceFacts.fields[0].captureSha256,"0".repeat(64));assert.equal(d.packet.sourceFacts.fields[0].captureSha256,hash(html));
+  const persisted=(await database.select().from(schema.ownerAiActionDrafts).where(eq(schema.ownerAiActionDrafts.id,d.id)))[0];assert.deepEqual(persisted.packet,d.packet);
+  const p=await prepare(d); assert.ok(p.consentPrompt.includes("Official source field evidence")); assert.deepEqual(p.packet.sourceFacts,d.packet.sourceFacts);
+  fails(await call("approve_mealscout_draft",{draftId:d.id,expectedRevision:d.revision,consentHandle:p.consentHandle}),"EXPLICIT_OWNER_CONSENT_REQUIRED");
+  (globalThis as any).__sourceHtml=html+'<footer>dynamic harmless page markup</footer>';
+  ok(await approve(d,p));
+  const saved=(await database.select().from(schema.restaurants))[0];assert.equal((saved.socialAutopostSettings as any).publicActionLinks.menuUrl,"https://official.example/menu.pdf");
+  assert.equal((await database.select().from(schema.socialPostQueue)).length,0);
+  console.log("PASS authenticated proposal -> native draft stores server capture -> hashed exact preview -> explicit consent -> canonical write; semantic recheck survives harmless HTML changes");
+  (globalThis as any).__sourceHtml=html;
+  for(const type of ["restaurant","food_truck","bar","caterer","private_chef"]) {
+    await database.update(schema.restaurants).set({businessType:type,updatedAt:new Date()}).where(eq(schema.restaurants.id,principal.restaurantId));const t=await draft();ok(await approve(t,await prepare(t)));
+  }
+  await database.update(schema.restaurants).set({instagramUrl:"https://www.instagram.com/fixture"}).where(eq(schema.restaurants.id,principal.restaurantId));
+  const conflictPacket=(await proposal()).packet;
+  (globalThis as any).__sourceHtmlByUrl={"https://www.instagram.com/fixture":'<a href="https://official.example/conflicting-menu">Menu</a>'};
+  assert.equal((await proposal()).packet,null);
+  await assert.rejects(draft(conflictPacket));
+  (globalThis as any).__sourceHtmlByUrl={};
+  const cross=await draft(),crossP=await prepare(cross);
+  (globalThis as any).__sourceHtmlByUrl={"https://www.instagram.com/fixture":'<a href="https://official.example/conflicting-menu">Menu</a>'};
+  fails(await approve(cross,crossP),"SOURCE_FACT_CHANGED_OR_CONFLICTING");
+  (globalThis as any).__sourceHtmlByUrl={};
+  await database.update(schema.restaurants).set({instagramUrl:null}).where(eq(schema.restaurants.id,principal.restaurantId));
+  const changed=await draft(), changedP=await prepare(changed);(globalThis as any).__sourceHtml='<a href="/different">Menu</a>';fails(await approve(changed,changedP),"SOURCE_FACT_CHANGED_OR_CONFLICTING");
+  assert.equal((await database.select().from(schema.ownerAiActionDrafts).where(eq(schema.ownerAiActionDrafts.id,changed.id)))[0].status,"draft");
+  (globalThis as any).__sourceHtml=html;
+  const unavailable=await draft(), unavailableP=await prepare(unavailable);(globalThis as any).__sourceUnavailable=true;fails(await approve(unavailable,unavailableP),"SOURCE_FACT_UNAVAILABLE");(globalThis as any).__sourceUnavailable=false;
+  const fresh=await proposal();const expired=structuredClone(fresh.packet);expired.sourceFacts.fields[0].capturedAt=new Date(Date.now()-90000000).toISOString();expired.sourceFacts.fields[0].expiresAt=new Date(Date.now()-1000).toISOString();
+  await assert.rejects(actions.createOwnerAiDraft({restaurantId:principal.restaurantId,createdByUserId:principal.userId,request:{packet:expired}}), (e:any)=>e.message.includes("SOURCE_FACT_EXPIRED"));
+  const mismatch=structuredClone(fresh.packet);mismatch.profile.menuUrl="https://fake.example/";await assert.rejects(draft(mismatch));
+  const smuggled=structuredClone(fresh.packet);smuggled.profile.description="Unverified";await assert.rejects(draft(smuggled));
+  const forged=structuredClone(fresh.packet);forged.sourceFacts.fields[0].sourceUrl="https://other.example/";await assert.rejects(draft(forged));
+  const hidden=await draft(), hiddenP=await prepare(hidden);await database.update(schema.users).set({publicProfileSettings:{showContact:false}}).where(eq(schema.users.id,principal.userId));fails(await approve(hidden,hiddenP),"SOURCE_FACT_OFFICIAL_SOURCE_SET_CHANGED");await database.update(schema.users).set({publicProfileSettings:{}}).where(eq(schema.users.id,principal.userId));
+  const replaced=await draft(), replacedP=await prepare(replaced);await database.update(schema.restaurants).set({websiteUrl:"https://new.example/"}).where(eq(schema.restaurants.id,principal.restaurantId));fails(await approve(replaced,replacedP),"SOURCE_FACT_OFFICIAL_SOURCE_SET_CHANGED");await database.update(schema.restaurants).set({websiteUrl:"https://official.example/"}).where(eq(schema.restaurants.id,principal.restaurantId));
+  const altered=await draft(), alteredP=await prepare(altered); const edited=structuredClone(altered.packet); edited.sourceFacts.fields[0].captureSha256="b".repeat(64);await database.update(schema.ownerAiActionDrafts).set({packet:edited}).where(eq(schema.ownerAiActionDrafts.id,altered.id));fails(await approve(altered,alteredP),"OWNER_CONSENT_HANDLE_STALE");
+  fails(await call("get_mealscout_official_source_facts",{restaurantId:"other"}),"MCP_TOOL_ARGUMENTS_INVALID");fails(await call("get_mealscout_official_source_facts",{}, {...principal,scopes:[]}),"CONNECTOR_SCOPE_REQUIRED");
+  const inFlight=await draft(),inFlightP=await prepare(inFlight);
+  (globalThis as any).__duringSourceCapture=async()=>{(globalThis as any).__duringSourceCapture=null;await database.update(schema.apiKeys).set({revokedAt:new Date()}).where(eq(schema.apiKeys.id,principal.apiKeyId));};
+  fails(await approve(inFlight,inFlightP),"CONNECTOR_APPROVAL_AUTHORITY_CHANGED");
+  assert.equal((await database.select().from(schema.ownerAiActionDrafts).where(eq(schema.ownerAiActionDrafts.id,inFlight.id)))[0].status,"draft");
+  await database.update(schema.apiKeys).set({revokedAt:null}).where(eq(schema.apiKeys.id,principal.apiKeyId));
+  await database.update(schema.apiKeys).set({revokedAt:new Date()}).where(eq(schema.apiKeys.id,principal.apiKeyId));fails(await call("get_mealscout_official_source_facts",{}),"PRINCIPAL_INACTIVE");
+  console.log("PASS all five native types; source changes, expiry, unavailability, field mismatch, forged official URL, unproven changes, hidden/removed official sources, exact evidence consent, revoked/missing scope/cross-target requests fail closed");
+  console.log("PASS disposable in-memory native proof only; no production owner writes or grants");
+} finally { await engine.close(); }

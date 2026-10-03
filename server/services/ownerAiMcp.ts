@@ -1,4 +1,8 @@
 import { z } from "zod";
+import { ownerAiProfileCapabilities } from "./ownerAiProfileCapabilities";
+import { readPublicProfileSourceChecks } from "./publicProfileSourceChecks";
+import { proposeOwnerAiSourceFacts } from "./ownerAiSourceFacts";
+import { OWNER_AI_PROFILE_PREVIEW_JSON_SCHEMA } from "@shared/ownerAiCapabilities";
 import {
   createHash,
   createHmac,
@@ -122,6 +126,30 @@ const approveDraftInputSchema = {
 };
 
 export const OWNER_AI_MCP_TOOLS = [
+  {
+    name: "get_mealscout_official_source_facts",
+    description: "Fetch visible official public sources for this authenticated native business and propose explicit field facts with source URL, server capture time, expiry and content hash. Explicit current USD menu offers and confirmed public dated business attendance can form complete native section proposals; missing dates, identity, public access or conflicting content stay held. This creates no draft and cannot apply; create_mealscout_draft and exact owner consent remain required.",
+    inputSchema: { type: "object", additionalProperties: false, properties: {} },
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+  },
+  {
+    name: "get_mealscout_public_source_checks",
+    description: "Read private midnight public-link check receipts for this current owner's business. Responses and byte changes remain unverified; this never fetches on demand, approves evidence, changes profile facts, or publishes.",
+    inputSchema: { type: "object", additionalProperties: false, properties: {} },
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  },
+  {
+    name: "get_mealscout_profile_capabilities",
+    description: "Read current authenticated native profile type, supported edits and credential state. This grants no application authority.",
+    inputSchema: { type: "object", additionalProperties: false, properties: {} },
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  },
+  {
+    name: "preview_mealscout_profile_changes",
+    description: "Strict read-only preview against fresh native versions and persisted ownership/type/visibility. Source provenance is declared and unverified. Create a native draft and obtain exact-revision owner consent separately to apply.",
+    inputSchema: { type: "object", additionalProperties: false, required: ["request"], properties: { request: OWNER_AI_PROFILE_PREVIEW_JSON_SCHEMA } },
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  },
   {
     name: "get_mealscout_context",
     title: "Read current MealScout business context",
@@ -400,6 +428,12 @@ const approvalPrompt = (draft: any) => {
   return [
     `Approve MealScout draft revision ${draft.revision}?`,
     `Intent: ${String(draft.packet?.intent || "Business update")}`,
+    ...(draft.currentSnapshot?.nativeAdapter ? [`Native profile and application adapter: ${JSON.stringify(draft.currentSnapshot.nativeAdapter)}`] : []),
+    ...(draft.packet?.sourceFacts ? [`Official source field evidence: ${JSON.stringify(draft.packet.sourceFacts)}`, "Source values will be checked again before application. A menu link alone does not verify contents, stock or dated attendance. Source section updates preserve omitted owner metadata and existing items; native classification conflicts stay held."] : []),
+    ...(draft.currentSnapshot?.settings ? [
+      `Effective social preferences: ${JSON.stringify(draft.currentSnapshot.settings.effectiveSocialPosting)}`,
+      ...(draft.currentSnapshot.settings.warning ? [draft.currentSnapshot.settings.warning] : []),
+    ] : []),
     platforms.length
       ? `After MealScout applies the exact preview, publish its approved descriptions and images to: ${platforms.join(", ")}.`
       : "This revision does not request social publishing.",
@@ -432,6 +466,35 @@ async function callOwnerAiTool(
   argumentsValue: unknown,
   callContext: McpToolCallContext,
 ) {
+  if (name === "get_mealscout_official_source_facts") {
+    requireScope(principal, "owner_ai:context");
+    z.object({}).strict().parse(argumentsValue || {});
+    await ownerAiProfileCapabilities.read(principal);
+    const proposal = await proposeOwnerAiSourceFacts(principal.restaurantId, principal.userId);
+    await ownerAiProfileCapabilities.read(principal);
+    return toolResult(proposal);
+  }
+  if (name === "get_mealscout_public_source_checks") {
+    requireScope(principal, "owner_ai:context");
+    z.object({}).strict().parse(argumentsValue || {});
+    await ownerAiProfileCapabilities.read(principal);
+    const result = await readPublicProfileSourceChecks(principal.userId, principal.restaurantId);
+    // A revoked credential or owner transfer while reading fails closed.
+    await ownerAiProfileCapabilities.read(principal);
+    if (result.status !== 200) throw new OwnerAiActionError(result.status, "SOURCE_CHECK_ACCESS_DENIED", "Current owner source checks are unavailable");
+    const { status: _status, ...checks } = result;
+    return toolResult({ ...checks, mode: "read", sourceVerification: "UNVERIFIED", mutationPerformed: false });
+  }
+  if (name === "get_mealscout_profile_capabilities") {
+    requireScope(principal, "owner_ai:context");
+    z.object({}).strict().parse(argumentsValue || {});
+    return toolResult(await ownerAiProfileCapabilities.read(principal));
+  }
+  if (name === "preview_mealscout_profile_changes") {
+    requireScope(principal, "owner_ai:drafts:create");
+    const args = z.object({ request: z.unknown() }).strict().parse(argumentsValue || {});
+    return toolResult(await ownerAiProfileCapabilities.preview(principal, args.request));
+  }
   if (name === "get_mealscout_context") {
     requireScope(principal, "owner_ai:context");
     const args = z
@@ -584,6 +647,7 @@ async function callOwnerAiTool(
           userId: principal.userId,
           draftId: args.draftId,
           expectedRevision: args.expectedRevision,
+          connectorPrincipal: principal,
         }),
       );
     }
@@ -665,6 +729,7 @@ async function callOwnerAiTool(
         userId: principal.userId,
         draftId: args.draftId,
         expectedRevision: args.expectedRevision,
+          connectorPrincipal: principal,
       }),
     );
   }

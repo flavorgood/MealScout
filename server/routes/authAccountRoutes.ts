@@ -538,6 +538,19 @@ export function registerAuthAccountRoutes(app: Express) {
         accountSettings: user.accountSettings || {},
         publicProfileSettings: user.publicProfileSettings || {},
         profileLinks,
+        publicIdentityStatus: {
+          standaloneUserProfile: {
+            supported: false,
+            public: false,
+            reason: "role_scoped_entity_profiles_only",
+          },
+          linkedEntityProfileCount: profileLinks.length,
+          linkedEntityProfilesAvailable: profileLinks.length > 0,
+          discoveryParity: {
+            tierNeutral: true,
+            paidTierRequired: false,
+          },
+        },
         media: {
           provider: isCloudinaryConfigured() ? "cloudinary" : "none",
           configured: isCloudinaryConfigured(),

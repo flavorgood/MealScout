@@ -1,3 +1,7 @@
+import { readLatestSourceReviewRunCoverage } from "../services/ownerAiSourceReviewCoverage";
+import { runNativeOwnerSourceReviews } from "../services/ownerAiNativeProfiles";
+import { summarizeOwnerAiSourceReviewReasons } from "../services/ownerAiSourceReviews";
+import { sourceCheckDay } from "../services/publicProfileSourceChecks";
 /**
  * registerSchedulers.ts
  *
@@ -10,6 +14,8 @@
 
 import type { Express } from "express";
 import cron from "node-cron";
+import { publicSourceCheckSchedule, runPublicProfileSourceChecks } from "../services/publicProfileSourceChecks";
+import { ownerAiSourceReviewSchedule, runOwnerAiSourceReviews } from "../services/ownerAiSourceReviews";
 import { DigestService } from "../digestService";
 import { DinerDigestService } from "../dinerDigestService";
 import { OnboardingDripService } from "../onboardingDripService";
@@ -68,6 +74,26 @@ function shouldRunMarketingEmailJobs(now = new Date()): boolean {
 // ---------------------------------------------------------------------------
 
 export async function registerSchedulers(app: Express): Promise<void> {
+  const sourceReviews = ownerAiSourceReviewSchedule();
+  try { console.info("[official-source-review-coverage] latest", JSON.stringify(await readLatestSourceReviewRunCoverage())); }
+  catch { console.error("[official-source-review-coverage] latest unavailable; no historical reasons inferred"); }
+  try { console.info("[official-source-review-reasons] receipts", JSON.stringify(await summarizeOwnerAiSourceReviewReasons(sourceCheckDay(new Date())))); }
+  catch { console.error("[official-source-review-reasons] receipt aggregate unavailable; no customer content changed"); }
+  console.info("[official-source-reviews] scheduled", sourceReviews);
+  cron.schedule(sourceReviews.expression, async () => {
+    try { const run = await runOwnerAiSourceReviews(); console.info("[official-source-reviews] completed", { day: run.day, profiles: run.results.length, proposals: run.results.filter(r => r.status === "proposal_ready").length, held: run.results.filter(r => r.status.startsWith("held")).length, publishes: false, createsOwnerDrafts: false });
+      console.info("[official-source-review-coverage] completed", JSON.stringify(run.coverage));
+      const native = await runNativeOwnerSourceReviews(); console.info("[native-official-source-reviews] completed", { day: native.day, profiles: native.results.length, proposals: native.results.filter(r => r.status === "proposal_ready").length, held: native.results.filter(r => r.status.startsWith("held")).length, publishes: false, createsOwnerDrafts: false });
+      console.info("[official-source-review-coverage] completed", JSON.stringify(native.coverage));
+      console.info("[official-source-review-reasons] receipts", JSON.stringify(await summarizeOwnerAiSourceReviewReasons(run.day))); }
+    catch { console.error("[official-source-reviews] failed; no owner approval or canonical changes"); }
+  }, { timezone: sourceReviews.timezone });
+  const sourceChecks = publicSourceCheckSchedule();
+  console.info("[public-source-checks] scheduled", sourceChecks);
+  cron.schedule(sourceChecks.expression, async () => {
+    try { console.info("[public-source-checks] completed", await runPublicProfileSourceChecks()); }
+    catch { console.error("[public-source-checks] failed; no profile changes published"); }
+  }, { timezone: sourceChecks.timezone });
   console.log(
     `[schedulers] timezone=${SCHEDULER_TIMEZONE} marketing_email_window=${MARKETING_EMAIL_WINDOW_START_HOUR}:00-${MARKETING_EMAIL_WINDOW_END_HOUR}:00`,
   );

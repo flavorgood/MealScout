@@ -41,8 +41,8 @@ assert.match(
 );
 
 for (const copy of [
-  "Run MealScout from the AI you already use",
-  "any free or paid AI",
+  "Reverse Osmosis",
+  "Use the AI you already have",
   "menus, prices",
   "logos and images",
   "schedules, events",

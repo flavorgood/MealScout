@@ -1,3 +1,8 @@
+import { PROFILE_ACCESS_POLICY } from "@shared/profileAccessPolicy";
+import { toCanonicalFoodBusinessType } from "@shared/businessTypes";
+import { resolveOwnerAiNativeAdapter } from "@shared/ownerAiNativeAdapters";
+import { nativeOwnerAiScheduleStorage } from "./ownerAiNativeAdapters";
+import { DateTime } from "luxon";
 import bcrypt from "bcryptjs";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import {
@@ -9,6 +14,8 @@ import {
   inArray,
   isNull,
   lt,
+  lte,
+  sql,
   or,
 } from "drizzle-orm";
 
@@ -16,6 +23,11 @@ import { db } from "../db";
 import {
   apiKeys,
   deals,
+  eventBookings,
+  events,
+  eventSeries,
+  hosts,
+  users,
   menuCategories,
   menuItems,
   menus,
@@ -48,6 +60,11 @@ import {
   publishSocialQueueItem,
 } from "./socialPublishing";
 import { resolveCityTimeZoneSync } from "./cityTimeZone";
+import { isPublicDiscoveryEligibleEntity } from "@shared/publicDiscoveryIntegrity";
+import { buildSlotDateTimes } from "./timeIntent";
+import { verifyOwnerAiSourceFacts, loadSourceFactAuthority, assertSourceFactAuthority } from "./ownerAiSourceFacts";
+import { finalizeMealScoutReverseOsmosisDraftPacket, validateMealScoutReverseOsmosisPacket, applyMealScoutReverseOsmosisWithinApproval, publishMealScoutReverseOsmosisSocialIntent } from "./reverseOsmosis";
+import { verifyMealScoutBusinessAsset } from "./reverseOsmosisBusinessAssets";
 
 const DRAFT_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const PUBLIC_BASE_URL = () =>
@@ -71,6 +88,47 @@ const asRecord = (value: unknown): Record<string, any> =>
   value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, any>)
     : {};
+
+// Uncached equivalent of the manual social editor's active owner access policy.
+export async function hasOwnerAiCompleteProfileAccess(userId: string, database: any = db, lock = false) {
+  if (PROFILE_ACCESS_POLICY.status !== "active") return false;
+  let query = database.select({ id: users.id, isDisabled: users.isDisabled }).from(users).where(eq(users.id, userId)).limit(1);
+  if (lock) query = query.for("share");
+  const [user] = await query;
+  return user?.isDisabled === false;
+}
+async function assertOwnerAiSettingsAccess(userId: string, restaurant: any, packet: OwnerAiActionPacket, database: any = db, lock = false) {
+  if (!packet.settings) return;
+  if (!toCanonicalFoodBusinessType(restaurant.businessType)) throw new OwnerAiActionError(403, "UNSUPPORTED_ADAPTER", "Social preferences require a supported native food business");
+  if (!await hasOwnerAiCompleteProfileAccess(userId, database, lock)) throw new OwnerAiActionError(402, "COMPLETE_PROFILE_ACCESS_REQUIRED", "Profile access could not be verified for social preferences");
+}
+export function mergeOwnerAiSocialPostingSettings(value: unknown, patch: NonNullable<OwnerAiActionPacket["settings"]>["socialPosting"]) {
+  const current = asRecord(value);
+  return { ...current,
+    ...(patch.platforms ? { platforms: { ...asRecord(current.platforms), ...patch.platforms } } : {}),
+    ...(patch.triggers ? { triggers: { ...asRecord(current.triggers), ...patch.triggers } } : {}),
+    ...(patch.promptBeforePost !== undefined ? { promptBeforePost: patch.promptBeforePost } : {}),
+  };
+}
+export function safeOwnerAiSocialPostingSettings(value: unknown) {
+  const current = asRecord(value);
+  const flags = (keys: readonly string[], input: unknown) => Object.fromEntries(keys.filter(key => typeof asRecord(input)[key] === "boolean").map(key => [key, asRecord(input)[key]]));
+  return { platforms: flags(OWNER_AI_PLATFORMS, current.platforms), triggers: flags(["schedule", "booking", "live", "deal"], current.triggers), ...(typeof current.promptBeforePost === "boolean" ? { promptBeforePost: current.promptBeforePost } : {}) };
+}
+function settingsReview(value: unknown, packet: OwnerAiActionPacket) {
+  if (!packet.settings) return null;
+  const current = safeOwnerAiSocialPostingSettings(value);
+  const merged = mergeOwnerAiSocialPostingSettings(value, packet.settings.socialPosting);
+  // Both the owner sharing UI and native deal posting default omitted flags to enabled.
+  // Client owner actions and server deal creation are distinct consumers of these preferences.
+  const effective = {
+    platforms: Object.fromEntries(OWNER_AI_PLATFORMS.map(key => [key, asRecord(merged.platforms)[key] !== false])),
+    triggers: Object.fromEntries(["schedule", "booking", "live", "deal"].map(key => [key, asRecord(merged.triggers)[key] !== false])),
+    promptBeforePost: merged.promptBeforePost !== false,
+    postingFlows: { schedule: "client_owner_schedule_save", booking: "client_owner_booking_action", live: "client_owner_live_location_action", deal: "server_deal_creation" },
+  };
+  return { socialPosting: current, effectiveSocialPosting: effective, warning: effective.promptBeforePost === false ? "Future enabled owner schedule, booking, and live-location actions can share to enabled destinations without prompting the owner; native deal creation can also queue posts under its existing distribution-access gate. This settings change does not create or publish a post." : null };
+}
 
 const asArray = <T = any>(value: unknown): T[] =>
   Array.isArray(value) ? (value as T[]) : [];
@@ -246,6 +304,8 @@ export function buildOwnerAiSocialDrafts(input: {
 
 export function normalizeOwnerAiPlan(packet: OwnerAiActionPacket) {
   const plan: Array<Record<string, unknown>> = [];
+  if (packet.sourceFacts) plan.push({ section: "source_evidence", action: "review_exact_field_provenance", proposed: packet.sourceFacts });
+  if (packet.settings) plan.push({ section: "settings", action: "merge_social_posting_preferences", proposed: packet.settings });
   if (packet.profile) {
     plan.push({
       section: "profile",
@@ -269,7 +329,7 @@ export function normalizeOwnerAiPlan(packet: OwnerAiActionPacket) {
     });
   }
   for (const menu of packet.menus || []) {
-    plan.push({ section: "menu", action: menu.operation, id: menu.id || null, ref: menu.ref || null, name: menu.name, categories: menu.categories.length, items: menu.categories.reduce((count, category) => count + category.items.length, 0), proposed: menu });
+    plan.push({ section: "menu", action: menu.operation, id: menu.id || null, ref: menu.ref || null, name: menu.name, categories: menu.categories.length, items: menu.categories.reduce((count, category) => count + category.items.length, 0), ...(packet.sourceFacts?.version === 2 ? { mergePolicy: "Update only proposed fields; omitted owner metadata and existing items remain. Native classification conflicts hold application." } : {}), proposed: menu });
   }
   for (const stop of packet.schedules || []) {
     plan.push({ section: "schedule", action: stop.operation, id: stop.id || null, ref: stop.ref || null, date: stop.date, kind: stop.kind, proposed: stop });
@@ -289,7 +349,7 @@ export async function computeOwnerAiExpectedVersions(
   options: { forUpdate?: boolean } = {},
 ): Promise<OwnerAiExpectedVersions> {
   const [restaurant] = await database
-    .select({ id: restaurants.id, updatedAt: restaurants.updatedAt })
+    .select({ id: restaurants.id, ownerId: restaurants.ownerId, businessType: restaurants.businessType, isFoodTruck: restaurants.isFoodTruck, updatedAt: restaurants.updatedAt })
     .from(restaurants)
     .where(eq(restaurants.id, restaurantId))
     .limit(1);
@@ -309,10 +369,9 @@ export async function computeOwnerAiExpectedVersions(
     .select({ id: menuItems.id, updatedAt: menuItems.updatedAt, isAvailable: menuItems.isAvailable })
     .from(menuItems)
     .where(eq(menuItems.restaurantId, restaurantId)));
+  const scheduleStorage = nativeOwnerAiScheduleStorage(restaurant);
   const scheduleRows = await maybeLock(database
-    .select({ id: truckManualSchedules.id, updatedAt: truckManualSchedules.updatedAt, status: truckManualSchedules.status })
-    .from(truckManualSchedules)
-    .where(eq(truckManualSchedules.truckId, restaurantId)));
+    .select().from(scheduleStorage.table).where(scheduleStorage.predicate));
   const dealRows = await maybeLock(database
     .select({ id: deals.id, updatedAt: deals.updatedAt, isActive: deals.isActive })
     .from(deals)
@@ -323,7 +382,7 @@ export async function computeOwnerAiExpectedVersions(
       .map((row) => ({ ...row, updatedAt: dateVersion(row.updatedAt) }))
       .sort((a, b) => String(a.id).localeCompare(String(b.id)));
   return {
-    restaurant: stableHash({ id: restaurant.id, updatedAt: dateVersion(restaurant.updatedAt) }),
+    restaurant: stableHash({ id: restaurant.id, ownerId: restaurant.ownerId, nativeAdapter: resolveOwnerAiNativeAdapter(restaurant), updatedAt: dateVersion(restaurant.updatedAt) }),
     menus: stableHash([...normalizeRows(menuRows), ...normalizeRows(categoryRows), ...normalizeRows(itemRows)]),
     schedules: stableHash(normalizeRows(scheduleRows)),
     deals: stableHash(normalizeRows(dealRows)),
@@ -341,6 +400,8 @@ async function buildOwnerAiCurrentSnapshot(
   packet: OwnerAiActionPacket,
   database: any = db,
 ) {
+  const [nativeRestaurant] = await database.select().from(restaurants).where(eq(restaurants.id, restaurantId)).limit(1);
+  const nativeSchedules = nativeOwnerAiScheduleStorage(nativeRestaurant);
   const [restaurantRows, allMenus, allCategories, allItems, allSchedules, allDeals] =
     await Promise.all([
       database
@@ -376,8 +437,8 @@ async function buildOwnerAiCurrentSnapshot(
         .where(eq(menuItems.restaurantId, restaurantId)),
       database
         .select()
-        .from(truckManualSchedules)
-        .where(eq(truckManualSchedules.truckId, restaurantId)),
+        .from(nativeSchedules.table)
+        .where(nativeSchedules.predicate),
       database.select().from(deals).where(eq(deals.restaurantId, restaurantId)),
     ]);
   const restaurant = restaurantRows[0] || null;
@@ -394,6 +455,8 @@ async function buildOwnerAiCurrentSnapshot(
     dateVersion(value)?.slice(0, 10) || null;
 
   return {
+    nativeAdapter: nativeSchedules.binding,
+    settings: settingsReview(settings, packet),
     profile: packet.profile ? profileCurrent : null,
     hours: packet.hours ? restaurant?.operatingHours || null : null,
     menus: (packet.menus || []).map((proposed) => {
@@ -426,7 +489,7 @@ async function buildOwnerAiCurrentSnapshot(
     }),
     schedules: (packet.schedules || []).map((proposed) => {
       const expectedLocation =
-        proposed.locationName || proposed.eventName || "Scheduled stop";
+        proposed.status === "closed" ? "Closed" : proposed.locationName || proposed.eventName || "Scheduled stop";
       const current = allSchedules.find(
         (row: any) =>
           (proposed.id && row.id === proposed.id) ||
@@ -487,6 +550,8 @@ async function getOwnerAiContextSnapshot(
       id: restaurants.id,
       name: restaurants.name,
       businessType: restaurants.businessType,
+      ownerId: restaurants.ownerId,
+      isFoodTruck: restaurants.isFoodTruck,
       address: restaurants.address,
       city: restaurants.city,
       state: restaurants.state,
@@ -540,30 +605,31 @@ async function getOwnerAiContextSnapshot(
     : [];
   const itemHasMore = itemPageRows.length > menuItemPageSize;
   const itemRows = itemPageRows.slice(0, menuItemPageSize);
+  const nativeSchedules = nativeOwnerAiScheduleStorage(restaurant);
   const currentScheduleRows = await database
     .select()
-    .from(truckManualSchedules)
+    .from(nativeSchedules.table)
     .where(
       and(
-        eq(truckManualSchedules.truckId, restaurantId),
-        gte(truckManualSchedules.date, todayUtc),
+        nativeSchedules.predicate,
+        gte(nativeSchedules.table.date, todayUtc),
       ),
     )
-    .orderBy(asc(truckManualSchedules.date))
+    .orderBy(asc(nativeSchedules.table.date))
     .limit(currentPageSize + 1)
     .offset(scheduleOffset);
   const scheduleHistoryRows =
     scheduleOffset === 0
       ? await database
           .select()
-          .from(truckManualSchedules)
+          .from(nativeSchedules.table)
           .where(
             and(
-              eq(truckManualSchedules.truckId, restaurantId),
-              lt(truckManualSchedules.date, todayUtc),
+              nativeSchedules.predicate,
+              lt(nativeSchedules.table.date, todayUtc),
             ),
           )
-          .orderBy(desc(truckManualSchedules.date))
+          .orderBy(desc(nativeSchedules.table.date))
           .limit(historyLimit)
       : [];
   const activeDealRows = await database
@@ -636,6 +702,7 @@ async function getOwnerAiContextSnapshot(
         .map((category: any) => ({ ...category, items: itemRows.filter((item: any) => item.categoryId === category.id) })),
       uncategorizedItems: itemRows.filter((item: any) => item.menuId === menu.id && !item.categoryId),
     })),
+    nativeAdapter: nativeSchedules.binding,
     schedules: scheduleRows,
     deals: dealRows,
     contextBounds: {
@@ -677,6 +744,7 @@ async function getOwnerAiContextSnapshot(
         historyReturned: dealHistoryRows.length,
       },
     },
+    settings: { socialPosting: safeOwnerAiSocialPostingSettings(restaurant.socialAutopostSettings) },
     socialConnections: OWNER_AI_PLATFORMS.map((platform) => {
       const connection = connections.find((row: any) => row.platform === platform);
       return {
@@ -754,7 +822,7 @@ export async function authenticateOwnerAiConnector(
 }
 
 export async function assertActualRestaurantOwner(userId: string, restaurantId: string) {
-  const [restaurant] = await db.select({ id: restaurants.id, ownerId: restaurants.ownerId, name: restaurants.name }).from(restaurants).where(eq(restaurants.id, restaurantId)).limit(1);
+  const [restaurant] = await db.select({ id: restaurants.id, ownerId: restaurants.ownerId, name: restaurants.name, businessType: restaurants.businessType }).from(restaurants).where(eq(restaurants.id, restaurantId)).limit(1);
   if (!restaurant) throw new OwnerAiActionError(404, "RESTAURANT_NOT_FOUND", "Restaurant not found");
   if (restaurant.ownerId !== userId) throw new OwnerAiActionError(403, "ACTUAL_OWNER_REQUIRED", "Only the restaurant's actual owner can perform this action");
   return restaurant;
@@ -861,6 +929,12 @@ const assertRequestVersions = async (
   return current;
 };
 
+async function validateSourceFacts(packet: OwnerAiActionPacket, restaurantId: string, ownerId: string, refresh: boolean) {
+  if (!packet.sourceFacts) return;
+  try { await verifyOwnerAiSourceFacts(packet, restaurantId, ownerId, db, undefined, refresh); }
+  catch (error) { throw new OwnerAiActionError(409, "SOURCE_FACT_HOLD", String((error as Error).message)); }
+}
+
 export async function createOwnerAiDraft(input: {
   restaurantId: string;
   createdByUserId: string;
@@ -899,13 +973,16 @@ export async function createOwnerAiDraft(input: {
           "Idempotency-Key was already used with different draft content",
         );
       }
+      if ((replay.packet as any)?.reverseOsmosis) await validateMealScoutReverseOsmosisPacket(ownerAiActionPacketSchema.parse(replay.packet), replay.restaurantId, input.createdByUserId, replay.expectedVersions as OwnerAiExpectedVersions);
       return { ...toOwnerAiDraftResponse(replay), idempotencyReplay: true };
     }
   }
-  const [restaurant] = await db.select({ id: restaurants.id, name: restaurants.name, ownerId: restaurants.ownerId }).from(restaurants).where(eq(restaurants.id, input.restaurantId)).limit(1);
+  const [restaurant] = await db.select({ id: restaurants.id, name: restaurants.name, ownerId: restaurants.ownerId, businessType: restaurants.businessType }).from(restaurants).where(eq(restaurants.id, input.restaurantId)).limit(1);
   if (!restaurant || restaurant.ownerId !== input.createdByUserId) throw new OwnerAiActionError(403, "CONNECTOR_OWNERSHIP_INVALID", "Draft identity must come from the current owner-business attachment");
   const id = randomUUID();
   const packet = ownerAiActionPacketSchema.parse(request.packet);
+  await assertOwnerAiSettingsAccess(input.createdByUserId, restaurant, packet);
+  await validateSourceFacts(packet, input.restaurantId, input.createdByUserId, true);
   const { expectedVersions, currentSnapshot } = await db.transaction(
     async (tx: any) => ({
       expectedVersions: await assertRequestVersions(
@@ -921,10 +998,24 @@ export async function createOwnerAiDraft(input: {
     }),
     { isolationLevel: "repeatable read", accessMode: "read only" },
   );
-  const normalizedPlan = normalizeOwnerAiPlan(packet);
+  const normalizedPlan = normalizeOwnerAiPlan(packet).map(step => ({ ...step, nativeAdapter: (currentSnapshot as any).nativeAdapter, ...(step.section === "settings" ? { review: (currentSnapshot as any).settings } : {}) }));
   const socialDrafts = buildOwnerAiSocialDrafts({ draftId: id, restaurantId: input.restaurantId, restaurantName: packet.profile?.name || restaurant.name, packet });
   const mediaManifest = await buildOwnerAiMediaManifest(id, packet);
-  const inserted = await db.insert(ownerAiActionDrafts).values({
+  await finalizeMealScoutReverseOsmosisDraftPacket(packet, input.restaurantId, input.createdByUserId, expectedVersions, id, socialDrafts, mediaManifest);
+  const inserted = await db.transaction(async (tx: any) => {
+    if (packet.sourceFacts || packet.reverseOsmosis) {
+      // Parent update lock also blocks FK-backed child insertions during version capture.
+      await tx.select({ id: restaurants.id }).from(restaurants).where(eq(restaurants.id, input.restaurantId)).for("update");
+      if (packet.sourceFacts) {
+        let authority;
+        try { authority = await loadSourceFactAuthority(input.restaurantId, input.createdByUserId, tx, true); }
+        catch { throw new OwnerAiActionError(409, "SOURCE_FACT_HOLD", "Source authority changed while the native draft was prepared"); }
+        assertSourceFactAuthority(packet, authority);
+      }
+      await validateMealScoutReverseOsmosisPacket(packet, input.restaurantId, input.createdByUserId, expectedVersions, tx, true);
+      if (!versionsEqual(expectedVersions, await computeOwnerAiExpectedVersions(input.restaurantId, tx, { forUpdate: true }))) throw new OwnerAiActionError(409, "STALE_CONTEXT", "MealScout changed while official source evidence was prepared");
+    }
+    return tx.insert(ownerAiActionDrafts).values({
     id,
     restaurantId: input.restaurantId,
     createdByUserId: input.createdByUserId,
@@ -943,6 +1034,7 @@ export async function createOwnerAiDraft(input: {
     errors: [],
     updatedAt: new Date(),
   }).onConflictDoNothing().returning();
+  });
   let [draft] = inserted;
   if (!draft && input.connectorApiKeyId && idempotencyKey) {
     [draft] = await db
@@ -1056,7 +1148,7 @@ const resolveOwnerAiDraftMediaSource = (
   return null;
 };
 
-async function buildOwnerAiMediaManifest(
+export async function buildOwnerAiMediaManifest(
   draftId: string,
   packet: OwnerAiActionPacket,
 ): Promise<OwnerAiMediaManifestEntry[]> {
@@ -1308,10 +1400,13 @@ export async function updateOwnerAiDraft(input: { userId: string; draftId: strin
   const request = ownerAiDraftRequestSchema.parse(input.request);
   const [existing] = await db.select().from(ownerAiActionDrafts).where(eq(ownerAiActionDrafts.id, input.draftId)).limit(1);
   if (!existing) throw new OwnerAiActionError(404, "DRAFT_NOT_FOUND", "Draft not found");
+  if ((existing.packet as any)?.reverseOsmosis || request.packet.reverseOsmosis) throw new OwnerAiActionError(409, "REVERSE_OSMOSIS_IMMUTABLE", "Prepare a fresh source draft to change a captured Reverse Osmosis proposal");
   const restaurant = await assertActualRestaurantOwner(input.userId, existing.restaurantId);
   if (existing.status !== "draft") throw new OwnerAiActionError(409, "DRAFT_NOT_EDITABLE", "Only draft-status proposals can be edited");
   if (existing.revision !== input.expectedRevision) throw new OwnerAiActionError(409, "STALE_DRAFT_REVISION", "Draft revision changed; reload before editing", { currentRevision: existing.revision });
   const packet = ownerAiActionPacketSchema.parse(request.packet);
+  await assertOwnerAiSettingsAccess(input.userId, restaurant, packet);
+  await validateSourceFacts(packet, existing.restaurantId, input.userId, true);
   const { expectedVersions, currentSnapshot } = await db.transaction(
     async (tx: any) => ({
       expectedVersions: await assertRequestVersions(
@@ -1331,7 +1426,7 @@ export async function updateOwnerAiDraft(input: { userId: string; draftId: strin
   const mediaManifest = await buildOwnerAiMediaManifest(existing.id, packet);
   const [updated] = await db.update(ownerAiActionDrafts).set({
     packet,
-    normalizedPlan: normalizeOwnerAiPlan(packet),
+    normalizedPlan: normalizeOwnerAiPlan(packet).map(step => ({ ...step, nativeAdapter: (currentSnapshot as any).nativeAdapter, ...(step.section === "settings" ? { review: (currentSnapshot as any).settings } : {}) })),
     currentSnapshot,
     socialDrafts: buildOwnerAiSocialDrafts({ draftId: existing.id, restaurantId: existing.restaurantId, restaurantName: packet.profile?.name || restaurant.name, packet }),
     mediaManifest,
@@ -1377,7 +1472,7 @@ export async function cancelOwnerAiDraft(userId: string, draftId: string, expect
   return toOwnerAiDraftResponse(cancelled);
 }
 
-async function validateAndPrepareRemoteImage(
+export async function validateAndPrepareRemoteImage(
   value: string | null | undefined,
   folder: string,
   manifestEntry: OwnerAiMediaManifestEntry | null,
@@ -1552,9 +1647,14 @@ export const mergeOwnerAiProfileActionLinks = (
   };
 };
 
-async function applyCanonicalPacket(tx: any, restaurant: any, packet: OwnerAiActionPacket, now: Date) {
-  const counts = { profile: 0, hours: 0, menusUpserted: 0, menusArchived: 0, categoriesUpserted: 0, categoriesArchived: 0, itemsUpserted: 0, itemsArchived: 0, schedulesUpserted: 0, schedulesArchived: 0, dealsUpserted: 0, dealsArchived: 0 };
-  if (packet.profile || packet.hours) {
+export async function applyCanonicalPacket(tx: any, restaurant: any, packet: OwnerAiActionPacket, now: Date) {
+  const nativeSchedules = nativeOwnerAiScheduleStorage(restaurant);
+  if (packet.sourceFacts) {
+    try { assertSourceFactAuthority(packet, await loadSourceFactAuthority(restaurant.id, restaurant.ownerId, tx, true), now); }
+    catch (error) { throw new OwnerAiActionError(409, "SOURCE_FACT_HOLD", String((error as Error).message)); }
+  }
+  const counts = { profile: 0, settings: 0, hours: 0, menusUpserted: 0, menusArchived: 0, categoriesUpserted: 0, categoriesArchived: 0, itemsUpserted: 0, itemsArchived: 0, schedulesUpserted: 0, schedulesArchived: 0, dealsUpserted: 0, dealsArchived: 0 };
+  if (packet.profile || packet.hours || packet.settings) {
     const updates: Record<string, any> = { updatedAt: now };
     const profile = packet.profile;
     if (profile) {
@@ -1581,6 +1681,10 @@ async function applyCanonicalPacket(tx: any, restaurant: any, packet: OwnerAiAct
       }
       counts.profile = 1;
     }
+    if (packet.settings) {
+      updates.socialAutopostSettings = mergeOwnerAiSocialPostingSettings(updates.socialAutopostSettings ?? restaurant.socialAutopostSettings, packet.settings.socialPosting);
+      counts.settings = 1;
+    }
     if (packet.hours) {
       updates.operatingHours = packet.hours;
       counts.hours = 1;
@@ -1588,6 +1692,8 @@ async function applyCanonicalPacket(tx: any, restaurant: any, packet: OwnerAiAct
     await tx.update(restaurants).set(updates).where(eq(restaurants.id, restaurant.id));
   }
 
+  const sourceMenus = packet.sourceFacts?.version === 2 && packet.sourceFacts.sections.some(s=>s.path === "menus");
+  const preserve = (proposed: any, current: any, fallback: any) => sourceMenus && proposed === undefined ? current ?? fallback : proposed ?? fallback;
   for (const menu of packet.menus || []) {
     let existing: any = null;
     if (menu.id) [existing] = await tx.select().from(menus).where(and(eq(menus.id, menu.id), eq(menus.restaurantId, restaurant.id))).limit(1);
@@ -1601,7 +1707,7 @@ async function applyCanonicalPacket(tx: any, restaurant: any, packet: OwnerAiAct
       }
       continue;
     }
-    const menuValues = { restaurantId: restaurant.id, name: menu.name, serviceType: menu.serviceType, availableFrom: menu.availableFrom ?? null, availableTo: menu.availableTo ?? null, availableDays: menu.availableDays, isActive: true, importSource: "owner_ai", importedAt: now, updatedAt: now };
+    const menuValues = { restaurantId: restaurant.id, name: menu.name, serviceType: menu.serviceType, availableFrom: preserve(menu.availableFrom, existing?.availableFrom, null), availableTo: preserve(menu.availableTo, existing?.availableTo, null), availableDays: menu.availableDays, isActive: true, importSource: "owner_ai", importedAt: now, updatedAt: now };
     if (existing) [existing] = await tx.update(menus).set(menuValues).where(eq(menus.id, existing.id)).returning();
     else [existing] = await tx.insert(menus).values(menuValues).returning();
     counts.menusUpserted += 1;
@@ -1619,7 +1725,7 @@ async function applyCanonicalPacket(tx: any, restaurant: any, packet: OwnerAiAct
         }
         continue;
       }
-      const categoryValues = { menuId: existing.id, restaurantId: restaurant.id, name: category.name, description: category.description ?? null, sortOrder: category.sortOrder ?? 0, isActive: true, updatedAt: now };
+      const categoryValues = { menuId: existing.id, restaurantId: restaurant.id, name: category.name, description: preserve(category.description, existingCategory?.description, null), sortOrder: preserve(category.sortOrder, existingCategory?.sortOrder, 0), isActive: true, updatedAt: now };
       if (existingCategory) [existingCategory] = await tx.update(menuCategories).set(categoryValues).where(eq(menuCategories.id, existingCategory.id)).returning();
       else [existingCategory] = await tx.insert(menuCategories).values(categoryValues).returning();
       if (category.ref) categoryRefIds.set(category.ref, existingCategory.id);
@@ -1636,7 +1742,8 @@ async function applyCanonicalPacket(tx: any, restaurant: any, packet: OwnerAiAct
           }
           continue;
         }
-        const itemValues = { menuId: existing.id, categoryId: existingCategory.id, restaurantId: restaurant.id, name: item.name, description: item.description ?? null, priceCents: item.priceCents ?? null, itemType: item.itemType, imageUrl: item.imageUrl ?? null, dietaryTags: item.dietaryTags || [], allergens: item.allergens || [], sortOrder: item.sortOrder ?? 0, isAvailable: true, updatedAt: now };
+        if (sourceMenus && existingItem && existingItem.itemType !== item.itemType) throw new OwnerAiActionError(409, "SOURCE_FACT_MENU_TYPE_CONFLICT", "Source classification conflicts with the native item type; automated source packets cannot change that type");
+        const itemValues = { menuId: existing.id, categoryId: existingCategory.id, restaurantId: restaurant.id, name: item.name, description: preserve(item.description, existingItem?.description, null), priceCents: item.priceCents ?? null, itemType: sourceMenus && existingItem ? existingItem.itemType : item.itemType, imageUrl: preserve(item.imageUrl, existingItem?.imageUrl, null), dietaryTags: preserve(item.dietaryTags, existingItem?.dietaryTags, []), allergens: preserve(item.allergens, existingItem?.allergens, []), sortOrder: preserve(item.sortOrder, existingItem?.sortOrder, 0), isAvailable: true, updatedAt: now };
         if (existingItem) await tx.update(menuItems).set(itemValues).where(eq(menuItems.id, existingItem.id));
         else await tx.insert(menuItems).values(itemValues);
         counts.itemsUpserted += 1;
@@ -1645,24 +1752,117 @@ async function applyCanonicalPacket(tx: any, restaurant: any, packet: OwnerAiAct
     void categoryRefIds;
   }
 
+  const sourceSchedules = packet.sourceFacts?.version === 2 && packet.sourceFacts.sections.some(s=>s.path === "schedules");
   for (const stop of packet.schedules || []) {
+    if (sourceSchedules) {
+      const interval=buildSlotDateTimes({date:stop.date,timeZone:stop.timezone!,startTime:stop.startTime!,endTime:stop.endTime!});
+      if (!interval) throw new OwnerAiActionError(409,"SOURCE_FACT_NATIVE_INTERVAL_REQUIRED","Source event interval cannot be represented exactly");
+      const closures = await tx.select().from(nativeSchedules.table).where(and(nativeSchedules.predicate,eq(nativeSchedules.table.status,"closed"),eq(nativeSchedules.table.isPublic,true)));
+      for (const closure of closures) {
+        if (closure.expiresAt && new Date(closure.expiresAt).getTime() <= now.getTime()) continue;
+        const dateKey=new Date(closure.date).toISOString().slice(0,10);
+        const localDay=DateTime.fromISO(dateKey,{zone:closure.timezone || "invalid"}).startOf("day");
+        if (!localDay.isValid) throw new OwnerAiActionError(409,"SOURCE_FACT_NATIVE_CLOSURE_CONTEXT_REQUIRED","Existing active owner closure needs a verified timezone");
+        if (interval.startUtc.getTime() < localDay.plus({days:1}).toMillis() && interval.endUtc.getTime() > localDay.toMillis()) throw new OwnerAiActionError(409,"SOURCE_FACT_NATIVE_CLOSURE_CONFLICT","Existing owner closure overlaps this public source stop");
+      }
+    }
     let existing: any = null;
-    if (stop.id) [existing] = await tx.select().from(truckManualSchedules).where(and(eq(truckManualSchedules.id, stop.id), eq(truckManualSchedules.truckId, restaurant.id))).limit(1);
+    if (stop.id) [existing] = await tx.select().from(nativeSchedules.table).where(and(eq(nativeSchedules.table.id, stop.id), nativeSchedules.predicate)).limit(1);
+    if (stop.id && !existing) throw new OwnerAiActionError(409, "schedule_not_found", "The requested schedule does not belong to this restaurant or no longer exists");
+    const closed = stop.status === "closed";
+    if (closed && stop.operation === "upsert") {
+      const expiry = stop.expiresAt ? new Date(stop.expiresAt) : null;
+      const closureDayStart = DateTime.fromISO(stop.date, { zone: stop.timezone || "invalid" }).startOf("day");
+      const nextMidnight = closureDayStart.plus({ days: 1 });
+      if (!expiry || !nextMidnight.isValid || !Number.isFinite(expiry.getTime()) || expiry <= now || expiry.getTime() <= closureDayStart.toMillis() || expiry.getTime() > nextMidnight.toMillis()) {
+        throw new OwnerAiActionError(409, "invalid_closure_expiry", "A dated closure requires an expiry after its local day begins and after now, no later than the next midnight in its explicit timezone");
+      }
+    }
+    const locationName = closed ? "Closed" : stop.locationName || stop.eventName || "Scheduled stop";
     const date = new Date(`${stop.date}T00:00:00.000Z`);
-    if (!existing) [existing] = await tx.select().from(truckManualSchedules).where(and(eq(truckManualSchedules.truckId, restaurant.id), eq(truckManualSchedules.date, date), eq(truckManualSchedules.locationName, stop.locationName || stop.eventName || "Scheduled stop"))).limit(1);
+    if (!existing) [existing] = await tx.select().from(nativeSchedules.table).where(and(nativeSchedules.predicate, eq(nativeSchedules.table.date, date), eq(nativeSchedules.table.locationName, locationName))).limit(1);
+    if (sourceSchedules && existing && existing.isPublic !== true) throw new OwnerAiActionError(409,"SOURCE_FACT_PRIVATE_SCHEDULE_CONFLICT","Public source updates cannot repurpose an existing private schedule");
     if (stop.operation === "archive") {
       if (existing) {
-        await tx.update(truckManualSchedules).set({ status: "cancelled", isPublic: false, mapEligible: false, liveFeedEligible: false, updatedAt: now }).where(eq(truckManualSchedules.id, existing.id));
+        await tx.update(nativeSchedules.table).set({ status: "cancelled", isPublic: false, ...(nativeSchedules.binding.profileType === "truck" ? { mapEligible: false, liveFeedEligible: false } : {}), updatedAt: now }).where(eq(nativeSchedules.table.id, existing.id));
         counts.schedulesArchived += 1;
       }
       continue;
     }
     const city = stop.city || restaurant.city || null;
     const state = stop.state || restaurant.state || null;
-    const values = { truckId: restaurant.id, date, startTime: stop.startTime ?? null, endTime: stop.endTime ?? null, locationName: stop.locationName || stop.eventName || "Scheduled stop", address: stop.address ?? null, city, state, notes: [stop.eventName && stop.kind === "event_stop" ? `Event: ${stop.eventName}` : null, stop.notes].filter(Boolean).join("\n") || null, isPublic: stop.isPublic, status: "confirmed", scheduleType: stop.kind, timezone: stop.timezone || resolveCityTimeZoneSync({ city: city || "", state: state || "" }), sourceType: "owner_ai_approved", sourceArtifact: stop.sourceUrl || null, sourceConfidence: "confirmed", ownerSubmittedEquivalent: true, recurring: false, expiresAt: stop.expiresAt ? new Date(stop.expiresAt) : null, mapEligible: stop.isPublic, liveFeedEligible: stop.isPublic, lastConfirmedAt: now, updatedAt: now };
-    if (existing) await tx.update(truckManualSchedules).set(values).where(eq(truckManualSchedules.id, existing.id));
-    else await tx.insert(truckManualSchedules).values(values);
+    const values = { [nativeSchedules.idKey]: restaurant.id, date, startTime: stop.startTime ?? null, endTime: stop.endTime ?? null, locationName, address: stop.address ?? null, city, state, notes: [stop.eventName && stop.kind === "event_stop" ? `Event: ${stop.eventName}` : null, stop.notes].filter(Boolean).join("\n") || null, isPublic: stop.isPublic, status: stop.status, scheduleType: stop.kind, timezone: closed ? stop.timezone! : stop.timezone || resolveCityTimeZoneSync({ city: city || "", state: state || "" }), sourceType: "owner_ai_approved", sourceArtifact: stop.sourceUrl || null, sourceConfidence: "confirmed", ownerSubmittedEquivalent: true, recurring: false, expiresAt: stop.expiresAt ? new Date(stop.expiresAt) : null, mapEligible: stop.isPublic && !closed, liveFeedEligible: stop.isPublic, lastConfirmedAt: now, updatedAt: now };
+    if (nativeSchedules.binding.profileType !== "truck") {
+      Object.assign(values, { ownerId: restaurant.ownerId, profileType: nativeSchedules.binding.profileType, sourceEvidence: packet.sourceFacts?.version === 2 ? { section: packet.sourceFacts.sections.find(section => section.path === "schedules"), officialSources: packet.sourceFacts.officialSources } : null });
+      for (const key of ["sourceConfidence", "ownerSubmittedEquivalent", "recurring", "mapEligible", "liveFeedEligible"]) delete (values as any)[key];
+    }
+    if (existing) await tx.update(nativeSchedules.table).set(values).where(eq(nativeSchedules.table.id, existing.id));
+    else await tx.insert(nativeSchedules.table).values(values);
     counts.schedulesUpserted += 1;
+  }
+
+  // Check the final reviewed schedule state, allowing explicit archives in either packet order.
+  if (nativeSchedules.binding.profileType !== "truck") for (const closure of (packet.schedules || []).filter(stop => stop.status === "closed" && stop.operation === "upsert" && stop.isPublic)) {
+    const localDay = DateTime.fromISO(closure.date, {zone: closure.timezone || "invalid"}).startOf("day");
+    const rows = await tx.select().from(nativeSchedules.table).where(nativeSchedules.predicate);
+    for (const row of rows) {
+      if (row.isPublic !== true || row.status !== "confirmed" || (row.expiresAt && new Date(row.expiresAt) <= now)) continue;
+      const interval = buildSlotDateTimes({date: new Date(row.date).toISOString().slice(0,10), timeZone: row.timezone || "invalid", startTime: row.startTime, endTime: row.endTime});
+      if (!interval || !localDay.isValid || (interval.startUtc.getTime() < localDay.plus({days:1}).toMillis() && interval.endUtc.getTime() > localDay.toMillis())) throw new OwnerAiActionError(409, "public_appearance_closure_conflict", "A confirmed public appearance overlaps this dated closure; reconcile it in a separate exact owner revision");
+    }
+  }
+
+  for (const closure of (nativeSchedules.binding.profileType === "truck" ? packet.schedules || [] : []).filter((stop) => stop.status === "closed" && stop.operation === "upsert")) {
+    const dayStart = DateTime.fromISO(closure.date, { zone: closure.timezone! }).startOf("day");
+    const dayEnd = dayStart.plus({ days: 1 });
+    // Inventory proof is scoped to the closure day, never to the public feed's
+    // current lookahead/confirmation TTL. Date keys are stored at UTC midnight;
+    // two days on either side cover timezone differences and overnight intervals.
+    const dateAnchor = DateTime.fromISO(closure.date, { zone: "utc" });
+    const queryStart = dateAnchor.minus({ days: 2 }).toJSDate();
+    const queryEnd = dateAnchor.plus({ days: 2 }).endOf("day").toJSDate();
+    const activeTruck = sql`exists (
+      select 1 from restaurants operating_truck
+      inner join users operating_truck_owner on operating_truck_owner.id = operating_truck.owner_id
+      where operating_truck.id = ${restaurant.id}
+        and operating_truck.is_active = true and operating_truck_owner.is_disabled = false
+    )`;
+    const manualRows = await tx.select().from(truckManualSchedules).where(and(
+      eq(truckManualSchedules.truckId, restaurant.id), eq(truckManualSchedules.isPublic, true),
+      gte(truckManualSchedules.date, queryStart), lte(truckManualSchedules.date, queryEnd), activeTruck,
+    ));
+    const bookingRows = await tx.select({
+      date: events.date, startTime: events.startTime, endTime: events.endTime,
+      timezone: eventSeries.timezone, city: hosts.city, state: hosts.state,
+      eventType: events.eventType, eventName: events.name, hostName: hosts.businessName,
+    }).from(eventBookings)
+      .innerJoin(events, eq(eventBookings.eventId, events.id))
+      .innerJoin(hosts, eq(events.hostId, hosts.id))
+      .innerJoin(users, eq(hosts.userId, users.id))
+      .leftJoin(eventSeries, eq(events.seriesId, eventSeries.id))
+      .where(and(eq(eventBookings.truckId, restaurant.id), eq(eventBookings.status, "confirmed"),
+        eq(users.isDisabled, false), activeTruck, inArray(events.status, ["open", "booked", "filled"]),
+        or(isNull(events.requiresPayment), eq(events.requiresPayment, false)),
+        gte(events.date, queryStart), lte(events.date, queryEnd)));
+    const serviceRows = [
+      ...manualRows.filter((row: any) =>
+        ["open", "confirmed", "scheduled", "filled", "booked"].includes(String(row.status || "").trim().toLowerCase()) &&
+        row.liveFeedEligible !== false &&
+        (!row.expiresAt || new Date(row.expiresAt).getTime() > Math.max(now.getTime(), dayStart.toMillis()))),
+      ...bookingRows.filter((row: any) =>
+        String(row.eventType || "").trim().toLowerCase() !== "private_event" &&
+        isPublicDiscoveryEligibleEntity({ name: row.eventName, isActive: true }) &&
+        isPublicDiscoveryEligibleEntity({ name: row.hostName, isActive: true })),
+    ];
+    for (const row of serviceRows) {
+      const date = row.date instanceof Date ? row.date.toISOString().slice(0, 10) : String(row.date || "").slice(0, 10);
+      if (!date || !row.startTime || !row.endTime) continue;
+      const timezone = String(row.timezone || "") || resolveCityTimeZoneSync({ city: String(row.city || ""), state: String(row.state || "") });
+      const interval = buildSlotDateTimes({ date, startTime: row.startTime, endTime: row.endTime, timeZone: timezone });
+      if (interval && interval.startUtc.getTime() < dayEnd.toMillis() && interval.endUtc.getTime() > dayStart.toMillis()) {
+        throw new OwnerAiActionError(409, "closure_schedule_conflict", "Another public service stop remains on this closure day. Review and archive the manual stop or cancel its booking through the existing owner flow before applying the closure");
+      }
+    }
   }
 
   for (const deal of packet.deals || []) {
@@ -1745,6 +1945,28 @@ async function processApprovedSocialIntents(draftId: string) {
       updatedAt: leaseStartedAt,
     }).where(and(eq(socialPostQueue.id, row.id), eq(socialPostQueue.status, "approved"))).returning();
     if (!claimed) continue;
+    if ((draft.packet as any)?.reverseOsmosis) {
+      try {
+        const roOutcome = await publishMealScoutReverseOsmosisSocialIntent({ draft, row: claimed, execute: async (tx, connection) => {
+          const socialDraft = socialDrafts.find(value => value.platform === row.platform) || {};
+          let imageUrl = await validateAndPrepareRemoteImage(socialDraft.suppliedImageUrl, "owner-ai-social", socialDraft.suppliedImageUrl ? findMediaManifestEntry(draft.mediaManifest, `social-${row.platform}`) : null);
+          if (!imageUrl && socialDraft.generatedSvg) imageUrl = await uploadGeneratedSvg(socialDraft.generatedSvg, "owner-ai-social", `${draftId}-${row.platform}`);
+          if (!imageUrl) throw new Error("Approved social image could not be hosted");
+          const [withImage] = await tx.update(socialPostQueue).set({ imageUrl, metadata: { ...asRecord(claimed.metadata), hostedImageUrl: imageUrl, hostedAt: new Date().toISOString() }, updatedAt: new Date() }).where(eq(socialPostQueue.id, claimed.id)).returning();
+          const proposal = (draft.packet as any).reverseOsmosis.outbound.find((p: any) => p.scope.provider === row.platform);
+          // Hosting may take time. Reverify actual grants immediately before the provider call while native authority locks remain held.
+          await verifyMealScoutBusinessAsset(proposal, connection, draft.approvedByUserId!);
+          const result = await publishSocialQueueItem(withImage, { connection, database: tx });
+          await markSocialPostResult(withImage, result, tx);
+          return result;
+        } });
+        if (roOutcome.status === "held") await markSocialPostResult(claimed, { ok: false, manualRequired: true, error: "Publication delivery is held for trusted reconciliation; no retry was initiated" });
+      } catch (error) {
+        // Every ambiguous/crashed native claim remains held. A queue status never grants a new attempt.
+        await markSocialPostResult(claimed, { ok: false, manualRequired: true, error: error instanceof OwnerAiActionError ? error.message : "Reverse Osmosis publication is held for reconciliation; no retry was initiated" });
+      }
+      continue;
+    }
     let providerResult: Awaited<ReturnType<typeof publishSocialQueueItem>> | null = null;
     try {
       const socialDraft = socialDrafts.find((value) => value.platform === row.platform) || {};
@@ -1799,7 +2021,7 @@ async function processApprovedSocialIntents(draftId: string) {
   }
 }
 
-export async function approveOwnerAiDraft(input: { userId: string; draftId: string; expectedRevision: number }) {
+export async function approveOwnerAiDraft(input: { userId: string; draftId: string; expectedRevision: number; connectorPrincipal?: OwnerAiConnectorPrincipal }) {
   const initial = await getOwnerAiDraftForOwner(input.userId, input.draftId);
   if (initial.status === "cancelled") throw new OwnerAiActionError(409, "DRAFT_CANCELLED", "Cancelled drafts cannot be approved");
   if (initial.status === "draft" && initial.revision !== input.expectedRevision) throw new OwnerAiActionError(409, "STALE_DRAFT_REVISION", "Draft revision changed; reload before approval", { currentRevision: initial.revision });
@@ -1808,6 +2030,8 @@ export async function approveOwnerAiDraft(input: { userId: string; draftId: stri
   let applied = initial.status === "applied";
   if (!applied) {
     const packet = ownerAiActionPacketSchema.parse(initial.packet);
+    await validateMealScoutReverseOsmosisPacket(packet, initial.restaurantId, input.userId, initial.expectedVersions as OwnerAiExpectedVersions);
+    await validateSourceFacts(packet, initial.restaurantId, input.userId, false);
     const socialDrafts = asArray<Record<string, any>>(initial.socialDrafts);
     const requestedSocialPlatforms = [
       ...new Set(
@@ -1864,9 +2088,20 @@ export async function approveOwnerAiDraft(input: { userId: string; draftId: stri
     const transactionResult = await db.transaction(async (tx: any) => {
       const [lockedDraft] = await tx.select().from(ownerAiActionDrafts).where(eq(ownerAiActionDrafts.id, input.draftId)).limit(1).for("update");
       if (!lockedDraft) throw new OwnerAiActionError(404, "DRAFT_NOT_FOUND", "Draft not found");
+      if (input.connectorPrincipal) {
+        const principal = input.connectorPrincipal;
+        const [credential] = await tx.select().from(apiKeys).where(eq(apiKeys.id, principal.apiKeyId)).limit(1).for("share");
+        const now = new Date();
+        if (!credential || credential.userId !== input.userId || credential.restaurantId !== lockedDraft.restaurantId || credential.purpose !== "owner_ai_connector" ||
+            credential.isActive !== true || credential.revokedAt || (credential.expiresAt && credential.expiresAt <= now) ||
+            !parseScopes(credential.scope).includes("owner_ai:drafts:approve") || !parseScopes(credential.scope).includes("owner_ai:context")) {
+          throw new OwnerAiActionError(403, "CONNECTOR_APPROVAL_AUTHORITY_CHANGED", "Owner connection was revoked, expired or changed during approval; nothing was applied");
+        }
+      }
       if (lockedDraft.status === "applied") return { alreadyApplied: true };
       if (lockedDraft.status !== "draft") throw new OwnerAiActionError(409, "DRAFT_NOT_APPROVABLE", `Draft status is ${lockedDraft.status}`);
       if (lockedDraft.revision !== input.expectedRevision) throw new OwnerAiActionError(409, "STALE_DRAFT_REVISION", "Draft changed before approval completed", { currentRevision: lockedDraft.revision });
+      if (stableHash(lockedDraft.packet) !== stableHash(initial.packet)) throw new OwnerAiActionError(409, "STALE_DRAFT_CONTENT", "Draft content changed while source facts were rechecked");
       const [restaurant] = await tx.select().from(restaurants).where(eq(restaurants.id, lockedDraft.restaurantId)).limit(1).for("update");
       if (!restaurant || restaurant.ownerId !== input.userId) throw new OwnerAiActionError(403, "ACTUAL_OWNER_REQUIRED", "Only the current actual restaurant owner can approve");
       if (requestedSocialPlatforms.length) {
@@ -1914,6 +2149,8 @@ export async function approveOwnerAiDraft(input: { userId: string; draftId: stri
       );
       const expectedVersions = lockedDraft.expectedVersions as OwnerAiExpectedVersions;
       if (!versionsEqual(expectedVersions, currentVersions)) throw new OwnerAiActionError(409, "STALE_CONTEXT", "MealScout content changed after this draft was prepared. Nothing was applied or published.", { expected: expectedVersions, current: currentVersions });
+      await assertOwnerAiSettingsAccess(input.userId, restaurant, preparedPacket, tx, true);
+      return applyMealScoutReverseOsmosisWithinApproval({ tx, draft: lockedDraft, userId: input.userId, execute: async () => {
       const now = new Date();
       const canonicalCounts = await applyCanonicalPacket(tx, restaurant, preparedPacket, now);
       for (const social of socialDrafts) {
@@ -1935,6 +2172,7 @@ export async function approveOwnerAiDraft(input: { userId: string; draftId: stri
       const result = { canonicalCommitted: true, canonicalCounts, socialRequested: socialDrafts.map((social) => social.platform) };
       await tx.update(ownerAiActionDrafts).set({ status: "applied", revision: lockedDraft.revision + 1, approvedByUserId: input.userId, approvedAt: now, appliedAt: now, result, errors: [], updatedAt: now }).where(eq(ownerAiActionDrafts.id, lockedDraft.id));
       return { alreadyApplied: false, result };
+      } });
     });
     applied = !transactionResult.alreadyApplied || applied;
   }
