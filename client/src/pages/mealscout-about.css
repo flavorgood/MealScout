@@ -2277,3 +2277,9 @@
     animation-duration: 0.01ms !important;
   }
 }
+
+@media (min-width: 761px) and (max-width: 1023px) {
+  .ms-about-audience-top {
+    flex-wrap: wrap;
+  }
+}
