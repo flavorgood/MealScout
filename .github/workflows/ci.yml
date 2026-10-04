@@ -61,6 +61,9 @@ jobs:
       - name: Typecheck
         run: npm run check
 
+      - name: TradeScout SSO Identity Validation
+        run: node --test scripts/mealscout-tradescout-sso-identity.behavior.test.cjs
+
       - name: Stripe Webhook Safety
         run: npm run test:stripe-webhook-safety
 
