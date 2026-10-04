@@ -2039,6 +2039,19 @@ export async function setupUnifiedAuth(
         return res.status(401).json({ error: "Invalid SSO token" });
       }
 
+      const rawSubject =
+        decoded && typeof decoded === "object" && !Array.isArray(decoded)
+          ? decoded.sub || decoded.id || decoded.userId
+          : undefined;
+      if (
+        (typeof rawSubject !== "string" || rawSubject.trim().length === 0) &&
+        (typeof rawSubject !== "number" || !Number.isFinite(rawSubject))
+      ) {
+        return res
+          .status(400)
+          .json({ error: "SSO token missing subject (sub)" });
+      }
+
       const roles: string[] | undefined = Array.isArray(decoded.roles)
         ? decoded.roles
         : typeof decoded.role === "string"
@@ -2063,7 +2076,7 @@ export async function setupUnifiedAuth(
       const userType = mapRolesToUserType(roles);
 
       const tsUserData: TradeScoutUserData = {
-        tradescoutId: String(decoded.sub || decoded.id || decoded.userId),
+        tradescoutId: String(rawSubject),
         email: decoded.email ?? null,
         firstName:
           decoded.given_name ||
@@ -2077,12 +2090,6 @@ export async function setupUnifiedAuth(
             : null),
         roles: roles ?? null,
       };
-
-      if (!tsUserData.tradescoutId) {
-        return res
-          .status(400)
-          .json({ error: "SSO token missing subject (sub)" });
-      }
 
       const user = await storage.upsertUserByAuth(
         "tradescout",

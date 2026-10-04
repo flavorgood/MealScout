@@ -1978,6 +1978,7 @@
 @media (max-width: 760px) {
   .ms-about {
     font-size: 15px;
+    overflow-wrap: anywhere;
   }
 
   .ms-about-jumpbar {
@@ -2144,6 +2145,25 @@
     min-height: 0;
   }
 
+  .ms-about-system-map,
+  .ms-about-audience-grid,
+  .ms-about-journey-grid,
+  .ms-about-guide,
+  .ms-about-answers {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .ms-about-audience-top {
+    flex-wrap: wrap;
+  }
+
+  .ms-about-status-pill,
+  .ms-about-guide-link,
+  .ms-about-text-link {
+    max-width: 100%;
+    overflow-wrap: anywhere;
+  }
+
   .ms-about-profile-section,
   .ms-about-mobile-food {
     padding: 86px 0;
@@ -2242,6 +2262,12 @@
   }
 }
 
+@media (max-width: 380px) {
+  .ms-about-output-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .ms-about *,
   .ms-about *::before,
@@ -2249,5 +2275,11 @@
     scroll-behavior: auto !important;
     transition-duration: 0.01ms !important;
     animation-duration: 0.01ms !important;
+  }
+}
+
+@media (min-width: 761px) and (max-width: 1023px) {
+  .ms-about-audience-top {
+    flex-wrap: wrap;
   }
 }

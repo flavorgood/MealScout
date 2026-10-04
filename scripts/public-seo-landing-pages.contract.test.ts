@@ -708,7 +708,7 @@ for (const snippet of [
   "routeEntity !== requestedEntity",
   'canonicalPublicRestaurantProfileEntity(row) !== "truck"',
   'canonicalPublicRestaurantProfileEntity(row) !== "bar"',
-  'canonicalPublicRestaurantProfileEntity(row) !== "restaurant"',
+  "isNativePublicRestaurant(row)",
   '["restaurant", "truck", "bar"].includes(entity)',
   "canonicalEntity !== entity",
   "entityType: canonicalEntity",
@@ -717,6 +717,31 @@ for (const snippet of [
     throw new Error(`Canonical typed public profile identity missing: ${snippet}`);
   }
 }
+// Restaurant-only admission moved into the native helper. Keep this contract
+// scoped to the restaurant route and the helper's strict admission predicate.
+const publicProfileApiStart = publicDiscoveryRoutes.indexOf('app.get("/api/public/profiles/:entity/:id",');
+const restaurantRouteStart = publicDiscoveryRoutes.indexOf('if (entity === "restaurant") {', publicProfileApiStart);
+const restaurantOwnerStart = publicDiscoveryRoutes.indexOf(
+  "const ownerProfile =", restaurantRouteStart,
+);
+const restaurantRouteAdmission = publicDiscoveryRoutes.slice(
+  restaurantRouteStart, restaurantOwnerStart,
+);
+const nativeRestaurantAdmission = readFileSync(
+  "server/publicProfiles/admitPublicRestaurant.ts", "utf8",
+);
+const nativeAdmissionStart = nativeRestaurantAdmission.indexOf("export function isNativePublicRestaurant(");
+const nativeAdmissionEnd = nativeRestaurantAdmission.indexOf("export type NativePublicFoodProfileType", nativeAdmissionStart);
+const nativeAdmissionPolicy = nativeRestaurantAdmission.slice(nativeAdmissionStart, nativeAdmissionEnd);
+if (publicProfileApiStart < 0 || restaurantRouteStart < 0 || restaurantOwnerStart <= restaurantRouteStart
+    || !restaurantRouteAdmission.replace(/\s+/g, " ").includes(
+      'if (!row || !isNativePublicRestaurant(row)) { return res.status(404).json({ message: "Profile not found" }); }')
+    || nativeAdmissionStart < 0 || nativeAdmissionEnd <= nativeAdmissionStart
+    || !nativeAdmissionPolicy.replace(/\s+/g, " ").includes(
+      'return Boolean(row && row.isActive && isPublicBusinessVisible(row) && publicSeoBusinessProfileType(row) === "restaurant");')) {
+  throw new Error("Canonical restaurant-only route/native admission policy missing");
+}
+
 for (const snippet of [
   "resolveCanonicalProfileCity",
   '"@type": "WebPage"',
