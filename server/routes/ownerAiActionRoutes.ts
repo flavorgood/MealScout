@@ -1,6 +1,7 @@
 import { ReverseOsmosisError } from "@tradescout-infinity/reverse-osmosis";
 import { registerReverseOsmosisRoutes } from "./reverseOsmosisRoutes";
 import { registerOwnerAiNativeProfileRoutes } from "./ownerAiNativeProfileRoutes";
+import { registerOnboardingJobRoutes } from "./onboardingJobRoutes";
 import type { Express, NextFunction, Request, Response } from "express";
 import { and, eq } from "drizzle-orm";
 import { z, ZodError } from "zod";
@@ -366,6 +367,12 @@ const openApiDocument = {
 export function registerOwnerAiActionRoutes(app: Express) {
   registerOwnerAiNativeProfileRoutes(app);
   registerReverseOsmosisRoutes(app);
+  registerOnboardingJobRoutes(app, {
+    database: db,
+    isAuthenticated,
+    limiter: distributedRateLimit({ scope: "owner-ai:onboarding", limit: 12, windowMs: 60_000, key: (req: any) => String(req.user?.id || "unresolved") }),
+    enabled: () => process.env.MEALSCOUT_DURABLE_ONBOARDING_ENABLED === "true",
+  });
   const connectorRateKey = (req: ConnectorRequest) =>
     req.ownerAiConnector?.apiKeyId || "owner-ai-connector-unresolved";
   const connectorContextLimiter = distributedRateLimit({
