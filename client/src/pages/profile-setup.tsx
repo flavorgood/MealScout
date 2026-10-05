@@ -35,15 +35,29 @@ const standardProfileIncludes = [
 ];
 
 const doneForYouIncludes = [
-  "Profile setup",
-  "Menu or product organization",
-  "Food category setup",
-  "Photo placement",
-  "Profile copy cleanup",
-  "CTA and action link setup",
-  "Domain or link connection help",
-  "Mobile polish",
-  "Launch checklist",
+  "Manual help from our team",
+  "Custom domain move and connection help",
+  "Profile link and setup guidance",
+  "Larger profile work scoped to your business",
+  "Private review before approved changes",
+];
+
+const manualHelpOptions = [
+  {
+    price: 250,
+    name: "Core setup help",
+    description: "Custom domain move, link connection, and setup help.",
+  },
+  {
+    price: 1000,
+    name: "Larger business help",
+    description: "More manual onboarding or refresh work for a larger business.",
+  },
+  {
+    price: 2500,
+    name: "Full presence refresh",
+    description: "Our primary full-presence service, including socials and logos.",
+  },
 ];
 
 const customBuildExamples = [
@@ -131,12 +145,19 @@ export default function ProfileSetupPage() {
     serviceType: "Food business profile setup",
     description:
       "Free MealScout food profiles with owner-approved AI setup using any model, plus optional done-for-you help for restaurants, food trucks, vendors, caterers, meal prep sellers, and online food brands.",
-    offers: {
-      "@type": "Offer",
-      price: "100",
-      priceCurrency: "USD",
-      description:
-        "Most simple done-for-you MealScout profile setups are $100. Complex profiles may require a custom quote.",
+    hasOfferCatalog: {
+      "@type": "OfferCatalog",
+      name: "Optional manual onboarding and refresh",
+      itemListElement: manualHelpOptions.map((option) => ({
+        "@type": "Offer",
+        price: String(option.price),
+        priceCurrency: "USD",
+        itemOffered: {
+          "@type": "Service",
+          name: option.name,
+          description: option.description,
+        },
+      })),
     },
   };
 
@@ -144,7 +165,7 @@ export default function ProfileSetupPage() {
     <div className="min-h-screen bg-[#fff7ed] text-stone-950">
       <SEOHead
         title="MealScout Profile Setup - Free Food Profiles + Optional Setup Help"
-        description="Create a free MealScout Profile and use any AI you already have to prepare owner-approved menus, images, hours, schedules, deals, and social previews. Optional done-for-you setup is usually $100."
+        description="Create and customize a free MealScout food profile. Use your own AI for private drafts, with optional manual onboarding and refresh help from our team."
         keywords="MealScout profile setup, free restaurant profile, food truck profile, restaurant menu profile, food vendor profile, bakery profile, caterer profile, online food seller profile"
         canonicalUrl="https://www.mealscout.us/profile-setup"
         schemaData={schemaData}
@@ -188,10 +209,15 @@ export default function ProfileSetupPage() {
                   <p className="mt-1 text-sm leading-6 text-stone-700">
                     Any free or paid AI can prepare your profile, menus and
                     prices, logos and images, hours, schedules or events, deals,
-                    and matching social posts. After it shows the complete exact
-                    revision, the owner can consent in that chat and the AI can
-                    approve, apply, and publish it through MealScout.
+                    and matching social posts. Paste its MealScout JSON into
+                    your existing editor, review the private previews, and approve
+                    the exact revision before changes are applied.
                   </p>
+                  <Link href="/owner-ai?src=onboarding">
+                    <Button variant="link" className="mt-2 h-auto px-0 font-bold text-orange-800">
+                      Review AI-prepared content
+                    </Button>
+                  </Link>
                 </div>
               </div>
               <div className="mt-8 flex flex-col gap-3 sm:flex-row">
@@ -289,10 +315,9 @@ export default function ProfileSetupPage() {
                 Choose the level of help you need.
               </h2>
               <p className="mt-3 text-base font-semibold leading-relaxed text-stone-600">
-                Free profile and tools stay free. Most simple done-for-you
-                setups are $100. Larger menus, multiple locations, heavy photo
-                cleanup, online seller catalogs, advanced customization, or
-                ongoing profile support may require a custom quote.
+                DIY creation and customization stay free. Manual onboarding and
+                refresh services pay for work by our team. Choose the help that
+                fits your business, then confirm the exact scope before buying.
               </p>
               <p className="mt-3 text-sm font-bold text-stone-800">
                 Optional setup help never unlocks or restricts profile tools.
@@ -332,14 +357,31 @@ export default function ProfileSetupPage() {
                     Done-For-You Setup
                   </CardTitle>
                   <p className="text-3xl font-black text-orange-700">
-                    Simple setup service: $100
+                    Manual onboarding and refresh
                   </p>
                   <p className="text-sm font-semibold text-stone-600">
-                    We set it up and customize it for you.
+                    We help with the work you want done for you.
                   </p>
                 </CardHeader>
                 <CardContent className="space-y-6">
+                  <dl className="space-y-4">
+                    {manualHelpOptions.map((option) => (
+                      <div key={option.price}>
+                        <dt className="font-bold text-stone-950">
+                          &#36;{option.price.toLocaleString("en-US")} · {option.name}
+                        </dt>
+                        <dd className="mt-1 text-sm leading-6 text-stone-600">
+                          {option.description}
+                        </dd>
+                      </div>
+                    ))}
+                  </dl>
                   <CheckList items={doneForYouIncludes} />
+                  <p className="text-sm leading-6 text-stone-600">
+                    Exact service limits and refresh timing are confirmed with
+                    you before purchase. Paid help uses the same profile tools
+                    and owner review as DIY.
+                  </p>
                   <a href="mailto:support@mealscout.us?subject=MealScout%20Done-For-You%20Profile%20Setup">
                     <Button className="w-full rounded-full bg-orange-600 font-black text-white hover:bg-orange-700">
                       Get Setup Help
