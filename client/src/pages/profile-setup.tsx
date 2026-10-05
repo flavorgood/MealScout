@@ -213,11 +213,11 @@ export default function ProfileSetupPage() {
                     your existing editor, review the private previews, and approve
                     the exact revision before changes are applied.
                   </p>
-                  <Link href="/owner-ai?src=onboarding">
-                    <Button variant="link" className="mt-2 h-auto px-0 font-bold text-orange-800">
+                  <Button asChild variant="link" className="mt-2 h-auto px-0 font-bold text-orange-800">
+                    <Link href="/owner-ai?src=onboarding">
                       Review AI-prepared content
-                    </Button>
-                  </Link>
+                    </Link>
+                  </Button>
                 </div>
               </div>
               <div className="mt-8 flex flex-col gap-3 sm:flex-row">
