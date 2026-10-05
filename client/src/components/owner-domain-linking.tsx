@@ -11,8 +11,11 @@ export default function OwnerDomainLinking({ restaurantId, savedDomain, onVerifi
   savedDomain: unknown;
   onVerified: () => void;
 }) {
-  const [verification, setVerification] = useState<DomainVerification | null>(() => readSavedBusinessDomain(savedDomain, restaurantId));
-  const [domain, setDomain] = useState(() => verification?.hostname || "");
+  const saved = readSavedBusinessDomain(savedDomain, restaurantId);
+  const [checked, setChecked] = useState<DomainVerification | null>(null);
+  const [editedDomain, setEditedDomain] = useState<string | null>(null);
+  const verification = checked ?? (editedDomain === null ? saved : null);
+  const domain = editedDomain ?? saved?.hostname ?? "";
   const [checking, setChecking] = useState(false);
   const [error, setError] = useState("");
   async function verify() {
@@ -20,7 +23,8 @@ export default function OwnerDomainLinking({ restaurantId, savedDomain, onVerifi
     setError("");
     try {
       const result = await verifySelfManagedDomain(restaurantId, domain, async (path, body) => (await apiRequest("POST", path, body)).json());
-      setVerification(result);
+      setChecked(result);
+      setEditedDomain(result.hostname);
       onVerified();
     } catch {
       setError("Connection could not be checked. Enter a business hostname you own and try again.");
@@ -51,7 +55,7 @@ export default function OwnerDomainLinking({ restaurantId, savedDomain, onVerifi
           <Label htmlFor="business-domain-hostname">Business hostname</Label>
           <Input id="business-domain-hostname" value={domain} disabled={checking} maxLength={255} placeholder="food.example.com"
             autoCapitalize="none" autoComplete="off" spellCheck={false}
-            onChange={event => { setDomain(event.target.value); setVerification(null); setError(""); }} />
+            onChange={event => { setEditedDomain(event.target.value); setChecked(null); setError(""); }} />
         </div>
         <Button type="button" disabled={checking || !domain.trim()} onClick={() => void verify()}>
           {checking ? "Checking connection..." : "Verify connection"}
