@@ -9,6 +9,7 @@ import { test } from "node:test";
 import ts from "typescript";
 import { captureMealScoutBusinessPost, connectionBindingRevision, verifyMealScoutBusinessAsset } from "../server/services/reverseOsmosisBusinessAssets";
 import * as guards from "../server/services/reverseOsmosisCaptureGuard";
+import * as postIdentifiers from "../shared/businessPostIdentifier";
 import * as envelope from "../shared/reverseOsmosis";
 import type { Scope } from "@tradescout-infinity/reverse-osmosis";
 
@@ -224,6 +225,7 @@ function handlerFixture(options: { pending?: boolean; writerPending?: boolean; o
   const writerStarted = new Promise<void>(resolve => { writerReached = resolve; });
   const imports: Record<string, any> = {
     zod: nativeRequire("zod"),
+    "../../shared/businessPostIdentifier": postIdentifiers,
     "@tradescout-infinity/reverse-osmosis": nativeRequire("@tradescout-infinity/reverse-osmosis"),
     "../unifiedAuth": { isAuthenticated() {} },
     "../middleware/distributedRateLimit": { distributedRateLimit: () => () => {} },

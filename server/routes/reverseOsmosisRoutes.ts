@@ -6,25 +6,13 @@ import { distributedRateLimit } from "../middleware/distributedRateLimit";
 import { assertActualRestaurantOwner, createOwnerAiDraft } from "../services/ownerAiActions";
 import { prepareMealScoutReverseOsmosisSourceDraftInput, readMealScoutReverseOsmosisOutcome } from "../services/reverseOsmosis";
 import { withSourceCaptureBudget } from "../services/reverseOsmosisCaptureGuard";
+import { businessPostIdentifier } from "../../shared/businessPostIdentifier";
+export { businessPostIdentifier } from "../../shared/businessPostIdentifier";
 
 const requestSchema = z.object({
   postId: z.string().trim().min(1).max(512),
   publishPlatforms: z.array(z.literal("facebook")).max(1).default([]),
 }).strict();
-
-// A link selects one post. It never selects an account, owner or native profile.
-export function businessPostIdentifier(value: string): string {
-  if (/^\d+(?:_\d+)?$/.test(value)) return value;
-  let url: URL;
-  try { url = new URL(value); } catch { throw new Error("BUSINESS_POST_LINK_REQUIRED"); }
-  if (url.protocol !== "https:" || !["facebook.com", "www.facebook.com", "m.facebook.com", "web.facebook.com"].includes(url.hostname) || url.username || url.password || url.port) throw new Error("BUSINESS_POST_LINK_REQUIRED");
-  const story = url.searchParams.get("story_fbid");
-  const page = url.searchParams.get("id");
-  if (story && /^\d+$/.test(story)) return page && /^\d+$/.test(page) ? `${page}_${story}` : story;
-  const match = url.pathname.match(/^\/([^/]+)\/posts\/(\d+)\/?$/);
-  if (match) return /^\d+$/.test(match[1]) ? `${match[1]}_${match[2]}` : match[2];
-  throw new Error("BUSINESS_POST_LINK_REQUIRED");
-}
 
 const route = (fn: (req: any, res: Response) => Promise<unknown>) =>
   (req: Request, res: Response, next: NextFunction) => Promise.resolve(fn(req, res)).catch(next);

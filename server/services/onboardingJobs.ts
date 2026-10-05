@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { sql, type SQL } from "drizzle-orm";
+import { businessPostIdentifier } from "../../shared/businessPostIdentifier";
 import {
   ONBOARDING_RESEARCH_MAX_ATTEMPTS,
   ONBOARDING_RESEARCH_RECEIPT_MAX_BYTES,
@@ -32,7 +33,7 @@ export function onboardingRequestHash(scope: OnboardingScope, input: OnboardingR
   return createHash("sha256").update(JSON.stringify({ version: 1, ...onboardingScopeSchema.parse(scope), input: onboardingResearchInputSchema.parse(input) })).digest("hex");
 }
 
-export function validateOnboardingResearchReceipt(value: unknown, input: OnboardingResearchInput, requestHash: string): OnboardingResearchReceipt {
+export function validateOnboardingResearchReceipt(value: unknown, input: OnboardingResearchInput, requestHash: string, scope?: OnboardingScope): OnboardingResearchReceipt {
   const receipt = onboardingResearchReceiptSchema.parse(value);
   if (receipt.requestHash !== requestHash) fail(409, "RESEARCH_BINDING_MISMATCH", "Research does not match this saved request");
   if (Buffer.byteLength(JSON.stringify(receipt), "utf8") > ONBOARDING_RESEARCH_RECEIPT_MAX_BYTES) fail(400, "RESEARCH_RECEIPT_TOO_LARGE", "Research receipt exceeds the storage bound");
@@ -42,6 +43,21 @@ export function validateOnboardingResearchReceipt(value: unknown, input: Onboard
     captured.add(source.url);
   }
   if (receipt.observations.some(item => !captured.has(item.sourceUrl))) fail(400, "RESEARCH_SOURCE_MISMATCH", "Every observation requires its saved source capture");
+  if (receipt.sourceBinding) {
+    const binding = receipt.sourceBinding;
+    const source = receipt.sources.find(item => item.url === binding.declaredSourceUrl);
+    const qualify = (id: string) => /^\d+$/.test(id) ? `${binding.accountId}_${id}` : id;
+    let declared: string, capturedPost: string;
+    try { declared = qualify(businessPostIdentifier(binding.declaredSourceUrl)); capturedPost = qualify(businessPostIdentifier(binding.capturedSourceUrl)); }
+    catch { fail(400, "RESEARCH_SOURCE_MISMATCH", "Bound source must identify the same supported Page post"); }
+    if (!scope || binding.ownerId !== scope.ownerId || binding.restaurantId !== scope.restaurantId ||
+        !source || source.contentHash !== binding.sourceVersion ||
+        binding.postId !== declared! || binding.postId !== capturedPost! ||
+        !binding.postId.startsWith(binding.accountId + "_") ||
+        Date.parse(binding.expiresAt) <= Date.parse(source.capturedAt)) {
+      fail(409, "RESEARCH_BINDING_MISMATCH", "Bound source does not match this owner, business or saved capture");
+    }
+  }
   return receipt;
 }
 
@@ -73,9 +89,15 @@ export function createOnboardingJobService(database: OnboardingDatabase, clock: 
       FOR UPDATE OF r, u`)).rows;
     if (rows.length !== 1) fail(403, "CURRENT_OWNER_REQUIRED", "Current enabled business owner is required");
   }
-  async function scoped<T>(rawScope: OnboardingScope, work: (tx: OnboardingTransaction, scope: OnboardingScope) => Promise<T>) {
+  async function scoped<T>(rawScope: OnboardingScope, work: (tx: OnboardingTransaction, scope: OnboardingScope) => Promise<T>, checkpoint?: () => void) {
     const scope = onboardingScopeSchema.parse(rawScope);
-    return database.transaction(async tx => { await owner(tx, scope); return work(tx, scope); });
+    checkpoint?.();
+    return database.transaction(async tx => {
+      checkpoint?.();
+      await owner(tx, scope); checkpoint?.();
+      const result = await work(tx, scope); checkpoint?.();
+      return result;
+    });
   }
   async function job(tx: OnboardingTransaction, scope: OnboardingScope, id: string) {
     const row = (await tx.execute(sql`SELECT * FROM owner_onboarding_jobs WHERE id = ${id}
@@ -128,9 +150,10 @@ export function createOnboardingJobService(database: OnboardingDatabase, clock: 
     },
 
     // Internal worker capability only. No HTTP endpoint exposes a lease token.
-    async claim(scope: OnboardingScope, id: string) {
+    async claim(scope: OnboardingScope, id: string, checkpoint?: () => void) {
       return scoped(scope, async (tx, valid) => {
         const row = await job(tx, valid, id);
+        checkpoint?.();
         const at = now();
         if (row.status === "completed" || row.status === "failed") return null;
         if (row.status === "running" && new Date(row.lease_expires_at).getTime() > new Date(at).getTime()) return null;
@@ -147,13 +170,14 @@ export function createOnboardingJobService(database: OnboardingDatabase, clock: 
           last_error_code = ${row.status === "running" ? "RESEARCH_LEASE_EXPIRED" : row.last_error_code},
           revision = revision + 1, updated_at = ${at}::timestamptz WHERE id = ${id} RETURNING *`)).rows[0];
         return { job: publicJob(updated), leaseToken: token, leaseExpiresAt: expires };
-      });
+      }, checkpoint);
     },
 
-    async complete(scope: OnboardingScope, id: string, token: string, rawReceipt: unknown) {
+    async complete(scope: OnboardingScope, id: string, token: string, rawReceipt: unknown, checkpoint?: () => void) {
       return scoped(scope, async (tx, valid) => {
         const row = await job(tx, valid, id);
-        const receipt = validateOnboardingResearchReceipt(rawReceipt, row.input, row.request_hash);
+        checkpoint?.();
+        const receipt = validateOnboardingResearchReceipt(rawReceipt, row.input, row.request_hash, valid);
         // Normalize JSONB key order before checking an exact lost-response replay.
         if (row.status === "completed") {
           if (JSON.stringify(onboardingResearchReceiptSchema.parse(row.research_receipt)) !== JSON.stringify(receipt)) fail(409, "RESEARCH_RESULT_CONFLICT", "Completed research is immutable");
@@ -163,12 +187,14 @@ export function createOnboardingJobService(database: OnboardingDatabase, clock: 
         activeLease(row, token, at);
         // Match PostgreSQL's JSONB representation, including its separator spaces.
         const storedBytes = (await tx.execute(sql`SELECT octet_length(${JSON.stringify(receipt)}::jsonb::text) AS bytes`)).rows[0]?.bytes;
+        checkpoint?.();
+        activeLease(row, token, now());
         if (!Number.isSafeInteger(storedBytes) || storedBytes > ONBOARDING_RESEARCH_RECEIPT_MAX_BYTES) fail(400, "RESEARCH_RECEIPT_TOO_LARGE", "Research receipt exceeds the storage bound");
         const updated = (await tx.execute(sql`UPDATE owner_onboarding_jobs SET status = 'completed', research_receipt = ${JSON.stringify(receipt)}::jsonb,
           lease_token = NULL, lease_expires_at = NULL, last_error_code = NULL, completed_at = ${at}::timestamptz,
           revision = revision + 1, updated_at = ${at}::timestamptz WHERE id = ${id} RETURNING *`)).rows[0];
         return publicJob(updated);
-      });
+      }, checkpoint);
     },
 
     async retry(scope: OnboardingScope, id: string, token: string) {

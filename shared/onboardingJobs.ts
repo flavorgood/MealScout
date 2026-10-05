@@ -26,6 +26,21 @@ export const onboardingResearchInputSchema = z.object({
 }));
 
 const digest = z.string().regex(/^[a-f0-9]{64}$/);
+export const onboardingSourceBindingSchema = z.object({
+  kind: z.literal("mealscout.facebook-post.v1"),
+  ownerId: z.string().min(1).max(200),
+  restaurantId: z.string().uuid(),
+  provider: z.literal("facebook"),
+  accountId: z.string().max(512).regex(/^\d+$/),
+  postId: z.string().max(512).regex(/^\d+_\d+$/),
+  declaredSourceUrl: publicLink,
+  capturedSourceUrl: publicLink,
+  bindingRevision: digest,
+  sourceVersion: digest,
+  publicProofHash: digest,
+  expectedNativeVersion: digest,
+  expiresAt: z.string().datetime(),
+}).strict();
 export const onboardingResearchReceiptSchema = z.object({
   version: z.literal(1),
   requestHash: digest,
@@ -41,6 +56,9 @@ export const onboardingResearchReceiptSchema = z.object({
     sourceUrl: publicLink,
   }).strict()).max(24),
   unknowns: z.array(z.string().trim().min(1).max(200)).max(24),
+  // Native capture identity is persisted alongside the immutable observations.
+  // Structural parsing is not provider truth; only internal source adapters set it.
+  sourceBinding: onboardingSourceBindingSchema.optional(),
   // No new score runner. An established scoring integration can be added later.
   currentScore: z.null().default(null),
   conditionalProjectedScore: z.null().default(null),
