@@ -4,6 +4,7 @@ import { ReverseOsmosisError } from "@tradescout-infinity/reverse-osmosis";
 import type { BusinessAssetEvidence, ProposalInput, Scope } from "@tradescout-infinity/reverse-osmosis";
 import type { SocialPublishingConnection } from "@shared/schema";
 export type { SocialPublishingConnection } from "@shared/schema";
+import { assertSourceCaptureActive, withSourceCaptureBudget, type SourceCaptureOptions } from "./reverseOsmosisCaptureGuard";
 
 // Native provider evidence only. Shared Infinity owns business-only orchestration policy.
 const GRAPH = "https://graph.facebook.com/v24.0/";
@@ -66,36 +67,54 @@ function nativeBinding(scope: Scope, connection: SocialPublishingConnection, own
   if (metadata.provider !== "meta" || metadata.pageId !== connection.externalAccountId) fail("connection-page-mismatch");
 }
 
-async function providerRead(path: string, params: Record<string, string>, bearer: string): Promise<{ data: Record<string, unknown>; raw: string }> {
+async function providerRead(path: string, params: Record<string, string>, bearer: string, signal?: AbortSignal): Promise<{ data: Record<string, unknown>; raw: string }> {
+  assertSourceCaptureActive(signal);
   const controller = new AbortController();
+  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+  let onAbort: (() => void) | undefined;
+  const cancelled = new Promise<never>((_resolve, reject) => {
+    if (signal) {
+      onAbort = () => { controller.abort(); reject(new ReverseOsmosisError("reverse-osmosis:capture-cancelled")); };
+      signal.addEventListener("abort", onAbort, { once: true });
+      if (signal.aborted) onAbort();
+    }
+  });
+  const active = () => {
+    assertSourceCaptureActive(signal);
+    if (controller.signal.aborted) fail("provider-verification-failed");
+  };
   let timer: ReturnType<typeof setTimeout> | undefined;
   const deadline = new Promise<never>((_, reject) => {
     timer = setTimeout(() => { controller.abort(); reject(new ReverseOsmosisError("reverse-osmosis:provider-timeout")); }, FETCH_TIMEOUT_MS);
   });
   try {
-    return await Promise.race([deadline, (async () => {
+    return await Promise.race([deadline, cancelled, (async () => {
+      active();
       const url = new URL(path, GRAPH);
       for (const [key, value] of Object.entries(params)) url.searchParams.set(key, value);
       const response = await fetch(url, {
         method: "GET", headers: { Authorization: `Bearer ${bearer}`, Accept: "application/json" },
         redirect: "error", signal: controller.signal,
       });
+      if (controller.signal.aborted && response.body) void response.body.cancel().catch(() => {});
+      active();
       if (!response.ok) fail("provider-verification-failed");
       const length = response.headers.get("content-length");
       if (length && Number(length) > RESPONSE_LIMIT) fail("provider-response-limit");
       if (!response.body) fail("provider-response-invalid");
-      const reader = response.body.getReader();
+      reader = response.body.getReader();
       const chunks: Uint8Array[] = [];
       let size = 0;
-      try {
-        while (true) {
-          const next = await reader.read();
-          if (next.done) break;
-          size += next.value.byteLength;
-          if (size > RESPONSE_LIMIT) fail("provider-response-limit");
-          chunks.push(next.value);
-        }
-      } finally { void reader.cancel().catch(() => {}); }
+      while (true) {
+        active();
+        const next = await reader.read();
+        active();
+        if (next.done) break;
+        size += next.value.byteLength;
+        if (size > RESPONSE_LIMIT) fail("provider-response-limit");
+        chunks.push(next.value);
+      }
+      active();
       const bytes = new Uint8Array(size);
       let offset = 0;
       for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
@@ -106,9 +125,15 @@ async function providerRead(path: string, params: Record<string, string>, bearer
     })()]);
   } catch (error) {
     // Provider bodies, URLs and thrown transport errors may contain credentials. Never propagate them.
+    assertSourceCaptureActive(signal);
     if (error instanceof ReverseOsmosisError) throw error;
     return fail("provider-verification-failed");
-  } finally { if (timer) clearTimeout(timer); controller.abort(); }
+  } finally {
+    if (timer) clearTimeout(timer);
+    if (onAbort) signal?.removeEventListener("abort", onAbort);
+    controller.abort();
+    if (reader) void reader.cancel().catch(() => {});
+  }
 }
 
 function providerExpiry(value: unknown, now: number): number {
@@ -120,7 +145,9 @@ function providerExpiry(value: unknown, now: number): number {
 
 export async function verifyMealScoutBusinessAsset(
   proposal: ProposalInput, connection: SocialPublishingConnection, ownerId: string,
+  signal?: AbortSignal,
 ): Promise<BusinessAssetEvidence> {
+  assertSourceCaptureActive(signal);
   nativeBinding(proposal.scope, connection, ownerId);
   const initialBinding = connectionBindingRevision(connection, ownerId);
   const initialScope = JSON.stringify(proposal.scope);
@@ -128,13 +155,13 @@ export async function verifyMealScoutBusinessAsset(
   const appSecret = process.env.FACEBOOK_APP_SECRET;
   if (!appId || !appSecret) fail("provider-verification-not-configured");
   const requiredScope = proposal.direction === "native-to-social" ? "pages_manage_posts" : "pages_read_engagement";
-  const me = (await providerRead("me", { fields: "id,category,tasks" }, connection.accessToken!)).data;
+  const me = (await providerRead("me", { fields: "id,category,tasks" }, connection.accessToken!, signal)).data;
   if (me.id !== connection.externalAccountId || typeof me.category !== "string" ||
       !FOOD_BUSINESS_CATEGORIES.has(me.category.trim().toLowerCase())) fail("provider-page-unverified");
   const tasks = me.tasks;
   if (!Array.isArray(tasks) || !tasks.includes("MANAGE") ||
       (proposal.direction === "native-to-social" && !tasks.includes("CREATE_CONTENT"))) fail("provider-page-authority-unverified");
-  const debug = record((await providerRead("debug_token", { input_token: connection.accessToken! }, `${appId}|${appSecret}`)).data.data);
+  const debug = record((await providerRead("debug_token", { input_token: connection.accessToken! }, `${appId}|${appSecret}`, signal)).data.data);
   if (debug.is_valid !== true || debug.type !== "PAGE" || debug.profile_id !== connection.externalAccountId ||
       debug.app_id !== appId || typeof debug.user_id !== "string" || !/^\d+$/.test(debug.user_id)) fail("provider-token-unverified");
   if (!Array.isArray(debug.scopes) || !debug.scopes.includes(requiredScope)) fail("provider-permission-missing");
@@ -148,11 +175,12 @@ export async function verifyMealScoutBusinessAsset(
           (!Array.isArray(granular.target_ids) || !granular.target_ids.includes(connection.externalAccountId))) fail("provider-permission-wrong-page");
     }
   }
-  if (proposal.direction === "native-to-social") await publicPageVisibilityHash(connection);
+  if (proposal.direction === "native-to-social") await publicPageVisibilityHash(connection, signal);
   const now = Date.now();
   const expiresAt = Math.min(now + EVIDENCE_TTL_MS,
     providerExpiry(debug.expires_at, now), providerExpiry(debug.data_access_expires_at, now),
     connection.tokenExpiresAt?.getTime() ?? Infinity);
+  assertSourceCaptureActive(signal);
   if (connectionBindingRevision(connection, ownerId) !== initialBinding ||
       JSON.stringify(proposal.scope) !== initialScope) fail("connection-changed-during-verification");
   return {
@@ -227,11 +255,11 @@ function requirePublicPost(post: Record<string, unknown>): void {
       (post.scheduled_publish_time !== null && post.scheduled_publish_time !== 0)) fail("post-public-visibility-unverified");
 }
 
-async function publicPageVisibilityHash(connection: SocialPublishingConnection): Promise<string> {
+async function publicPageVisibilityHash(connection: SocialPublishingConnection, signal?: AbortSignal): Promise<string> {
   // Page settings are provider-authenticated separately: a public post's targeting
   // does not override Page-level demographic restrictions. Never treat omitted
   // settings, null, an empty country whitelist or token access as public evidence.
-  const settings = await providerRead(`${connection.externalAccountId}/settings`, { fields: "setting,value" }, connection.accessToken!);
+  const settings = await providerRead(`${connection.externalAccountId}/settings`, { fields: "setting,value" }, connection.accessToken!, signal);
   if (!Array.isArray(settings.data.data)) fail("page-public-visibility-unverified");
   const required = ["IS_PUBLISHED", "AGE_RESTRICTIONS", "COUNTRY_RESTRICTIONS"];
   const values = new Map<string, unknown>();
@@ -255,43 +283,48 @@ async function publicPageVisibilityHash(connection: SocialPublishingConnection):
 /** Always re-fetch this exact endpoint before apply and compare sourceVersion. No caller text accepted. */
 export async function captureMealScoutBusinessPost(
   proposalScope: Scope, connection: SocialPublishingConnection, ownerId: string, postId: string,
+  options: SourceCaptureOptions = {},
 ): Promise<CapturedMealScoutBusinessPost> {
-  nativeBinding(proposalScope, connection, ownerId);
-  const initialBinding = connectionBindingRevision(connection, ownerId);
-  const initialScope = JSON.stringify(proposalScope);
-  if (!new RegExp(`^${connection.externalAccountId}_[0-9]+$`).test(postId)) fail("post-page-mismatch");
-  await verifyMealScoutBusinessAsset({
-    scope: proposalScope, direction: "social-to-native", eventId: postId,
-    sourceVersion: "provider-capture", expectedNativeVersion: "provider-capture", fields: {},
-  }, connection, ownerId);
-  const { data: post, raw } = await providerRead(postId, {
-    fields: "id,message,from,permalink_url,updated_time,created_time,is_published,privacy,targeting,feed_targeting,is_hidden,is_expired,scheduled_publish_time",
-  }, connection.accessToken!);
-  if (post.id !== postId || record(post.from).id !== connection.externalAccountId || post.is_published !== true) fail("post-author-unverified");
-  requirePublicPost(post);
-  if (typeof post.message !== "string" || post.message.length > MESSAGE_LIMIT) fail("post-message-unverified");
-  if (typeof post.created_time !== "string" || typeof post.updated_time !== "string" ||
-      !Number.isFinite(Date.parse(post.created_time)) || !Number.isFinite(Date.parse(post.updated_time)) ||
-      Date.parse(post.updated_time) < Date.parse(post.created_time) || Date.parse(post.updated_time) > Date.now() + 60_000) fail("post-timestamp-unverified");
-  const sourceUrl = typeof post.permalink_url === "string" ? publicHttpUrl(post.permalink_url) : undefined;
-  if (!sourceUrl || !["facebook.com", "www.facebook.com", "m.facebook.com"].includes(new URL(sourceUrl).hostname)) fail("post-permalink-unverified");
-  const publicProofHash = hash(JSON.stringify(canonical({
-    pageSettingsBodyHash: await publicPageVisibilityHash(connection),
-    postVisibility: {
-      privacy: post.privacy, targeting: post.targeting, feed_targeting: post.feed_targeting,
-      is_hidden: post.is_hidden, is_expired: post.is_expired,
-      scheduled_publish_time: post.scheduled_publish_time, is_published: post.is_published,
-    },
-  })));
-  const capturedAt = Date.now();
-  if (connectionBindingRevision(connection, ownerId) !== initialBinding ||
-      JSON.stringify(proposalScope) !== initialScope) fail("connection-changed-during-capture");
-  const bodyHash = hash(raw);
-  const sourceVersion = hash(JSON.stringify({ bodyHash, publicProofHash }));
-  return {
-    sourceUrl, capturedAt, expiresAt: capturedAt + CAPTURE_TTL_MS, sourceVersion,
-    providerBodyHash: bodyHash, bodyHash, publicProofHash, providerPostId: postId,
-    providerCreatedAt: post.created_time, providerUpdatedAt: post.updated_time,
-    ...extractMenu(post.message),
-  };
+  return withSourceCaptureBudget(options, async guard => {
+    guard.checkpoint();
+    nativeBinding(proposalScope, connection, ownerId);
+    const initialBinding = connectionBindingRevision(connection, ownerId);
+    const initialScope = JSON.stringify(proposalScope);
+    if (!new RegExp(`^${connection.externalAccountId}_[0-9]+$`).test(postId)) fail("post-page-mismatch");
+    await verifyMealScoutBusinessAsset({
+      scope: proposalScope, direction: "social-to-native", eventId: postId,
+      sourceVersion: "provider-capture", expectedNativeVersion: "provider-capture", fields: {},
+    }, connection, ownerId, guard.signal);
+    const { data: post, raw } = await providerRead(postId, {
+      fields: "id,message,from,permalink_url,updated_time,created_time,is_published,privacy,targeting,feed_targeting,is_hidden,is_expired,scheduled_publish_time",
+    }, connection.accessToken!, guard.signal);
+    if (post.id !== postId || record(post.from).id !== connection.externalAccountId || post.is_published !== true) fail("post-author-unverified");
+    requirePublicPost(post);
+    if (typeof post.message !== "string" || post.message.length > MESSAGE_LIMIT) fail("post-message-unverified");
+    if (typeof post.created_time !== "string" || typeof post.updated_time !== "string" ||
+        !Number.isFinite(Date.parse(post.created_time)) || !Number.isFinite(Date.parse(post.updated_time)) ||
+        Date.parse(post.updated_time) < Date.parse(post.created_time) || Date.parse(post.updated_time) > Date.now() + 60_000) fail("post-timestamp-unverified");
+    const sourceUrl = typeof post.permalink_url === "string" ? publicHttpUrl(post.permalink_url) : undefined;
+    if (!sourceUrl || !["facebook.com", "www.facebook.com", "m.facebook.com"].includes(new URL(sourceUrl).hostname)) fail("post-permalink-unverified");
+    const publicProofHash = hash(JSON.stringify(canonical({
+      pageSettingsBodyHash: await publicPageVisibilityHash(connection, guard.signal),
+      postVisibility: {
+        privacy: post.privacy, targeting: post.targeting, feed_targeting: post.feed_targeting,
+        is_hidden: post.is_hidden, is_expired: post.is_expired,
+        scheduled_publish_time: post.scheduled_publish_time, is_published: post.is_published,
+      },
+    })));
+    guard.checkpoint();
+    const capturedAt = Date.now();
+    if (connectionBindingRevision(connection, ownerId) !== initialBinding ||
+        JSON.stringify(proposalScope) !== initialScope) fail("connection-changed-during-capture");
+    const bodyHash = hash(raw);
+    const sourceVersion = hash(JSON.stringify({ bodyHash, publicProofHash }));
+    return {
+      sourceUrl, capturedAt, expiresAt: capturedAt + CAPTURE_TTL_MS, sourceVersion,
+      providerBodyHash: bodyHash, bodyHash, publicProofHash, providerPostId: postId,
+      providerCreatedAt: post.created_time, providerUpdatedAt: post.updated_time,
+      ...extractMenu(post.message),
+    };
+  });
 }

@@ -5,6 +5,7 @@ import { isAuthenticated } from "../unifiedAuth";
 import { distributedRateLimit } from "../middleware/distributedRateLimit";
 import { assertActualRestaurantOwner, createOwnerAiDraft } from "../services/ownerAiActions";
 import { prepareMealScoutReverseOsmosisSourceDraftInput, readMealScoutReverseOsmosisOutcome } from "../services/reverseOsmosis";
+import { assertSourceCaptureActive } from "../services/reverseOsmosisCaptureGuard";
 
 const requestSchema = z.object({
   postId: z.string().trim().min(1).max(512),
@@ -34,16 +35,34 @@ export function registerReverseOsmosisRoutes(app: Express) {
     res.setHeader("Cache-Control", "private, no-store");
     const restaurantId = z.string().uuid().parse(req.params.restaurantId);
     const userId = String(req.user.id);
-    await assertActualRestaurantOwner(userId, restaurantId);
-    const body = requestSchema.parse(req.body);
-    let postId: string;
-    try { postId = businessPostIdentifier(body.postId); } catch {
-      return res.status(400).json({ code: "BUSINESS_POST_LINK_REQUIRED", error: "Paste the public post link from the connected Facebook business Page." });
+    const controller = new AbortController();
+    const aborted = () => controller.abort();
+    const closed = () => { if (!res.writableEnded) controller.abort(); };
+    req.on("aborted", aborted);
+    res.on("close", closed);
+    if (req.aborted || res.destroyed) controller.abort();
+    try {
+      assertSourceCaptureActive(controller.signal);
+      await assertActualRestaurantOwner(userId, restaurantId);
+      assertSourceCaptureActive(controller.signal);
+      const body = requestSchema.parse(req.body);
+      let postId: string;
+      try { postId = businessPostIdentifier(body.postId); } catch {
+        return res.status(400).json({ code: "BUSINESS_POST_LINK_REQUIRED", error: "Paste the public post link from the connected Facebook business Page." });
+      }
+      const request = await prepareMealScoutReverseOsmosisSourceDraftInput({ restaurantId, userId, postId, publishPlatforms: body.publishPlatforms }, { signal: controller.signal });
+      assertSourceCaptureActive(controller.signal);
+      if (!request.packet) return res.status(200).json({ draft: null, holds: request.holds, mutationPerformed: false });
+      const draft = await createOwnerAiDraft({ restaurantId, createdByUserId: userId, request: { packet: request.packet, expectedVersions: request.expectedVersions } });
+      if (controller.signal.aborted && (req.aborted || res.destroyed)) return;
+      return res.status(201).json({ draft, holds: request.holds, mutationPerformed: false });
+    } catch (error) {
+      if (controller.signal.aborted && (req.aborted || res.destroyed)) return;
+      throw error;
+    } finally {
+      req.off("aborted", aborted);
+      res.off("close", closed);
     }
-    const request = await prepareMealScoutReverseOsmosisSourceDraftInput({ restaurantId, userId, postId, publishPlatforms: body.publishPlatforms });
-    if (!request.packet) return res.status(200).json({ draft: null, holds: request.holds, mutationPerformed: false });
-    const draft = await createOwnerAiDraft({ restaurantId, createdByUserId: userId, request: { packet: request.packet, expectedVersions: request.expectedVersions } });
-    return res.status(201).json({ draft, holds: request.holds, mutationPerformed: false });
   }));
   app.get("/api/owner-ai/drafts/:draftId/reverse-osmosis", isAuthenticated, route(async (req, res) => {
     res.setHeader("Cache-Control", "private, no-store");

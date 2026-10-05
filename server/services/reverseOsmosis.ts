@@ -8,6 +8,7 @@ import { ownerAiActionPacketSchema, type OwnerAiActionPacket, type OwnerAiExpect
 import { OwnerAiActionError, computeOwnerAiExpectedVersions } from "./ownerAiActions";
 import { loadSourceFactAuthority } from "./ownerAiSourceFacts";
 import { verifyMealScoutBusinessAsset, connectionBindingRevision, captureMealScoutBusinessPost } from "./reverseOsmosisBusinessAssets";
+import { assertSourceCaptureActive, withSourceCaptureBudget, type SourceCaptureOptions } from "./reverseOsmosisCaptureGuard";
 
 function canonical(value: any): any {
   if (Array.isArray(value)) return value.map(canonical);
@@ -20,19 +21,24 @@ const same = (a: unknown, b: unknown) => mealScoutReverseOsmosisHash(a) === meal
 function approvalFor(proposal: Proposal, draft: any, approvedRevision: number): ExactApproval {
   return { scope: proposal.scope, direction: proposal.direction, eventId: proposal.eventId, sourceVersion: proposal.sourceVersion, expectedNativeVersion: proposal.expectedNativeVersion, payloadDigest: proposal.payloadDigest, businessBindingRevision: proposal.businessBindingRevision, approvalId: `${draft.id}:${approvedRevision}:${mealScoutReverseOsmosisHash({ packet: draft.packet, media: draft.mediaManifest, social: draft.socialDrafts })}` };
 }
-async function authority(restaurantId: string, userId: string, database: any = db, lock = false, requirePublicEligibility = true) {
+async function authority(restaurantId: string, userId: string, database: any = db, lock = false, requirePublicEligibility = true, signal?: AbortSignal) {
+  assertSourceCaptureActive(signal);
   const q = (query: any) => lock ? query.for("update") : query;
   const [restaurant] = await q(database.select().from(restaurants).where(eq(restaurants.id, restaurantId)).limit(1));
+  assertSourceCaptureActive(signal);
   const [user] = await q(database.select({ id: users.id, isDisabled: users.isDisabled }).from(users).where(eq(users.id, userId)).limit(1));
+  assertSourceCaptureActive(signal);
   if (!restaurant || restaurant.ownerId !== userId || user?.isDisabled !== false) deny("Current enabled business owner is required");
   if (requirePublicEligibility) {
     // Reuse MealScout's native publication/privacy policy. A verified public Page never overrides native visibility or field restrictions.
     let native;
     try { native = await loadSourceFactAuthority(restaurantId, userId, database, lock); }
-    catch { deny("This native business profile is not eligible for public-source synchronization"); }
+    catch { assertSourceCaptureActive(signal); deny("This native business profile is not eligible for public-source synchronization"); }
+    assertSourceCaptureActive(signal);
     if (native?.blockedFields.includes("menuUrl")) deny("The owner's native privacy settings do not expose the menu link");
   }
   const [connection] = await q(database.select().from(socialPublishingConnections).where(and(eq(socialPublishingConnections.restaurantId, restaurantId), eq(socialPublishingConnections.platform, "facebook"))).limit(1));
+  assertSourceCaptureActive(signal);
   if (!connection || connection.status !== "active" || !connection.accessToken || !connection.externalAccountId || connection.createdByUserId !== userId) deny("An active Facebook business Page connection belonging to the current owner is required");
   return { restaurant, connection };
 }
@@ -46,27 +52,38 @@ function inboundInput(scope: Scope, capture: MealScoutReverseOsmosisEnvelope["ca
 function outboundInput(inbound: Proposal, draftId: string, social: any, media: unknown): ProposalInput {
   return { scope: inbound.scope, direction: "native-to-social", eventId: `${draftId}:facebook`, sourceVersion: mealScoutReverseOsmosisHash({ social, media }), expectedNativeVersion: inbound.expectedNativeVersion, fields: { draftId, inboundOperationKey: inbound.operationKey, message: social.selectedMessage, link: social.link || null, socialDigest: mealScoutReverseOsmosisHash(social), mediaDigest: mealScoutReverseOsmosisHash(media) } };
 }
-function proposalEngine(connection: any, userId: string) {
+function proposalEngine(connection: any, userId: string, signal?: AbortSignal) {
   // Preparation never has an effect capability. Only the native controller creates one below.
   const unavailable = async (): Promise<never> => deny("Native exact approval is required");
-  return createReverseOsmosisEngine({ verifyBusinessAsset: input => verifyMealScoutBusinessAsset(input, connection, userId), authorizeAndClaim: unavailable, executeClaimed: unavailable, holdUncertain: unavailable, readOutcome: unavailable, reconcile: unavailable });
+  return createReverseOsmosisEngine({ verifyBusinessAsset: input => verifyMealScoutBusinessAsset(input, connection, userId, signal), authorizeAndClaim: unavailable, executeClaimed: unavailable, holdUncertain: unavailable, readOutcome: unavailable, reconcile: unavailable });
 }
 async function rejectReflection(scope: Scope, postId: string, database: any = db) {
   const rows = await database.select().from(reverseOsmosisOperations).where(and(eq(reverseOsmosisOperations.restaurantId, scope.businessId), eq(reverseOsmosisOperations.ownerId, scope.ownerId), eq(reverseOsmosisOperations.status, "completed")));
   if (rows.some((row: any) => row.proposal?.direction === "native-to-social" && same(row.proposal?.scope, scope) && row.receipt?.providerPostId === postId)) deny("This Page post is a recorded MealScout publication; reflection is held to prevent a synchronization loop");
 }
-export async function prepareMealScoutReverseOsmosisSourceDraftInput(input: { restaurantId: string; userId: string; postId: string; publishPlatforms?: Array<"facebook"> }) {
-  if (input.publishPlatforms && (input.publishPlatforms.length > 1 || input.publishPlatforms.some(p => p !== "facebook"))) deny("Select Facebook once to request publication");
-  const { connection } = await authority(input.restaurantId, input.userId);
-  const scope = scopeFor(input.restaurantId, input.userId, connection.externalAccountId!);
-  const postId = /^\d+$/.test(input.postId) ? `${scope.accountId}_${input.postId}` : input.postId;
-  await rejectReflection(scope, postId);
-  const capture = captureShape(await captureMealScoutBusinessPost(scope, connection, input.userId, postId));
-  if (!capture.profile.menuUrl) deny("The exact verified Page post contains no safe menu URL to propose");
-  const expectedVersions = await computeOwnerAiExpectedVersions(input.restaurantId);
-  const inbound = await proposalEngine(connection, input.userId).propose(inboundInput(scope, capture, expectedVersions));
-  const packet = ownerAiActionPacketSchema.parse({ schemaVersion: "1.0", intent: "Review the menu link captured from the connected Facebook business Page post", profile: capture.profile, ...(input.publishPlatforms?.length ? { social: { enabled: true, platforms: ["facebook"] } } : {}), reverseOsmosis: { schemaVersion: "mealscout.reverse-osmosis.v1", core: MEALSCOUT_RO_CORE_PIN, capture, inbound, outbound: [] } });
-  return { packet, expectedVersions, holds: capture.holds };
+export async function prepareMealScoutReverseOsmosisSourceDraftInput(input: { restaurantId: string; userId: string; postId: string; publishPlatforms?: Array<"facebook"> }, options: SourceCaptureOptions = {}) {
+  const { restaurantId, userId } = input;
+  const requestedPostId = input.postId;
+  const publishPlatforms = input.publishPlatforms ? [...input.publishPlatforms] : undefined;
+  if (publishPlatforms && (publishPlatforms.length > 1 || publishPlatforms.some(p => p !== "facebook"))) deny("Select Facebook once to request publication");
+  return withSourceCaptureBudget(options, async guard => {
+    const { connection } = await guard.wait(() => authority(restaurantId, userId, db, false, true, guard.signal));
+    const initialBinding = connectionBindingRevision(connection, userId);
+    const scope = scopeFor(restaurantId, userId, connection.externalAccountId!);
+    const postId = /^\d+$/.test(requestedPostId) ? `${scope.accountId}_${requestedPostId}` : requestedPostId;
+    await guard.wait(() => rejectReflection(scope, postId));
+    const capture = captureShape(await captureMealScoutBusinessPost(scope, connection, userId, postId, { signal: guard.signal }));
+    guard.checkpoint();
+    if (!capture.profile.menuUrl) deny("The exact verified Page post contains no safe menu URL to propose");
+    const expectedVersions = await guard.wait(() => computeOwnerAiExpectedVersions(restaurantId));
+    const inbound = await guard.wait(() => proposalEngine(connection, userId, guard.signal).propose(inboundInput(scope, capture, expectedVersions)));
+    const current = await guard.wait(() => authority(restaurantId, userId, db, false, true, guard.signal));
+    if (connectionBindingRevision(current.connection, userId) !== initialBinding) deny("The business Page connection changed during source preparation");
+    await guard.wait(() => rejectReflection(scope, postId));
+    guard.checkpoint();
+    const packet = ownerAiActionPacketSchema.parse({ schemaVersion: "1.0", intent: "Review the menu link captured from the connected Facebook business Page post", profile: capture.profile, ...(publishPlatforms?.length ? { social: { enabled: true, platforms: ["facebook"] } } : {}), reverseOsmosis: { schemaVersion: "mealscout.reverse-osmosis.v1", core: MEALSCOUT_RO_CORE_PIN, capture, inbound, outbound: [] } });
+    return { packet, expectedVersions, holds: capture.holds };
+  });
 }
 function packetPolicy(packet: OwnerAiActionPacket, restaurantId: string, ownerId: string, requireFreshCapture = true) {
   const envelope = reverseOsmosisEnvelopeSchema.parse(packet.reverseOsmosis);
