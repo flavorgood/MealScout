@@ -18,3 +18,4 @@ export * from "./schema/scoutcoin";
 
 export * from "./schema/ownerAiNativeProfiles";
 export * from "./schema/reverseOsmosis";
+export * from "./schema/onboardingJobs";
