@@ -32,11 +32,12 @@ const standardProfileIncludes = [
   "Customer action paths where available",
   "Marketing and affiliate tools where available",
   "AI-prepared updates with owner approval",
+  "Free DIY domain linking, management, and verification",
 ];
 
 const doneForYouIncludes = [
   "Manual help from our team",
-  "Custom domain move and connection help",
+  "Done-for-you domain move and setup checks",
   "Profile link and setup guidance",
   "Larger profile work scoped to your business",
   "Private review before approved changes",
@@ -46,7 +47,7 @@ const manualHelpOptions = [
   {
     price: 250,
     name: "Core setup help",
-    description: "Custom domain move, link connection, and setup help.",
+    description: "Done-for-you domain move and checks that the setup works.",
   },
   {
     price: 1000,
@@ -322,6 +323,12 @@ export default function ProfileSetupPage() {
               <p className="mt-3 text-sm font-bold text-stone-800">
                 Optional setup help never unlocks or restricts profile tools.
               </p>
+              <p className="mt-3 text-sm leading-6 text-stone-600">
+                Domain linking, management and verification are free. The $250
+                option covers our team moving your domain and checking the setup.
+                You keep ownership of your domain. DIY and paid help use the same
+                capabilities and scoring rules.
+              </p>
             </div>
 
             <div className="grid gap-5 lg:grid-cols-3">
@@ -340,6 +347,9 @@ export default function ProfileSetupPage() {
                 </CardHeader>
                 <CardContent className="space-y-6">
                   <CheckList items={standardProfileIncludes} />
+                  <Link href="/settings?tab=account#custom-domain" className="block text-sm font-bold text-emerald-700 underline">
+                    DIY domain instructions and verification
+                  </Link>
                   <Link href="/restaurant-signup">
                     <Button className="w-full rounded-full bg-emerald-600 font-black text-white hover:bg-emerald-700">
                       Create Free Profile

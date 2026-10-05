@@ -26,6 +26,7 @@ import {
 import BusinessWorkspaceShell from "@/components/business-workspace-shell";
 import { BackHeader } from "@/components/back-header";
 import NotificationSettings from "@/components/notification-settings";
+import OwnerDomainLinking from "@/components/owner-domain-linking";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -555,6 +556,10 @@ export default function SettingsPage() {
                 </div>
               </CardContent>
             </Card>
+          ) : null}
+          {selectedBusinessId && ownsCurrentBusiness ? (
+            <OwnerDomainLinking key={selectedBusinessId} restaurantId={selectedBusinessId}
+              savedDomain={data?.accountSettings?.customDomain} onVerified={() => { void refetch(); }} />
           ) : null}
         </TabsContent>
 
