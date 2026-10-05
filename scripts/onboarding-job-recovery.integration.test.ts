@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -13,7 +13,7 @@ import { ownerOnboardingJobs } from "../shared/schema/onboardingJobs";
 import { splitSqlStatements } from "./sqlMigrationStatements";
 import { createOnboardingJobService, onboardingRequestHash, type OnboardingDatabase } from "../server/services/onboardingJobs";
 import { registerOnboardingJobRoutes } from "../server/routes/onboardingJobRoutes";
-import { onboardingResearchInputSchema } from "../shared/onboardingJobs";
+import { onboardingResearchInputSchema, onboardingResearchReceiptSchema } from "../shared/onboardingJobs";
 
 // Run only after root reserves the migration and allocates this native-test slot.
 // The file argument is explicit; no migration number or external DB is guessed.
@@ -25,17 +25,32 @@ const candidateSql = path.join(phase, "proposed-owner-onboarding-jobs.sql");
 assert.ok(migrationFile.startsWith(path.join(repository, "migrations") + path.sep) || migrationFile === candidateSql, "Use the reviewed owned SQL only");
 const migrationSql = readFileSync(migrationFile, "utf8");
 const sha = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
+assert.match(process.argv[3] || "", /^[a-f0-9]{64}$/, "Reviewed SQL SHA256 argument is required");
+assert.equal(sha(migrationSql), process.argv[3], "SQL changed after independent review; stop before creating the native fixture");
 const started = Date.now();
 const checks: string[] = [];
 let peakRss = process.memoryUsage().rss;
 const memoryLimit = 768 * 1024 * 1024;
-const deadline = setTimeout(() => { process.stderr.write("Native synthetic proof exceeded 45-second deadline\n"); process.exit(2); }, 45_000);
+let guardReason: string | null = null;
+const stop = (reason: string): never => { guardReason = reason; process.stderr.write(reason + "\n"); process.exit(2); };
+const deadline = setTimeout(() => stop("Native synthetic proof exceeded 45-second deadline"), 45_000);
 const memoryGuard = setInterval(() => {
   peakRss = Math.max(peakRss, process.memoryUsage().rss);
-  if (peakRss > memoryLimit) { process.stderr.write("Native synthetic proof exceeded 768-MiB RSS bound\n"); process.exit(2); }
+  if (peakRss > memoryLimit) stop("Native synthetic proof exceeded 768-MiB RSS bound");
 }, 100);
 const fixtureRoot = mkdtempSync(path.join(tmpdir(), "mealscout-onboarding-synthetic-"));
 const dataPath = path.join(fixtureRoot, "pg");
+const cleanupFixture = () => {
+  const fixtureAbsolute = path.resolve(fixtureRoot);
+  assert.ok(fixtureAbsolute.startsWith(path.resolve(tmpdir()) + path.sep) && path.basename(fixtureAbsolute).startsWith("mealscout-onboarding-synthetic-"), "Cleanup must stay within the exact owned synthetic temp directory");
+  rmSync(fixtureAbsolute, { recursive: true, force: true });
+};
+process.once("exit", () => {
+  if (!guardReason) return;
+  let cleanupCompleted = false;
+  try { if (existsSync(fixtureRoot)) cleanupFixture(); cleanupCompleted = true; } catch {}
+  writeFileSync(path.join(phase, "native-guard-stop.json"), JSON.stringify({ result: "BLOCKED_BUDGET_OR_DEADLINE", exitCode: 2, guardReason, cleanupCompleted, ownedFixtureRoot: fixtureRoot }) + "\n");
+});
 const nativeFetch = globalThis.fetch;
 let externalFetchCalls = 0;
 globalThis.fetch = async () => { externalFetchCalls++; throw new Error("Synthetic proof forbids external fetch"); };
@@ -122,6 +137,17 @@ try {
   pass("disk-backed running state survives reopen; expired lease recovers and rejects both stale result and stale retry");
 
   const receipt = research();
+  const nearLimit = { ...receipt, observations: Array.from({ length: 24 }, (_, i) => ({ field: "field-" + i, value: "x".repeat(2_048), sourceUrl: "https://official.example/" })) };
+  let normalizedSize = Buffer.byteLength(JSON.stringify(onboardingResearchReceiptSchema.parse(nearLimit)), "utf8");
+  for (const item of nearLimit.observations) {
+    const replacements = Math.min(2_048, Math.max(0, Math.floor((65_480 - normalizedSize) / 2)));
+    item.value = "漢".repeat(replacements) + "x".repeat(2_048 - replacements);
+    normalizedSize += replacements * 2;
+  }
+  assert.ok(normalizedSize <= 65_536);
+  await rejects(() => service!.complete(scope(), id, claimB.leaseToken, nearLimit), "RESEARCH_RECEIPT_TOO_LARGE");
+  assert.equal((await service!.read(scope(), id)).status, "running");
+  pass("JSONB separator overhead is bounded before completion without consuming the valid worker lease");
   const completed = await service!.complete(scope(), id, claimB.leaseToken, receipt);
   assert.equal(completed.status, "completed");
   assert.equal(completed.researchReceipt?.currentScore, null);
@@ -222,9 +248,7 @@ try {
   clearTimeout(deadline);
   clearInterval(memoryGuard);
   peakRss = Math.max(peakRss, process.memoryUsage().rss);
-  const fixtureAbsolute = path.resolve(fixtureRoot);
-  assert.ok(fixtureAbsolute.startsWith(path.resolve(tmpdir()) + path.sep) && path.basename(fixtureAbsolute).startsWith("mealscout-onboarding-synthetic-"), "Cleanup must remain within the exact owned synthetic temp directory");
-  rmSync(fixtureAbsolute, { recursive: true, force: true });
+  cleanupFixture();
   const sourceHashes = Object.fromEntries(["shared/onboardingJobs.ts", "shared/schema/onboardingJobs.ts", "server/services/onboardingJobs.ts", "server/routes/onboardingJobRoutes.ts", "scripts/onboarding-job-recovery.integration.test.ts"].map(file => [file, sha(readFileSync(path.join(repository, file)))]));
   const result = {
     schemaVersion: "mealscout.durable-onboarding-native-proof.v1",

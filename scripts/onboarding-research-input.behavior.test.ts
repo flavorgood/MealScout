@@ -27,6 +27,7 @@ test("brief rejects extra payment/build/owner fields and bounds links and text",
   for (const extra of [{ ownerId: "spoof" }, { paymentVerified: true }, { kind: "deep_build" }, { tier: 2500 }]) assert.throws(() => onboardingResearchInputSchema.parse({ ...input, ...extra }));
   assert.throws(() => onboardingResearchInputSchema.parse({ ...input, officialLinks: Array(5).fill("https://a.example/") }));
   assert.throws(() => onboardingResearchInputSchema.parse({ ...input, businessName: "x".repeat(201) }));
+  assert.throws(() => onboardingResearchInputSchema.parse({ ...input, officialLinks: ["https://official.example/" + "漢".repeat(1_000)] }));
   for (const link of ["http://example.com/", "https://user:pass@example.com/", "javascript:alert(1)"]) assert.throws(() => onboardingResearchInputSchema.parse({ ...input, officialLinks: [link] }));
 });
 

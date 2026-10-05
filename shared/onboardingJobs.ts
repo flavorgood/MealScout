@@ -13,7 +13,7 @@ const publicLink = z.string().trim().max(2_048).url().refine(value => {
   const url = new URL(value);
   url.hash = "";
   return url.href;
-});
+}).pipe(z.string().max(2_048));
 
 // Links are owner declarations. This contract does not fetch or verify them.
 export const onboardingResearchInputSchema = z.object({

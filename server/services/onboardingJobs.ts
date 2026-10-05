@@ -161,6 +161,9 @@ export function createOnboardingJobService(database: OnboardingDatabase, clock: 
         }
         const at = now();
         activeLease(row, token, at);
+        // Match PostgreSQL's JSONB representation, including its separator spaces.
+        const storedBytes = (await tx.execute(sql`SELECT octet_length(${JSON.stringify(receipt)}::jsonb::text) AS bytes`)).rows[0]?.bytes;
+        if (!Number.isSafeInteger(storedBytes) || storedBytes > ONBOARDING_RESEARCH_RECEIPT_MAX_BYTES) fail(400, "RESEARCH_RECEIPT_TOO_LARGE", "Research receipt exceeds the storage bound");
         const updated = (await tx.execute(sql`UPDATE owner_onboarding_jobs SET status = 'completed', research_receipt = ${JSON.stringify(receipt)}::jsonb,
           lease_token = NULL, lease_expires_at = NULL, last_error_code = NULL, completed_at = ${at}::timestamptz,
           revision = revision + 1, updated_at = ${at}::timestamptz WHERE id = ${id} RETURNING *`)).rows[0];
