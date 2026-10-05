@@ -197,9 +197,10 @@ export function createOnboardingJobService(database: OnboardingDatabase, clock: 
       }, checkpoint);
     },
 
-    async retry(scope: OnboardingScope, id: string, token: string) {
+    async retry(scope: OnboardingScope, id: string, token: string, checkpoint?: () => void) {
       return scoped(scope, async (tx, valid) => {
         const row = await job(tx, valid, id);
+        checkpoint?.();
         const at = now();
         activeLease(row, token, at);
         const status = row.attempts < row.max_attempts ? "retry_wait" : "failed";
@@ -208,7 +209,7 @@ export function createOnboardingJobService(database: OnboardingDatabase, clock: 
           last_error_code = 'RESEARCH_UNAVAILABLE', available_at = ${available}::timestamptz,
           revision = revision + 1, updated_at = ${at}::timestamptz WHERE id = ${id} RETURNING *`)).rows[0];
         return publicJob(updated);
-      });
+      }, checkpoint);
     },
 
     async attachExistingPrivatePreview(rawScope: OnboardingScope, id: string, preview: { draftId: string; revision: number }) {

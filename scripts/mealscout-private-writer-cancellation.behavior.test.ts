@@ -141,3 +141,12 @@ test("abort while an issued insert waits throws inside transaction callback befo
   // The deterministic transaction adapter models rollback ordering; this is
   // neither native SQL cancellation nor proof that a committed write can undo.
 });
+
+test("writer snapshots caller identity before waits and cannot be rerouted by input mutation", async () => {
+  const f = fixture("media"), work = f.run({ budgetMs: 500 }); await f.started;
+  f.input.restaurantId = "00000000-0000-4000-8000-000000000299";
+  f.input.createdByUserId = "other-owner"; f.release();
+  const result = await work;
+  assert.equal(result.restaurantId, restaurantId); assert.equal(result.createdByUserId, ownerId);
+  assert.equal(f.state.commits, 1);
+});

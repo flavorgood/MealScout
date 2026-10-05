@@ -943,9 +943,10 @@ export async function createOwnerAiDraft(input: {
   idempotencyKey?: string | null;
   request: unknown;
 }, controls?: SourceCaptureOptions) {
+  const boundInput = { ...input }; // caller identity cannot change across waits
   return controls
-    ? withSourceCaptureBudget(controls, guard => createOwnerAiDraftWithGuard(input, guard))
-    : createOwnerAiDraftWithGuard(input);
+    ? withSourceCaptureBudget(controls, guard => createOwnerAiDraftWithGuard(boundInput, guard))
+    : createOwnerAiDraftWithGuard(boundInput);
 }
 async function createOwnerAiDraftWithGuard(input: Parameters<typeof createOwnerAiDraft>[0], guard?: SourceCaptureGuard) {
   const checkpoint = () => guard?.checkpoint();
