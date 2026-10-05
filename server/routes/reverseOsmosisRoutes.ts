@@ -30,22 +30,23 @@ export function registerReverseOsmosisRoutes(app: Express) {
     res.on("close", closed);
     if (req.aborted || res.destroyed) controller.abort();
     try {
-      return await withSourceCaptureBudget({ signal: controller.signal }, async guard => {
+      const result = await withSourceCaptureBudget({ signal: controller.signal }, async guard => {
         await guard.wait(() => assertActualRestaurantOwner(userId, restaurantId));
         guard.checkpoint();
         const body = requestSchema.parse(req.body);
         let postId: string;
         try { postId = businessPostIdentifier(body.postId); } catch {
-          return res.status(400).json({ code: "BUSINESS_POST_LINK_REQUIRED", error: "Paste the public post link from the connected Facebook business Page." });
+          return { status: 400, payload: { code: "BUSINESS_POST_LINK_REQUIRED", error: "Paste the public post link from the connected Facebook business Page." } };
         }
         const request = await prepareMealScoutReverseOsmosisSourceDraftInput({ restaurantId, userId, postId, publishPlatforms: body.publishPlatforms }, { signal: guard.signal });
         guard.checkpoint();
-        if (!request.packet) return res.status(200).json({ draft: null, holds: request.holds, mutationPerformed: false });
+        if (!request.packet) return { status: 200, payload: { draft: null, holds: request.holds, mutationPerformed: false } };
         const draft = await createOwnerAiDraft({ restaurantId, createdByUserId: userId, request: { packet: request.packet, expectedVersions: request.expectedVersions } }, { signal: guard.signal });
         guard.checkpoint();
-        if (controller.signal.aborted && (req.aborted || res.destroyed)) return;
-        return res.status(201).json({ draft, holds: request.holds, mutationPerformed: false });
+        return { status: 201, payload: { draft, holds: request.holds, mutationPerformed: false } };
       });
+      if (req.aborted || res.destroyed) return;
+      return res.status(result.status).json(result.payload);
     } catch (error) {
       if (controller.signal.aborted && (req.aborted || res.destroyed)) return;
       throw error;

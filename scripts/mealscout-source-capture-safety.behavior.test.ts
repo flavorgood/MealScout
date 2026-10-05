@@ -12,6 +12,7 @@ import * as guards from "../server/services/reverseOsmosisCaptureGuard";
 import * as postIdentifiers from "../shared/businessPostIdentifier";
 import * as envelope from "../shared/reverseOsmosis";
 import type { Scope } from "@tradescout-infinity/reverse-osmosis";
+import { ReverseOsmosisError } from "@tradescout-infinity/reverse-osmosis";
 
 // No network fallback, real account, DB client or valid provider credentials.
 process.env.FACEBOOK_APP_ID = "222222";
@@ -218,18 +219,28 @@ test("the preparation signal also cancels final proposal verification after sour
 const routeSource = readFileSync(path.join(repository, "server/routes/reverseOsmosisRoutes.ts"), "utf8");
 const routeCompiled = ts.transpileModule(routeSource, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS }, reportDiagnostics: true });
 assert.equal(routeCompiled.diagnostics?.filter(item => item.category === ts.DiagnosticCategory.Error).length, 0);
-function handlerFixture(options: { pending?: boolean; writerPending?: boolean; ownerPending?: Promise<void> } = {}) {
-  let selected: any, reached!: () => void, draftWrites = 0, captureStarts = 0, captureSignal: AbortSignal | undefined;
+function handlerFixture(options: { pending?: boolean; writerPending?: boolean; ownerPending?: Promise<void>; held?: boolean; afterGuardedWork?: () => void; duringJson?: () => void } = {}) {
+  let selected: any, errorHandler: any, reached!: () => void, draftWrites = 0, captureStarts = 0, captureSignal: AbortSignal | undefined, guardFinished = false;
   const started = new Promise<void>(resolve => { reached = resolve; });
   let writerReached!: () => void, writerSignal: AbortSignal | undefined;
   const writerStarted = new Promise<void>(resolve => { writerReached = resolve; });
   const imports: Record<string, any> = {
     zod: nativeRequire("zod"),
     "../../shared/businessPostIdentifier": postIdentifiers,
-    "@tradescout-infinity/reverse-osmosis": nativeRequire("@tradescout-infinity/reverse-osmosis"),
+    // The VM route uses CommonJS; the real guard is an ESM import. Share its error
+    // constructor so the fixture preserves the application's instanceof boundary.
+    "@tradescout-infinity/reverse-osmosis": { ...nativeRequire("@tradescout-infinity/reverse-osmosis"), ReverseOsmosisError },
     "../unifiedAuth": { isAuthenticated() {} },
     "../middleware/distributedRateLimit": { distributedRateLimit: () => () => {} },
-    "../services/reverseOsmosisCaptureGuard": guards,
+    "../services/reverseOsmosisCaptureGuard": { ...guards, async withSourceCaptureBudget(controls: guards.SourceCaptureOptions, work: (guard: guards.SourceCaptureGuard) => Promise<unknown>) {
+      try {
+        return await guards.withSourceCaptureBudget(controls, async guard => {
+          const result = await work(guard);
+          options.afterGuardedWork?.();
+          return result;
+        });
+      } finally { guardFinished = true; }
+    } },
     "../services/ownerAiActions": {
       assertActualRestaurantOwner: async () => { await options.ownerPending; },
       createOwnerAiDraft: async (_input: any, controls: guards.SourceCaptureOptions) => {
@@ -242,18 +253,24 @@ function handlerFixture(options: { pending?: boolean; writerPending?: boolean; o
       prepareMealScoutReverseOsmosisSourceDraftInput: async (_input: any, controls: guards.SourceCaptureOptions) => {
         captureStarts++; captureSignal = controls.signal; reached();
         if (options.pending) await new Promise((_resolve, reject) => controls.signal!.addEventListener("abort", () => reject(new Error("SYNTHETIC_CANCELLED")), { once: true }));
-        return { packet: { syntheticOnly: true }, expectedVersions: {}, holds: [] };
+        return { packet: options.held ? null : { syntheticOnly: true }, expectedVersions: {}, holds: options.held ? ["synthetic-held"] : [] };
       },
       readMealScoutReverseOsmosisOutcome() { throw new Error("Unrelated handler must not run"); },
     },
   };
   const exports: Record<string, any> = {};
   vm.runInNewContext(routeCompiled.outputText, { exports, require(name: string) { assert.ok(Object.hasOwn(imports, name), "No production route dependency: " + name); return imports[name]; }, URL, AbortController }, { filename: "actual-reverseOsmosisRoutes-synthetic-fixture.cjs" });
-  exports.registerReverseOsmosisRoutes({ post(name: string, ...callbacks: any[]) { if (name.endsWith("/source-draft")) selected = callbacks.at(-1); }, get() {}, use() {} });
+  exports.registerReverseOsmosisRoutes({ post(name: string, ...callbacks: any[]) { if (name.endsWith("/source-draft")) selected = callbacks.at(-1); }, get() {}, use(_name: string, callback: any) { errorHandler = callback; } });
   const req: any = Object.assign(new EventEmitter(), { params: { restaurantId: "00000000-0000-4000-8000-000000000201" }, user: { id: scope.ownerId }, body: { postId: "444444" }, aborted: false });
-  const res: any = Object.assign(new EventEmitter(), { writableEnded: false, destroyed: false, statusCode: 200, setHeader() {}, status(value: number) { this.statusCode = value; return this; }, json(value: any) { this.body = value; this.writableEnded = true; return this; } });
+  const res: any = Object.assign(new EventEmitter(), { writableEnded: false, destroyed: false, statusCode: 200, responses: 0, sentDuringGuard: false, setHeader() {}, status(value: number) { this.statusCode = value; return this; }, json(value: any) {
+    assert.equal(this.writableEnded, false, "A response must be sent only once");
+    this.responses++; this.sentDuringGuard ||= !guardFinished;
+    options.duringJson?.();
+    this.body = value; this.writableEnded = true; return this;
+  } });
   const run = () => selected(req, res, (error: unknown) => { throw error; });
-  return { req, res, run, started, writerStarted, counts: () => ({ draftWrites, captureStarts, captureSignal, writerSignal }) };
+  const runWithErrorMiddleware = () => selected(req, res, (error: unknown) => errorHandler(error, req, res, (unhandled: unknown) => { throw unhandled; }));
+  return { req, res, run, runWithErrorMiddleware, started, writerStarted, counts: () => ({ draftWrites, captureStarts, captureSignal, writerSignal, guardFinished }) };
 }
 for (const event of ["request-abort", "response-close"]) test("actual source handler cancels " + event + " before private draft creation and removes listeners", async () => {
   const fixture = handlerFixture({ pending: true });
@@ -290,6 +307,33 @@ test("actual handler propagates disconnect cancellation after private writer inv
   assert.equal(fixture.counts().draftWrites, 0);
   assert.equal(fixture.req.listenerCount("aborted"), 0); assert.equal(fixture.res.listenerCount("close"), 0);
 });
+for (const status of [400, 200, 201]) {
+  test("actual handler final deadline emits only one held response instead of " + status, async t => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const fixture = handlerFixture({ held: status === 200, afterGuardedWork: () => {
+      t.mock.timers.tick(guards.MEALSCOUT_SOURCE_CAPTURE_MAX_MS);
+    } });
+    if (status === 400) fixture.req.body.postId = "https://example.com/not-a-business-post";
+    await fixture.runWithErrorMiddleware();
+    assert.equal(fixture.res.statusCode, 409);
+    assert.equal(fixture.res.body.code, "reverse-osmosis:capture-deadline");
+    assert.equal(fixture.res.responses, 1); assert.equal(fixture.res.sentDuringGuard, false);
+    assert.equal(fixture.counts().draftWrites, status === 201 ? 1 : 0);
+    assert.equal(fixture.req.listenerCount("aborted"), 0); assert.equal(fixture.res.listenerCount("close"), 0);
+  });
+  test("actual handler sends " + status + " after deadline cleanup even when JSON emission crosses the budget", async t => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const fixture = handlerFixture({ held: status === 200, duringJson: () => {
+      t.mock.timers.tick(guards.MEALSCOUT_SOURCE_CAPTURE_MAX_MS);
+    } });
+    if (status === 400) fixture.req.body.postId = "https://example.com/not-a-business-post";
+    await fixture.runWithErrorMiddleware();
+    assert.equal(fixture.res.statusCode, status);
+    assert.equal(fixture.res.responses, 1); assert.equal(fixture.res.sentDuringGuard, false);
+    assert.equal(fixture.counts().draftWrites, status === 201 ? 1 : 0);
+    assert.equal(fixture.req.listenerCount("aborted"), 0); assert.equal(fixture.res.listenerCount("close"), 0);
+  });
+}
 for (const stage of ["validation-recapture", "finalization-proposal"]) test("actual native " + stage + " receives caller cancellation", async () => {
   const current = state(), caller = new AbortController(), adapter = prepared(current);
   let reached!: () => void; const started = new Promise<void>(resolve => { reached = resolve; });
