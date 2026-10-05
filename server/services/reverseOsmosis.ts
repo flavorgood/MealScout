@@ -94,28 +94,39 @@ function packetPolicy(packet: OwnerAiActionPacket, restaurantId: string, ownerId
   if ((requireFreshCapture && envelope.capture.expiresAt <= Date.now()) || envelope.capture.capturedAt > Date.now() || envelope.capture.expiresAt <= envelope.capture.capturedAt || envelope.capture.expiresAt - envelope.capture.capturedAt > 24 * 60 * 60 * 1000) deny("Source capture expired or has an invalid lifetime");
   return envelope;
 }
-export async function validateMealScoutReverseOsmosisPacket(packet: OwnerAiActionPacket, restaurantId: string, userId: string, versions: OwnerAiExpectedVersions, database: any = db, lock = false) {
+export async function validateMealScoutReverseOsmosisPacket(packet: OwnerAiActionPacket, restaurantId: string, userId: string, versions: OwnerAiExpectedVersions, database: any = db, lock = false, signal?: AbortSignal) {
+  assertSourceCaptureActive(signal);
   if (!packet.reverseOsmosis) return;
   const envelope = packetPolicy(packet, restaurantId, userId);
-  const { connection } = await authority(restaurantId, userId, database, lock);
+  const { connection } = await authority(restaurantId, userId, database, lock, true, signal);
   const scope = scopeFor(restaurantId, userId, connection.externalAccountId!);
   if (!same(scope, envelope.inbound.scope)) deny("Business Page binding changed");
   await rejectReflection(scope, envelope.capture.providerPostId, database);
-  const current = captureShape(await captureMealScoutBusinessPost(scope, connection, userId, envelope.capture.providerPostId));
+  assertSourceCaptureActive(signal);
+  const current = captureShape(await captureMealScoutBusinessPost(scope, connection, userId, envelope.capture.providerPostId, { signal }));
+  assertSourceCaptureActive(signal);
   for (const key of ["sourceUrl", "sourceVersion", "providerPostId", "providerCreatedAt", "providerUpdatedAt", "bodyHash", "publicProofHash", "profile", "holds"] as const) if (!same(current[key], envelope.capture[key])) deny("The Page post or its public proof changed after capture; prepare and review a fresh draft");
-  const actual = await proposalEngine(connection, userId).propose(inboundInput(scope, envelope.capture, versions));
+  const actual = await proposalEngine(connection, userId, signal).propose(inboundInput(scope, envelope.capture, versions));
+  assertSourceCaptureActive(signal);
   if (!same(actual, envelope.inbound)) deny("Captured proposal or native version does not match");
   return { envelope, connection, currentCapture: current };
 }
-export async function finalizeMealScoutReverseOsmosisDraftPacket(packet: OwnerAiActionPacket, restaurantId: string, userId: string, versions: OwnerAiExpectedVersions, draftId: string, socialDrafts: any[], media: unknown) {
-  const validated = await validateMealScoutReverseOsmosisPacket(packet, restaurantId, userId, versions);
+export async function finalizeMealScoutReverseOsmosisDraftPacket(packet: OwnerAiActionPacket, restaurantId: string, userId: string, versions: OwnerAiExpectedVersions, draftId: string, socialDrafts: any[], media: unknown, signal?: AbortSignal) {
+  assertSourceCaptureActive(signal);
+  const validated = await validateMealScoutReverseOsmosisPacket(packet, restaurantId, userId, versions, db, false, signal);
+  assertSourceCaptureActive(signal);
   if (!validated) return;
   const { envelope, connection, currentCapture } = validated;
   if (socialDrafts.some(s => s.platform !== "facebook") || socialDrafts.length > 1) deny("Only explicitly selected Facebook publication is supported");
   // Persist only this server's actual recapture time and expiry. Submitted capture timestamps never become reviewed provenance.
-  const inbound = await proposalEngine(connection, userId).propose(inboundInput(envelope.inbound.scope, currentCapture, versions));
+  const inbound = await proposalEngine(connection, userId, signal).propose(inboundInput(envelope.inbound.scope, currentCapture, versions));
+  assertSourceCaptureActive(signal);
   const outbound = [];
-  for (const social of socialDrafts) outbound.push(await proposalEngine(connection, userId).propose(outboundInput(inbound, draftId, social, media)));
+  for (const social of socialDrafts) {
+    assertSourceCaptureActive(signal);
+    outbound.push(await proposalEngine(connection, userId, signal).propose(outboundInput(inbound, draftId, social, media)));
+    assertSourceCaptureActive(signal);
+  }
   // Caller outbound proposals never become authority. Native preparation derives the exact reviewed payload.
   packet.reverseOsmosis = reverseOsmosisEnvelopeSchema.parse({ ...envelope, capture: currentCapture, inbound, outbound });
 }

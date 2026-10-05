@@ -155,7 +155,7 @@ function prepared(state: any) {
     assert.ok(Object.hasOwn(imports, name), "Unexpected dependency; no production import allowed: " + name);
     return imports[name];
   }, Date, Buffer, console }, { filename: "actual-reverseOsmosis-synthetic-fixture.cjs" });
-  return exports.prepareMealScoutReverseOsmosisSourceDraftInput as (input: any, options?: guards.SourceCaptureOptions) => Promise<any>;
+  return Object.assign(exports.prepareMealScoutReverseOsmosisSourceDraftInput, { finalize: exports.finalizeMealScoutReverseOsmosisDraftPacket, validate: exports.validateMealScoutReverseOsmosisPacket }) as ((input: any, options?: guards.SourceCaptureOptions) => Promise<any>) & { finalize: (...args: any[]) => Promise<any>; validate: (...args: any[]) => Promise<any> };
 }
 const state = () => ({ ownerId: scope.ownerId, disabled: false, blocked: false, connection: connection(), reflection: false, ownerReads: 0, reflectionReads: 0, queryStarts: 0, pending: undefined as Promise<any> | undefined });
 const request = () => ({ restaurantId: scope.businessId, userId: scope.ownerId, postId: "444444", publishPlatforms: ["facebook"] });
@@ -217,9 +217,11 @@ test("the preparation signal also cancels final proposal verification after sour
 const routeSource = readFileSync(path.join(repository, "server/routes/reverseOsmosisRoutes.ts"), "utf8");
 const routeCompiled = ts.transpileModule(routeSource, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS }, reportDiagnostics: true });
 assert.equal(routeCompiled.diagnostics?.filter(item => item.category === ts.DiagnosticCategory.Error).length, 0);
-function handlerFixture(options: { pending?: boolean; ownerPending?: Promise<void> } = {}) {
+function handlerFixture(options: { pending?: boolean; writerPending?: boolean; ownerPending?: Promise<void> } = {}) {
   let selected: any, reached!: () => void, draftWrites = 0, captureStarts = 0, captureSignal: AbortSignal | undefined;
   const started = new Promise<void>(resolve => { reached = resolve; });
+  let writerReached!: () => void, writerSignal: AbortSignal | undefined;
+  const writerStarted = new Promise<void>(resolve => { writerReached = resolve; });
   const imports: Record<string, any> = {
     zod: nativeRequire("zod"),
     "@tradescout-infinity/reverse-osmosis": nativeRequire("@tradescout-infinity/reverse-osmosis"),
@@ -228,7 +230,11 @@ function handlerFixture(options: { pending?: boolean; ownerPending?: Promise<voi
     "../services/reverseOsmosisCaptureGuard": guards,
     "../services/ownerAiActions": {
       assertActualRestaurantOwner: async () => { await options.ownerPending; },
-      createOwnerAiDraft: async () => { draftWrites++; return { id: "synthetic-private-draft" }; },
+      createOwnerAiDraft: async (_input: any, controls: guards.SourceCaptureOptions) => {
+        writerSignal = controls.signal; writerReached();
+        if (options.writerPending) await guards.withSourceCaptureBudget(controls, guard => guard.wait(() => new Promise(() => {})));
+        draftWrites++; return { id: "synthetic-private-draft" };
+      },
     },
     "../services/reverseOsmosis": {
       prepareMealScoutReverseOsmosisSourceDraftInput: async (_input: any, controls: guards.SourceCaptureOptions) => {
@@ -245,7 +251,7 @@ function handlerFixture(options: { pending?: boolean; ownerPending?: Promise<voi
   const req: any = Object.assign(new EventEmitter(), { params: { restaurantId: "00000000-0000-4000-8000-000000000201" }, user: { id: scope.ownerId }, body: { postId: "444444" }, aborted: false });
   const res: any = Object.assign(new EventEmitter(), { writableEnded: false, destroyed: false, statusCode: 200, setHeader() {}, status(value: number) { this.statusCode = value; return this; }, json(value: any) { this.body = value; this.writableEnded = true; return this; } });
   const run = () => selected(req, res, (error: unknown) => { throw error; });
-  return { req, res, run, started, counts: () => ({ draftWrites, captureStarts, captureSignal }) };
+  return { req, res, run, started, writerStarted, counts: () => ({ draftWrites, captureStarts, captureSignal, writerSignal }) };
 }
 for (const event of ["request-abort", "response-close"]) test("actual source handler cancels " + event + " before private draft creation and removes listeners", async () => {
   const fixture = handlerFixture({ pending: true });
@@ -271,5 +277,29 @@ test("actual handler normal completion preserves private draft response and rele
   assert.equal(fixture.counts().draftWrites, 1);
   assert.equal(fixture.req.listenerCount("aborted"), 0); assert.equal(fixture.res.listenerCount("close"), 0);
   fixture.res.emit("close");
-  assert.equal(fixture.counts().captureSignal?.aborted, false);
+  assert.equal(fixture.counts().captureSignal?.aborted, true); // request guard scope cleanup
+});
+
+test("actual handler propagates disconnect cancellation after private writer invocation", async () => {
+  const fixture = handlerFixture({ writerPending: true });
+  const work = fixture.run(); await fixture.writerStarted;
+  fixture.req.aborted = true; fixture.req.emit("aborted"); await work;
+  assert.equal(fixture.counts().writerSignal?.aborted, true);
+  assert.equal(fixture.counts().draftWrites, 0);
+  assert.equal(fixture.req.listenerCount("aborted"), 0); assert.equal(fixture.res.listenerCount("close"), 0);
+});
+for (const stage of ["validation-recapture", "finalization-proposal"]) test("actual native " + stage + " receives caller cancellation", async () => {
+  const current = state(), caller = new AbortController(), adapter = prepared(current);
+  let reached!: () => void; const started = new Promise<void>(resolve => { reached = resolve; });
+  await mocked(async calls => {
+    const result = await adapter(request());
+    const work = stage === "validation-recapture"
+      ? adapter.validate(result.packet, scope.businessId, scope.ownerId, result.expectedVersions, undefined, false, caller.signal)
+      : adapter.finalize(result.packet, scope.businessId, scope.ownerId, result.expectedVersions, "synthetic-draft", [], {}, caller.signal);
+    await started; caller.abort("SYNTHETIC_PRIVATE_REASON"); await rejected(work, "capture-cancelled");
+    assert.equal(calls.length, stage === "validation-recapture" ? 7 : 13);
+  }, (url, _init, calls) => {
+    if (calls.length === (stage === "validation-recapture" ? 7 : 13)) { reached(); return new Promise(() => {}); }
+    return response(url);
+  });
 });

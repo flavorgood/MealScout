@@ -65,6 +65,7 @@ import { buildSlotDateTimes } from "./timeIntent";
 import { verifyOwnerAiSourceFacts, loadSourceFactAuthority, assertSourceFactAuthority } from "./ownerAiSourceFacts";
 import { finalizeMealScoutReverseOsmosisDraftPacket, validateMealScoutReverseOsmosisPacket, applyMealScoutReverseOsmosisWithinApproval, publishMealScoutReverseOsmosisSocialIntent } from "./reverseOsmosis";
 import { verifyMealScoutBusinessAsset } from "./reverseOsmosisBusinessAssets";
+import { withSourceCaptureBudget, type SourceCaptureOptions, type SourceCaptureGuard } from "./reverseOsmosisCaptureGuard";
 
 const DRAFT_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const PUBLIC_BASE_URL = () =>
@@ -941,7 +942,20 @@ export async function createOwnerAiDraft(input: {
   connectorApiKeyId?: string | null;
   idempotencyKey?: string | null;
   request: unknown;
-}) {
+}, controls?: SourceCaptureOptions) {
+  return controls
+    ? withSourceCaptureBudget(controls, guard => createOwnerAiDraftWithGuard(input, guard))
+    : createOwnerAiDraftWithGuard(input);
+}
+async function createOwnerAiDraftWithGuard(input: Parameters<typeof createOwnerAiDraft>[0], guard?: SourceCaptureGuard) {
+  const checkpoint = () => guard?.checkpoint();
+  const wait = async <T>(work: () => Promise<T>): Promise<T> => {
+    checkpoint();
+    const result = await (guard ? guard.wait(work) : work());
+    checkpoint();
+    return result;
+  };
+  checkpoint();
   const request = ownerAiDraftRequestSchema.parse(input.request);
   const requestHash = stableHash(request);
   const idempotencyKey = input.idempotencyKey
@@ -955,7 +969,7 @@ export async function createOwnerAiDraft(input: {
     );
   }
   if (input.connectorApiKeyId && idempotencyKey) {
-    const [replay] = await db
+    const [replay] = await wait(async () => db
       .select()
       .from(ownerAiActionDrafts)
       .where(
@@ -964,7 +978,7 @@ export async function createOwnerAiDraft(input: {
           eq(ownerAiActionDrafts.idempotencyKey, idempotencyKey),
         ),
       )
-      .limit(1);
+      .limit(1));
     if (replay) {
       if (replay.requestHash !== requestHash) {
         throw new OwnerAiActionError(
@@ -973,71 +987,87 @@ export async function createOwnerAiDraft(input: {
           "Idempotency-Key was already used with different draft content",
         );
       }
-      if ((replay.packet as any)?.reverseOsmosis) await validateMealScoutReverseOsmosisPacket(ownerAiActionPacketSchema.parse(replay.packet), replay.restaurantId, input.createdByUserId, replay.expectedVersions as OwnerAiExpectedVersions);
+      if ((replay.packet as any)?.reverseOsmosis) await wait(() => validateMealScoutReverseOsmosisPacket(ownerAiActionPacketSchema.parse(replay.packet), replay.restaurantId, input.createdByUserId, replay.expectedVersions as OwnerAiExpectedVersions, db, false, guard?.signal));
       return { ...toOwnerAiDraftResponse(replay), idempotencyReplay: true };
     }
   }
-  const [restaurant] = await db.select({ id: restaurants.id, name: restaurants.name, ownerId: restaurants.ownerId, businessType: restaurants.businessType }).from(restaurants).where(eq(restaurants.id, input.restaurantId)).limit(1);
+  const [restaurant] = await wait(async () => db.select({ id: restaurants.id, name: restaurants.name, ownerId: restaurants.ownerId, businessType: restaurants.businessType }).from(restaurants).where(eq(restaurants.id, input.restaurantId)).limit(1));
   if (!restaurant || restaurant.ownerId !== input.createdByUserId) throw new OwnerAiActionError(403, "CONNECTOR_OWNERSHIP_INVALID", "Draft identity must come from the current owner-business attachment");
   const id = randomUUID();
   const packet = ownerAiActionPacketSchema.parse(request.packet);
-  await assertOwnerAiSettingsAccess(input.createdByUserId, restaurant, packet);
-  await validateSourceFacts(packet, input.restaurantId, input.createdByUserId, true);
-  const { expectedVersions, currentSnapshot } = await db.transaction(
-    async (tx: any) => ({
-      expectedVersions: await assertRequestVersions(
+  await wait(() => assertOwnerAiSettingsAccess(input.createdByUserId, restaurant, packet));
+  await wait(() => validateSourceFacts(packet, input.restaurantId, input.createdByUserId, true));
+  const { expectedVersions, currentSnapshot } = await wait(() => db.transaction(
+    async (tx: any) => {
+      checkpoint();
+      const expectedVersions = await assertRequestVersions(
         input.restaurantId,
         request,
         tx,
-      ),
-      currentSnapshot: await buildOwnerAiCurrentSnapshot(
+      );
+      checkpoint();
+      const currentSnapshot = await buildOwnerAiCurrentSnapshot(
         input.restaurantId,
         packet,
         tx,
-      ),
-    }),
+      );
+      checkpoint();
+      return { expectedVersions, currentSnapshot };
+    },
     { isolationLevel: "repeatable read", accessMode: "read only" },
-  );
+  ));
   const normalizedPlan = normalizeOwnerAiPlan(packet).map(step => ({ ...step, nativeAdapter: (currentSnapshot as any).nativeAdapter, ...(step.section === "settings" ? { review: (currentSnapshot as any).settings } : {}) }));
   const socialDrafts = buildOwnerAiSocialDrafts({ draftId: id, restaurantId: input.restaurantId, restaurantName: packet.profile?.name || restaurant.name, packet });
-  const mediaManifest = await buildOwnerAiMediaManifest(id, packet);
-  await finalizeMealScoutReverseOsmosisDraftPacket(packet, input.restaurantId, input.createdByUserId, expectedVersions, id, socialDrafts, mediaManifest);
+  const mediaManifest = await wait(() => buildOwnerAiMediaManifest(id, packet));
+  await wait(() => finalizeMealScoutReverseOsmosisDraftPacket(packet, input.restaurantId, input.createdByUserId, expectedVersions, id, socialDrafts, mediaManifest, guard?.signal));
+  checkpoint();
   const inserted = await db.transaction(async (tx: any) => {
+    checkpoint();
     if (packet.sourceFacts || packet.reverseOsmosis) {
       // Parent update lock also blocks FK-backed child insertions during version capture.
       await tx.select({ id: restaurants.id }).from(restaurants).where(eq(restaurants.id, input.restaurantId)).for("update");
+      checkpoint();
       if (packet.sourceFacts) {
         let authority;
         try { authority = await loadSourceFactAuthority(input.restaurantId, input.createdByUserId, tx, true); }
-        catch { throw new OwnerAiActionError(409, "SOURCE_FACT_HOLD", "Source authority changed while the native draft was prepared"); }
+        catch { checkpoint(); throw new OwnerAiActionError(409, "SOURCE_FACT_HOLD", "Source authority changed while the native draft was prepared"); }
+        checkpoint();
         assertSourceFactAuthority(packet, authority);
       }
-      await validateMealScoutReverseOsmosisPacket(packet, input.restaurantId, input.createdByUserId, expectedVersions, tx, true);
+      await validateMealScoutReverseOsmosisPacket(packet, input.restaurantId, input.createdByUserId, expectedVersions, tx, true, guard?.signal);
+      checkpoint();
       if (!versionsEqual(expectedVersions, await computeOwnerAiExpectedVersions(input.restaurantId, tx, { forUpdate: true }))) throw new OwnerAiActionError(409, "STALE_CONTEXT", "MealScout changed while official source evidence was prepared");
+      checkpoint();
     }
-    return tx.insert(ownerAiActionDrafts).values({
-    id,
-    restaurantId: input.restaurantId,
-    createdByUserId: input.createdByUserId,
-    connectorApiKeyId: input.connectorApiKeyId || null,
-    idempotencyKey,
-    requestHash,
-    status: "draft",
-    revision: 1,
-    packet,
-    normalizedPlan,
-    currentSnapshot,
-    socialDrafts,
-    mediaManifest,
-    expectedVersions,
-    expiresAt: new Date(Date.now() + DRAFT_TTL_MS),
-    errors: [],
-    updatedAt: new Date(),
-  }).onConflictDoNothing().returning();
+    checkpoint();
+    const rows = await tx.insert(ownerAiActionDrafts).values({
+      id,
+      restaurantId: input.restaurantId,
+      createdByUserId: input.createdByUserId,
+      connectorApiKeyId: input.connectorApiKeyId || null,
+      idempotencyKey,
+      requestHash,
+      status: "draft",
+      revision: 1,
+      packet,
+      normalizedPlan,
+      currentSnapshot,
+      socialDrafts,
+      mediaManifest,
+      expectedVersions,
+      expiresAt: new Date(Date.now() + DRAFT_TTL_MS),
+      errors: [],
+      updatedAt: new Date(),
+    }).onConflictDoNothing().returning();
+    // If the issued insert completes after cancellation, reject before callback
+    // return so the native transaction can roll back instead of committing it.
+    checkpoint();
+    return rows;
   });
+  checkpoint();
   let [draft] = inserted;
   if (!draft && input.connectorApiKeyId && idempotencyKey) {
-    [draft] = await db
+    [draft] = await wait(async () => db
       .select()
       .from(ownerAiActionDrafts)
       .where(
@@ -1046,7 +1076,7 @@ export async function createOwnerAiDraft(input: {
           eq(ownerAiActionDrafts.idempotencyKey, idempotencyKey),
         ),
       )
-      .limit(1);
+      .limit(1));
     if (draft?.requestHash !== requestHash) {
       throw new OwnerAiActionError(
         409,
