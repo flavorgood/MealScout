@@ -90,13 +90,12 @@ assert.match(authorizePage, /Connect at least one social account/);
 assert.match(authorizePage, /\/api\/owner-ai\/oauth\/authorize/);
 
 // Free chats use the same strict packet submitted by direct tool clients.
-assert.match(page, /JSON\.parse\(packetText\)/);
+assert.match(page, /parseOwnerAiDraftText\(packetText\)/);
 assert.match(
   page,
   /`\/api\/owner-ai\/restaurants\/\$\{encodeURIComponent\(restaurantId\)\}\/drafts`/,
 );
-assert.match(page, /parsed\.packet && typeof parsed\.packet === "object"/);
-assert.match(page, /: \{ packet: parsed \}/);
+assert.match(page, /@shared\/ownerAiPacketInput/);
 assert.match(page, /schemaVersion: "1\.0"/);
 assert.match(page, /schedules:/);
 assert.match(page, /kind: "event_stop"/);

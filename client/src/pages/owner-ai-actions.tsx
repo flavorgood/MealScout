@@ -1,5 +1,6 @@
 import ReverseOsmosisDraftEvidence from "@/components/reverse-osmosis-draft-evidence";
 import { officialSourceHoldMessage } from "@shared/ownerAiSourceHolds";
+import { parseOwnerAiDraftText } from "@shared/ownerAiPacketInput";
 import ReverseOsmosisBusinessPostControl from "@/components/reverse-osmosis-business-post-control";
 import NativeProfileSourceControl from "@/components/native-profile-source-control";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -609,16 +610,7 @@ export default function OwnerAiActionsPage() {
 
   const createDraftMutation = useMutation({
     mutationFn: async () => {
-      let parsed: JsonRecord;
-      try {
-        parsed = JSON.parse(packetText) as JsonRecord;
-      } catch {
-        throw new Error("The action packet is not valid JSON.");
-      }
-      const request =
-        parsed.packet && typeof parsed.packet === "object"
-          ? parsed
-          : { packet: parsed };
+      const request = parseOwnerAiDraftText(packetText);
       const response = await apiRequest(
         "POST",
         `/api/owner-ai/restaurants/${encodeURIComponent(restaurantId)}/drafts`,
@@ -1478,6 +1470,10 @@ export default function OwnerAiActionsPage() {
                   aria-describedby="owner-ai-packet-help"
                 />
                 <p id="owner-ai-packet-help" className="text-xs text-stone-600">
+                  Use plain JSON or one JSON code block from ChatGPT or another AI.
+                  You can paste a packet or a request containing packet and expectedVersions.
+                  Review the private draft before approving its exact revision.
+                  {" "}
                   Facts remain owner-controlled. Remote images are copied into
                   MealScout only after approval; unconfirmed claims are rejected.
                 </p>
