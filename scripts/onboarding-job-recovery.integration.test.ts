@@ -40,10 +40,10 @@ const memoryGuard = setInterval(() => {
 }, 100);
 const fixtureRoot = mkdtempSync(path.join(tmpdir(), "mealscout-onboarding-synthetic-"));
 const dataPath = path.join(fixtureRoot, "pg");
-// PGlite0.5.8 bootstrap creates two WASM heaps and copies the scratch heap.
-// Start them at32MiB rather than128MiB; normal WASM growth stays enabled.
-// initdb's supported -c option also avoids probing oversized shared buffers.
-const pgliteOptions = { initialMemory: 32 * 1024 * 1024, initDbStartParams: ["-c", "shared_buffers=16MB"] };
+// Installed WASM requires128MiB per heap; retain that minimum and normal growth.
+// initdb's supported -c option avoids oversized automatic shared-buffer probes
+// and persists the smaller buffer pool in this synthetic disk-backed cluster.
+const pgliteOptions = { initialMemory: 128 * 1024 * 1024, initDbStartParams: ["-c", "shared_buffers=16MB"] };
 const initialization: Array<{ stage: string; atMs: number; rssBytes: number }> = [];
 const stage = (name: string) => {
   const rssBytes = process.memoryUsage().rss;
