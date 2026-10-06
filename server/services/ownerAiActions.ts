@@ -779,6 +779,28 @@ export async function getOwnerAiContext(
   );
 }
 
+/** Authorize and read private owner context from one read-only snapshot.
+ * A session/connector check performed before this transaction is not its owner
+ * binding: the account or restaurant may have changed before the snapshot.
+ */
+export async function getOwnerAiContextForCurrentOwner(
+  userId: string,
+  restaurantId: string,
+  options: Parameters<typeof getOwnerAiContext>[1] = {},
+) {
+  return db.transaction(async (tx: any) => {
+    const [restaurant] = await tx.select({ id: restaurants.id, ownerId: restaurants.ownerId })
+      .from(restaurants).where(eq(restaurants.id, restaurantId)).limit(1);
+    const [owner] = await tx.select({ id: users.id, isDisabled: users.isDisabled })
+      .from(users).where(eq(users.id, userId)).limit(1);
+    if (!restaurant) throw new OwnerAiActionError(404, "RESTAURANT_NOT_FOUND", "Restaurant not found");
+    if (!userId || restaurant.ownerId !== userId || owner?.id !== userId || owner.isDisabled !== false) {
+      throw new OwnerAiActionError(403, "ACTUAL_OWNER_REQUIRED", "Current enabled restaurant owner is required");
+    }
+    return getOwnerAiContextSnapshot(restaurantId, tx, options);
+  }, { isolationLevel: "repeatable read", accessMode: "read only" });
+}
+
 export type OwnerAiConnectorPrincipal = {
   apiKeyId: string;
   userId: string;

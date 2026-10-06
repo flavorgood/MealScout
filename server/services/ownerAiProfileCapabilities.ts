@@ -8,7 +8,7 @@ type Credential = { id: string; userId: string; restaurantId: string | null; pur
 type Binding = { credential: Credential | undefined; restaurant: { id: string; ownerId: string | null; businessType: string; isFoodTruck?: boolean | null; publicSurface: boolean; blockedProfileFields: string[]; completeProfileAccess?: boolean } | undefined };
 export type OwnerAiProfileDependencies = {
   readBinding(principal: OwnerAiConnectorPrincipal): Promise<Binding>;
-  readContext(restaurantId: string): Promise<{ restaurant: { id: string; businessType: string; isFoodTruck?: boolean | null }; expectedVersions: unknown }>;
+  readContext(restaurantId: string, ownerId: string): Promise<{ restaurant: { id: string; businessType: string; isFoodTruck?: boolean | null }; expectedVersions: unknown }>;
   now(): Date;
 };
 
@@ -21,7 +21,7 @@ export function createOwnerAiProfileCapabilities(deps: OwnerAiProfileDependencie
     const initialCredential = initial.credential!;
     if (!initialCredential.isActive || initialCredential.revokedAt || (initialCredential.expiresAt && initialCredential.expiresAt <= deps.now())) throw new OwnerAiCapabilityError("PRINCIPAL_INACTIVE");
     if (!initialCredential.scope.split(/[\s,]+/).includes("owner_ai:context")) throw new OwnerAiCapabilityError("CONTEXT_SCOPE_REQUIRED");
-    const context = await deps.readContext(principal.restaurantId);
+    const context = await deps.readContext(principal.restaurantId, principal.userId);
     // Recheck after the native snapshot: ownership transfer/revocation during the read fails closed.
     const { credential, restaurant } = await deps.readBinding(principal);
     const now = deps.now().toISOString();
@@ -73,7 +73,7 @@ export function deriveOwnerAiPublicationPolicy(restaurant: { isActive?: boolean 
 
 const productionDependencies: OwnerAiProfileDependencies = {
   now: () => new Date(),
-  async readContext(id) { const { getOwnerAiContext } = await import("./ownerAiActions"); return getOwnerAiContext(id); },
+  async readContext(id, ownerId) { const { getOwnerAiContextForCurrentOwner } = await import("./ownerAiActions"); return getOwnerAiContextForCurrentOwner(ownerId, id); },
   async readBinding(principal) {
     const [{ db }, { apiKeys, restaurants }, { and, eq }] = await Promise.all([import("../db"), import("@shared/schema"), import("drizzle-orm")]);
     return db.transaction(async (tx: any) => {

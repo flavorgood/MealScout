@@ -17,7 +17,7 @@ import {
   OwnerAiActionError,
   approveOwnerAiDraft,
   createOwnerAiDraft,
-  getOwnerAiContext,
+  getOwnerAiContextForCurrentOwner,
   getOwnerAiDraftForConnector,
   getOwnerAiMediaPreview,
   type OwnerAiConnectorPrincipal,
@@ -507,7 +507,7 @@ async function callOwnerAiTool(
       })
       .strict()
       .parse(argumentsValue || {});
-    return toolResult(await getOwnerAiContext(principal.restaurantId, args));
+    return toolResult(await getOwnerAiContextForCurrentOwner(principal.userId, principal.restaurantId, args));
   }
   if (name === "create_mealscout_draft") {
     requireScope(principal, "owner_ai:drafts:create");

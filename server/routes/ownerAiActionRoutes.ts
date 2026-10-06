@@ -23,7 +23,7 @@ import {
   cancelOwnerAiDraft,
   createOwnerAiConnectorCredential,
   createOwnerAiDraft,
-  getOwnerAiContext,
+  getOwnerAiContextForCurrentOwner,
   getOwnerAiDraftForOwner,
   getOwnerAiDraftForConnector,
   getOwnerAiSocialPreview,
@@ -703,7 +703,8 @@ export function registerOwnerAiActionRoutes(app: Express) {
     asyncRoute(async (req: ConnectorRequest, res) => {
       res.setHeader("Cache-Control", "private, no-store");
       res.json(
-        await getOwnerAiContext(
+        await getOwnerAiContextForCurrentOwner(
+          req.ownerAiConnector!.userId,
           req.ownerAiConnector!.restaurantId,
           contextOffsets(req),
         ),
@@ -769,13 +770,11 @@ export function registerOwnerAiActionRoutes(app: Express) {
     "/api/owner-ai/restaurants/:restaurantId/context",
     isAuthenticated,
     asyncRoute(async (req: any, res) => {
-      await assertActualRestaurantOwner(
-        String(req.user.id),
-        String(req.params.restaurantId),
-      );
+      res.setHeader("Cache-Control", "private, no-store");
       res.json(
-        await getOwnerAiContext(
-          String(req.params.restaurantId),
+        await getOwnerAiContextForCurrentOwner(
+          String(req.user.id),
+          z.string().uuid().parse(req.params.restaurantId),
           contextOffsets(req),
         ),
       );
