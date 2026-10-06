@@ -1,7 +1,14 @@
 import type { RequestHandler } from "express";
 import { request as httpRequest, type IncomingMessage } from "node:http";
 import { request as httpsRequest } from "node:https";
-import type { Socket } from "node:net";
+import { isIP, type Socket } from "node:net";
+import { createHash } from "node:crypto";
+import type { Duplex } from "node:stream";
+
+type NativeUpgradeContext = Readonly<{
+  signal: AbortSignal;
+  accept(close: () => void): boolean;
+}>;
 
 export type MealScoutHostedRuntimeBinding = Readonly<{
   appId: "mealscout";
@@ -9,6 +16,10 @@ export type MealScoutHostedRuntimeBinding = Readonly<{
   profileId: string;
   ownerUserId: string;
   handle: RequestHandler;
+  upgrade?: Readonly<{
+    paths: readonly string[];
+    handle(req: IncomingMessage, socket: Duplex, head: Buffer, context: NativeUpgradeContext): Promise<void>;
+  }>;
 }>;
 
 export type MealScoutHostedRuntimeOptions = Readonly<{
@@ -18,6 +29,8 @@ export type MealScoutHostedRuntimeOptions = Readonly<{
   /** Fixed existing native runtime, supplied only by the server owner. */
   upstreamOrigin: string;
   responseIdleTimeoutMs?: number;
+  /** Enable only after the fixed native runtime runs the reviewed pre101 repair. */
+  nativeRealtimeAuthorization?: "mealscout-engine-session-v1";
 }>;
 
 const hopHeaders = new Set([
@@ -76,6 +89,130 @@ function trailerPairs(message: IncomingMessage): Array<[string, string]> {
   return pairs;
 }
 
+function nativeUpgradeHandler(host: string, upstream: URL) {
+  const send = upstream.protocol === "https:" ? httpsRequest : httpRequest;
+  return (req: IncomingMessage, socket: Duplex, head: Buffer, context: NativeUpgradeContext): Promise<void> =>
+    new Promise<void>((resolve) => {
+      let nativeRequest: ReturnType<typeof httpRequest> | undefined;
+      let nativeSocket: Socket | undefined;
+      let nativeResponse: IncomingMessage | undefined;
+      let deadline: ReturnType<typeof setTimeout> | undefined;
+      let queueCheck: ReturnType<typeof setInterval> | undefined;
+      let stopped = false;
+      const close = () => {
+        if (stopped) return;
+        stopped = true;
+        if (deadline) clearTimeout(deadline);
+        if (queueCheck) clearInterval(queueCheck);
+        context.signal.removeEventListener("abort", close);
+        if (nativeSocket) {
+          socket.unpipe(nativeSocket);
+          nativeSocket.unpipe(socket);
+        }
+        nativeRequest?.destroy();
+        nativeResponse?.destroy();
+        nativeSocket?.destroy();
+        socket.destroy();
+        resolve();
+      };
+      socket.once("close", close);
+      socket.once("end", close);
+      socket.on("error", close);
+      context.signal.addEventListener("abort", close, { once: true });
+      if (context.signal.aborted || socket.destroyed) { close(); return; }
+      try {
+        const target = req.url || "";
+        const parsed = new URL(target, "http://native.invalid");
+        const key = req.headers["sec-websocket-key"];
+        if (exactHost(req.headers.host) !== host || req.method !== "GET" ||
+            req.httpVersion !== "1.1" || !target.startsWith("/") || target.startsWith("//") ||
+            /[\u0000-\u0020\u007f]/.test(target) || target.split("?", 1)[0] !== "/socket.io/" ||
+            parsed.pathname !== "/socket.io/" ||
+            parsed.searchParams.getAll("EIO").length !== 1 || parsed.searchParams.get("EIO") !== "4" ||
+            parsed.searchParams.getAll("transport").length !== 1 || parsed.searchParams.get("transport") !== "websocket" ||
+            parsed.searchParams.getAll("sid").length > 1 ||
+            (parsed.searchParams.has("sid") && !/^[A-Za-z0-9_-]{1,128}$/.test(parsed.searchParams.get("sid") || "")) ||
+            (req.headers.origin !== `https://${host}` && req.headers.origin !== `https://${host}:443`) ||
+            String(req.headers.upgrade || "").toLowerCase() !== "websocket" ||
+            !String(req.headers.connection || "").toLowerCase().split(",").some(value => value.trim() === "upgrade") ||
+            req.headers["sec-websocket-version"] !== "13" || typeof key !== "string" ||
+            !/^[A-Za-z0-9+/]{22}==$/.test(key) || head.length > 4096 ||
+            req.headers["transfer-encoding"] !== undefined ||
+            (req.headers["content-length"] !== undefined && req.headers["content-length"] !== "0")) {
+          close();
+          return;
+        }
+        const expectedAccept = createHash("sha1")
+          .update(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").digest("base64");
+        const headers = transportHeaders(req, true);
+        headers.push("Host", host, "X-Forwarded-Host", host, "X-Forwarded-Proto", "https",
+          "Connection", "Upgrade", "Upgrade", "websocket");
+        if (req.socket.remoteAddress) headers.push("X-Forwarded-For", req.socket.remoteAddress);
+        socket.pause();
+        deadline = setTimeout(close, 5000);
+        deadline.unref();
+        // URL fixes connection/TLS authority, while the public Host is retained.
+        // No credentials, store, Trade identity or client-selected target enter here.
+        nativeRequest = send(upstream, {
+          method: "GET", path: target, headers, agent: false, maxHeaderSize: 16 * 1024,
+          ...(upstream.protocol === "https:" ? {
+            servername: isIP(upstream.hostname.replace(/^\[|\]$/g, "")) ? "" : upstream.hostname,
+          } : {}),
+        });
+        nativeRequest.on("error", close);
+        nativeRequest.once("response", incoming => {
+          nativeResponse = incoming;
+          close();
+        });
+        nativeRequest.once("upgrade", (incoming, upgraded, nativeHead) => {
+          if (stopped) { upgraded.destroy(); return; }
+          nativeResponse = incoming;
+          nativeSocket = upgraded;
+          upgraded.pause();
+          upgraded.on("error", close);
+          upgraded.once("end", close);
+          upgraded.once("close", close);
+          if (incoming.statusCode !== 101 || incoming.headers["sec-websocket-accept"] !== expectedAccept ||
+              String(incoming.headers.upgrade || "").toLowerCase() !== "websocket" ||
+              !String(incoming.headers.connection || "").toLowerCase().split(",")
+                .some(value => value.trim() === "upgrade") || nativeHead.length > 64 * 1024) {
+            close();
+            return;
+          }
+          // The reviewed fixed native runtime has completed session/account and
+          // existing Engine.IO sid/host/origin checks before its own 101.
+          // Attach the paused client leg before accept() can resume it; hold all
+          // original head/frame bytes until the gateway grants this lease.
+          socket.pipe(upgraded, { end: false });
+          socket.pause();
+          let accepted = false;
+          try { accepted = context.accept(close); } catch { close(); return; }
+          if (!accepted || stopped || context.signal.aborted || socket.destroyed) { close(); return; }
+          if (deadline) clearTimeout(deadline);
+          deadline = undefined;
+          const nativeHeaders = transportHeaders(incoming, false);
+          const responseLines = ["HTTP/1.1 101 Switching Protocols", "Connection: Upgrade", "Upgrade: websocket"];
+          for (let index = 0; index < nativeHeaders.length; index += 2) {
+            responseLines.push(`${nativeHeaders[index]}: ${nativeHeaders[index + 1]}`);
+          }
+          socket.write(Buffer.from(responseLines.join("\r\n") + "\r\n\r\n", "latin1"));
+          if (head.length) upgraded.write(head);
+          if (nativeHead.length) socket.write(nativeHead);
+          queueCheck = setInterval(() => {
+            if (upgraded.writableLength > 256 * 1024 || socket.writableLength > 256 * 1024) close();
+          }, 250);
+          queueCheck.unref();
+          upgraded.pipe(socket);
+          socket.resume();
+          // Setup is complete. Gateway owns the active lease, byte ceilings,
+          // authority rechecks and 15-minute reconnect; teardown stays attached.
+          resolve();
+        });
+        nativeRequest.end();
+      } catch { close(); }
+    });
+}
+
 /**
  * A complete HTTP handler for the pinned TradeScout register(binding) contract.
  * Import/construction starts no listener, worker, database or provider call.
@@ -99,6 +236,10 @@ export function createMealScoutHostedRuntimeBinding(
   const idleTimeout = options.responseIdleTimeoutMs ?? 60_000;
   if (!Number.isSafeInteger(idleTimeout) || idleTimeout < 1 || idleTimeout > 120_000) {
     throw new Error("Invalid MealScout native response idle timeout");
+  }
+  if (options.nativeRealtimeAuthorization !== undefined &&
+      options.nativeRealtimeAuthorization !== "mealscout-engine-session-v1") {
+    throw new Error("Unreviewed MealScout native realtime authorization");
   }
   const send = upstream.protocol === "https:" ? httpsRequest : httpRequest;
 
@@ -215,6 +356,9 @@ export function createMealScoutHostedRuntimeBinding(
       path: originalUrl,
       headers,
       agent: false,
+      ...(upstream.protocol === "https:" ? {
+        servername: isIP(upstream.hostname.replace(/^\[|\]$/g, "")) ? "" : upstream.hostname,
+      } : {}),
     });
     nativeRequest.once("error", fail);
     nativeRequest.once("upgrade", (_response, socket) => {
@@ -275,5 +419,8 @@ export function createMealScoutHostedRuntimeBinding(
     profileId: options.profileId,
     ownerUserId: options.ownerUserId,
     handle,
+    ...(options.nativeRealtimeAuthorization === "mealscout-engine-session-v1" ? {
+      upgrade: Object.freeze({ paths: Object.freeze(["/socket.io"]), handle: nativeUpgradeHandler(host, upstream) }),
+    } : {}),
   });
 }

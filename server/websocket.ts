@@ -1,10 +1,8 @@
 import { Server as SocketIOServer } from "socket.io";
-import type { Server, IncomingMessage } from "http";
+import type { Server, IncomingMessage, ServerResponse } from "http";
 import { storage } from "./storage";
-import session from "express-session";
-import type { Request, Response } from "express";
+import type { Request, Response, RequestHandler } from "express";
 import type { Session } from "express-session";
-import connectPg from "connect-pg-simple";
 import type { Socket } from "socket.io";
 import type { InsertFoodTruckLocation } from "@shared/schema";
 import { isAdminUserType } from "./roleAccess";
@@ -20,8 +18,6 @@ import {
 } from "./publicProfiles/toPublicRestaurantListingWithVisibility";
 import { deriveProfileEvidenceQuarantineVisibility } from "./services/profileEvidenceQuarantine";
 import { isPublicBusinessVisible } from "./utils/publicBusinessVisibility";
-
-const PgSession = connectPg(session);
 
 type ClientToServerEvents = {
   subscribe_nearby: (data: {
@@ -127,35 +123,10 @@ let io: SocketIOServer | null = null;
 // Store user subscriptions for cleanup
 const userSubscriptions = new Map<string, Set<string>>();
 
-export function setupWebSocketServer(httpServer: Server): SocketIOServer {
-  const sessionSecret = process.env.SESSION_SECRET;
-  if (!sessionSecret) {
-    throw new Error(
-      "SESSION_SECRET is required for WebSocket session authentication",
-    );
-  }
-  const sessionTtl = 7 * 24 * 60 * 60 * 1000; // 1 week
-
-  // Session middleware configuration (same as Express app)
-  const sessionMiddleware = session({
-    store: new PgSession({
-      conString: process.env.DATABASE_URL,
-      tableName: "sessions",
-      createTableIfMissing: false,
-      ttl: sessionTtl,
-    }),
-    secret: sessionSecret,
-    resave: false,
-    saveUninitialized: false,
-    proxy: true,
-    cookie: {
-      secure: process.env.NODE_ENV === "production",
-      httpOnly: true,
-      sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
-      maxAge: sessionTtl,
-    },
-  });
-
+export function setupWebSocketServer(
+  httpServer: Server,
+  sessionMiddleware: RequestHandler,
+): SocketIOServer {
   // Create Socket.IO server with restricted CORS
   const defaultOrigins = [
     "http://localhost:5000",
@@ -178,6 +149,15 @@ export function setupWebSocketServer(httpServer: Server): SocketIOServer {
   const allowedOrigins = Array.from(
     new Set([...defaultOrigins, ...extraOrigins]),
   );
+  const isAllowedOrigin = (origin: string | undefined) => {
+    if (!origin) return true; // Native nonbrowser policy; hosted v2 requires Origin.
+    try {
+      const parsed = new URL(origin);
+      const defaultPort = parsed.protocol === "https:" ? "443" : "80";
+      return (origin === parsed.origin || origin === `${parsed.origin}:${defaultPort}`) &&
+        allowedOrigins.includes(parsed.origin);
+    } catch { return false; }
+  };
   io = new SocketIOServer<
     ClientToServerEvents,
     ServerToClientEvents,
@@ -187,7 +167,7 @@ export function setupWebSocketServer(httpServer: Server): SocketIOServer {
     path: "/socket.io",
     cors: {
       origin: function (origin, callback) {
-        if (!origin || allowedOrigins.includes(origin)) {
+        if (isAllowedOrigin(origin)) {
           callback(null, true);
         } else {
           callback(new Error("Not allowed by CORS"));
@@ -199,40 +179,100 @@ export function setupWebSocketServer(httpServer: Server): SocketIOServer {
     transports: ["polling", "websocket"],
   });
 
-  // Connection handling - no auth middleware (TradeScout Law: read-only realtime discovery allowed)
-  io.on("connection", async (socket: RealtimeSocket) => {
-    incConnect();
-    socket.userId = null;
-    socket.sessionID = undefined;
-    socket.user = null;
+  type NativeAuthority = {
+    host: string;
+    origin: string | undefined;
+    userId: string | null;
+    sessionID: string | undefined;
+    user: RealtimeSocket["user"];
+  };
+  const verifiedRequests = new WeakMap<IncomingMessage, NativeAuthority>();
+  const engineAuthorities = new Map<string, NativeAuthority>();
 
-    // Extract session data if available (non-blocking, best-effort)
-    sessionMiddleware(
-      socket.request as unknown as Request,
-      {} as unknown as Response,
-      async () => {
-        const session = (socket.request as SessionRequest).session;
-        const user = session?.passport?.user;
-
-        if (user) {
-          socket.userId = user;
-          socket.sessionID = (socket.request as SessionRequest).sessionID;
-          socket.user = await storage.getUser(socket.userId);
-          console.log(
-            `WebSocket connected: ${socket.id}, userId: ${socket.userId}`,
-          );
-
-          if (
-            ["staff", "admin", "duper_admin", "super_admin"].includes(
-              String(socket.user?.userType || ""),
-            )
-          ) {
-            socket.join("admin_lisa");
+  // Engine.IO middleware runs for initial polling, polling with sid, and
+  // WebSocket upgrades BEFORE Engine.IO verifies/opens the transport (101).
+  // Reuse HTTP's exact native cookie/secret/store; no second session store.
+  io.engine.use((req: IncomingMessage, res: ServerResponse, next: (error?: Error) => void) => {
+    sessionMiddleware(req as Request, res as Response, (error) => {
+      if (error) { next(error); return; }
+      void (async () => {
+        const rawTarget = req.url || "";
+        const target = new URL(rawTarget, "http://native.invalid");
+        if (rawTarget.split("?", 1)[0] !== "/socket.io/" || target.pathname !== "/socket.io/" ||
+            target.searchParams.getAll("EIO").length !== 1 ||
+            target.searchParams.get("EIO") !== "4" ||
+            target.searchParams.getAll("transport").length !== 1 ||
+            !["polling", "websocket"].includes(target.searchParams.get("transport") || "") ||
+            target.searchParams.getAll("sid").length > 1) {
+          throw new Error("Invalid native realtime target");
+        }
+        const origin = req.headers.origin;
+        if (!isAllowedOrigin(origin)) {
+          throw new Error("Invalid native realtime origin");
+        }
+        const nativeRequest = req as SessionRequest;
+        const userId = nativeRequest.session?.passport?.user ?? null;
+        if (userId !== null && (typeof userId !== "string" || !userId)) {
+          throw new Error("Invalid native realtime session");
+        }
+        const user = userId ? await storage.getUser(userId) : null;
+        if (userId && (!user || user.id !== userId || user.isDisabled || !nativeRequest.sessionID)) {
+          throw new Error("Native realtime account unavailable");
+        }
+        if (req.aborted || req.socket.destroyed) return;
+        const authority: NativeAuthority = {
+          host: String(req.headers.host || "").toLowerCase(),
+          origin: origin ? new URL(origin).origin : undefined,
+          userId,
+          sessionID: userId ? nativeRequest.sessionID : undefined,
+          user,
+        };
+        const sid = target.searchParams.get("sid");
+        if (sid !== null) {
+          const existing = engineAuthorities.get(sid);
+          if (!existing || existing.host !== authority.host || existing.origin !== authority.origin ||
+              existing.userId !== authority.userId || existing.sessionID !== authority.sessionID) {
+            throw new Error("Native realtime transport/session mismatch");
           }
-        } else {
-          socket.userId = null;
-          socket.sessionID = `anon_${Date.now()}_${Math.random()}`;
-          console.log(`WebSocket connected: ${socket.id} (anonymous)`);
+        }
+        verifiedRequests.set(req, authority);
+        next();
+      })().catch(() => {
+        if (!req.aborted && !req.socket.destroyed) next(new Error("Native realtime authorization failed"));
+      });
+    });
+  });
+  io.engine.on("connection", (transport: {
+    id: string;
+    request: IncomingMessage;
+    close(force?: boolean): void;
+    once(event: "close", listener: () => void): void;
+  }) => {
+    const authority = verifiedRequests.get(transport.request);
+    if (!authority) { transport.close(true); return; }
+    engineAuthorities.set(transport.id, authority);
+    transport.once("close", () => {
+      if (engineAuthorities.get(transport.id) === authority) engineAuthorities.delete(transport.id);
+    });
+  });
+  io.use((socket, next) => {
+    if (!verifiedRequests.has(socket.request)) {
+      next(new Error("Native realtime session unavailable"));
+      return;
+    }
+    next();
+  });
+
+  // Native public discovery remains anonymous; private rooms retain their
+  // existing native ownership checks. SDK auth/user/role claims are unused.
+  io.on("connection", (socket: RealtimeSocket) => {
+        const authority = verifiedRequests.get(socket.request)!;
+        incConnect();
+        socket.userId = authority.userId;
+        socket.sessionID = authority.sessionID || `anon_${socket.id}`;
+        socket.user = authority.user;
+        if (["staff", "admin", "duper_admin", "super_admin"].includes(String(socket.user?.userType || ""))) {
+          socket.join("admin_lisa");
         }
 
         // Initialize user subscriptions tracking
@@ -464,8 +504,6 @@ export function setupWebSocketServer(httpServer: Server): SocketIOServer {
           // Clean up user subscriptions
           userSubscriptions.delete(userKey);
         });
-      },
-    );
   });
 
   console.log("Socket.IO server setup complete at default path");
