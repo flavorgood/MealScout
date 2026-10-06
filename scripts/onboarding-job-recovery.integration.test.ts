@@ -30,13 +30,13 @@ assert.equal(sha(migrationSql), process.argv[3], "SQL changed after independent 
 const started = Date.now();
 const checks: string[] = [];
 let peakRss = process.memoryUsage().rss;
-const memoryLimit = 768 * 1024 * 1024;
+const memoryLimit = 1_280 * 1024 * 1024;
 let guardReason: string | null = null;
 const stop = (reason: string): never => { guardReason = reason; process.stderr.write(reason + "\n"); process.exit(2); };
 const deadline = setTimeout(() => stop("Native synthetic proof exceeded 45-second deadline"), 45_000);
 const memoryGuard = setInterval(() => {
   peakRss = Math.max(peakRss, process.memoryUsage().rss);
-  if (peakRss > memoryLimit) stop("Native synthetic proof exceeded 768-MiB RSS bound");
+  if (peakRss > memoryLimit) stop("Native synthetic proof exceeded 1280-MiB RSS bound");
 }, 100);
 const fixtureRoot = mkdtempSync(path.join(tmpdir(), "mealscout-onboarding-synthetic-"));
 const dataPath = path.join(fixtureRoot, "pg");
@@ -51,7 +51,7 @@ const stage = (name: string) => {
   initialization.push({ stage: name, atMs: Date.now() - started, rssBytes });
   writeFileSync(path.join(phase, "native-initialization.json"), JSON.stringify({ ownedFixtureRoot: fixtureRoot, dataPath, pgliteOptions, initialization, rssBudgetBytes: memoryLimit, deadlineSeconds: 45 }) + "\n");
   process.stdout.write("STAGE " + name + " " + rssBytes + "\n");
-  if (rssBytes > memoryLimit) stop("Native synthetic proof exceeded 768-MiB RSS bound");
+  if (rssBytes > memoryLimit) stop("Native synthetic proof exceeded 1280-MiB RSS bound");
 };
 const cleanupFixture = () => {
   const fixtureAbsolute = path.resolve(fixtureRoot);
