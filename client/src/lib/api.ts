@@ -7,6 +7,10 @@ const IS_DEV = import.meta.env.DEV;
 const SHARED_API_FALLBACK = "https://www.mealscout.us";
 const MEALSCOUT_API_ORIGIN_FALLBACK = "https://mealscout.onrender.com";
 
+function isTradeScoutPlatformHostname(hostname: string): boolean {
+  return hostname === "thetradescout.com" || hostname.endsWith(".thetradescout.com");
+}
+
 function isMealScoutSameOriginPath(path: string): boolean {
   const normalizedPath = path.startsWith("/") ? path : `/${path}`;
   return normalizedPath.startsWith("/api/");
@@ -28,8 +32,8 @@ function resolveApiBaseUrl() {
     return "";
   }
 
-  // TradeScout is a separate frontend platform but should reuse the same API.
-  if (!fromEnv && host.includes("tradescout")) {
+  // The TradeScout host consumes the existing MealScout API contract.
+  if (!fromEnv && isTradeScoutPlatformHostname(host)) {
     return SHARED_API_FALLBACK;
   }
 
@@ -92,7 +96,7 @@ export function authUrl(path: string): string {
     return sameOriginUrl;
   }
 
-  const isTradeScoutHost = host.includes("tradescout");
+  const isTradeScoutHost = isTradeScoutPlatformHostname(host);
   if (!isTradeScoutHost || !isAuthPath) {
     return url;
   }
