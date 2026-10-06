@@ -5,23 +5,23 @@ import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileS
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import express, { type RequestHandler } from "express";
-import { PGlite } from "@electric-sql/pglite";
+import type { RequestHandler } from "express";
+import type { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
 import { getTableColumns } from "drizzle-orm";
-import { ownerOnboardingJobs } from "../shared/schema/onboardingJobs";
 import { splitSqlStatements } from "./sqlMigrationStatements";
 import { createOnboardingJobService, onboardingRequestHash, type OnboardingDatabase } from "../server/services/onboardingJobs";
-import { registerOnboardingJobRoutes } from "../server/routes/onboardingJobRoutes";
 import { onboardingResearchInputSchema, onboardingResearchReceiptSchema } from "../shared/onboardingJobs";
 
 // Run only after root reserves the migration and allocates this native-test slot.
 // The file argument is explicit; no migration number or external DB is guessed.
 const repository = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const phase = path.resolve(repository, "../evidence/mealscout-durable-onboarding-20261005");
+const legacyPhase = path.resolve(repository, "../evidence/mealscout-durable-onboarding-20261005");
+const phase = process.argv[4] ? realpathSync(path.resolve(repository, process.argv[4])) : legacyPhase;
+assert.equal(path.dirname(phase), path.resolve(repository, "../evidence"), "Output must remain in an owned evidence phase");
 if (!process.argv[2]) throw new Error("Explicit reviewed SQL file argument is required");
 const migrationFile = realpathSync(path.resolve(repository, process.argv[2]));
-const candidateSql = path.join(phase, "proposed-owner-onboarding-jobs.sql");
+const candidateSql = path.join(legacyPhase, "proposed-owner-onboarding-jobs.sql");
 assert.ok(migrationFile.startsWith(path.join(repository, "migrations") + path.sep) || migrationFile === candidateSql, "Use the reviewed owned SQL only");
 const migrationSql = readFileSync(migrationFile, "utf8");
 const sha = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
@@ -40,6 +40,19 @@ const memoryGuard = setInterval(() => {
 }, 100);
 const fixtureRoot = mkdtempSync(path.join(tmpdir(), "mealscout-onboarding-synthetic-"));
 const dataPath = path.join(fixtureRoot, "pg");
+// PGlite0.5.8 bootstrap creates two WASM heaps and copies the scratch heap.
+// Start them at32MiB rather than128MiB; normal WASM growth stays enabled.
+// initdb's supported -c option also avoids probing oversized shared buffers.
+const pgliteOptions = { initialMemory: 32 * 1024 * 1024, initDbStartParams: ["-c", "shared_buffers=16MB"] };
+const initialization: Array<{ stage: string; atMs: number; rssBytes: number }> = [];
+const stage = (name: string) => {
+  const rssBytes = process.memoryUsage().rss;
+  peakRss = Math.max(peakRss, rssBytes);
+  initialization.push({ stage: name, atMs: Date.now() - started, rssBytes });
+  writeFileSync(path.join(phase, "native-initialization.json"), JSON.stringify({ ownedFixtureRoot: fixtureRoot, dataPath, pgliteOptions, initialization, rssBudgetBytes: memoryLimit, deadlineSeconds: 45 }) + "\n");
+  process.stdout.write("STAGE " + name + " " + rssBytes + "\n");
+  if (rssBytes > memoryLimit) stop("Native synthetic proof exceeded 768-MiB RSS bound");
+};
 const cleanupFixture = () => {
   const fixtureAbsolute = path.resolve(fixtureRoot);
   assert.ok(fixtureAbsolute.startsWith(path.resolve(tmpdir()) + path.sep) && path.basename(fixtureAbsolute).startsWith("mealscout-onboarding-synthetic-"), "Cleanup must stay within the exact owned synthetic temp directory");
@@ -57,7 +70,7 @@ globalThis.fetch = async () => { externalFetchCalls++; throw new Error("Syntheti
 let engine: PGlite | undefined;
 let database: ReturnType<typeof drizzle> | undefined;
 let service: ReturnType<typeof createOnboardingJobService> | undefined;
-let httpServer: ReturnType<ReturnType<typeof express>["listen"]> | undefined;
+let httpServer: import("node:http").Server | undefined;
 let clock = new Date("2026-10-05T01:00:00Z");
 const owner = "synthetic-owner-a";
 const other = "synthetic-owner-b";
@@ -74,12 +87,17 @@ const research = (validScope = scope()) => ({
 const rejects = (work: () => Promise<unknown>, code: string) => assert.rejects(work, (error: any) => error.code === code);
 const pass = (name: string) => { checks.push(name); process.stdout.write("PASS " + name + "\n"); };
 async function open() {
-  engine = new PGlite(dataPath);
+  stage("before-pglite-import");
+  const { PGlite } = await import("@electric-sql/pglite");
+  stage("before-pglite-open");
+  engine = new PGlite(dataPath, pgliteOptions);
   await engine.waitReady;
+  stage("pglite-ready");
   database = drizzle(engine);
   service = createOnboardingJobService(database as unknown as OnboardingDatabase, () => clock);
 }
 async function restart() {
+  stage("before-disk-close-reopen");
   service = undefined;
   database = undefined;
   await engine!.close();
@@ -90,7 +108,11 @@ async function restart() {
 let succeeded = false;
 let failure: string | null = null;
 try {
+  stage("guard-ready");
   await open();
+  // Load the actual full schema only after bootstrap's transient heaps retire.
+  const { ownerOnboardingJobs } = await import("../shared/schema/onboardingJobs");
+  stage("actual-column-contract-loaded");
   await engine!.exec("CREATE TABLE users(id varchar PRIMARY KEY, is_disabled boolean DEFAULT false); CREATE TABLE restaurants(id varchar PRIMARY KEY, owner_id varchar REFERENCES users(id)); CREATE TABLE owner_ai_action_drafts(id varchar PRIMARY KEY, restaurant_id varchar REFERENCES restaurants(id), created_by_user_id varchar REFERENCES users(id), status varchar, revision integer, expires_at timestamp); CREATE TABLE unrelated_jobs(id integer PRIMARY KEY, payload text); INSERT INTO unrelated_jobs VALUES (1,'preserved');");
   for (let run = 0; run < 2; run++) for (const statement of splitSqlStatements(migrationSql)) await engine!.exec(statement);
   const columns = await engine!.query<{ column_name: string }>("SELECT column_name FROM information_schema.columns WHERE table_name = 'owner_onboarding_jobs'");
@@ -164,6 +186,43 @@ try {
   assert.equal((await service!.read(scope(), id)).revision, completedRevision);
   pass("completed research persists across a second reopen and is reused after browser/process closure");
 
+  // Observe actual UPDATE completion, then cancel before the real transaction
+  // callback returns. No SQL result, lock, commit or persistence is simulated.
+  await engine!.query("INSERT INTO restaurants(id,owner_id) VALUES ($1,$2)", [business("205"), owner]);
+  const cancellationScope = scope("205");
+  const cancellationJob = (await service!.enqueue(cancellationScope, "synthetic-cancellation-key", input)).job;
+  const { PgDialect } = await import("drizzle-orm/pg-core");
+  const dialect = new PgDialect();
+  const cancellation = () => {
+    const caller = new AbortController(), reason = new Error("SYNTHETIC_TRANSACTION_CANCELLED");
+    let updates = 0;
+    const observed: OnboardingDatabase = { transaction: work => (database as unknown as OnboardingDatabase).transaction(tx => work({
+      async execute(query) {
+        const result = await tx.execute(query);
+        if (/^\s*UPDATE\s+owner_onboarding_jobs\b/i.test(dialect.sqlToQuery(query).sql)) { updates++; caller.abort(reason); }
+        return result;
+      },
+    })) };
+    return { service: createOnboardingJobService(observed, () => clock), checkpoint: () => caller.signal.throwIfAborted(), reason, updates: () => updates };
+  };
+  const cancelledClaim = cancellation();
+  await assert.rejects(() => cancelledClaim.service.claim(cancellationScope, cancellationJob.id, cancelledClaim.checkpoint), error => error === cancelledClaim.reason);
+  assert.equal(cancelledClaim.updates(), 1);
+  const unchangedQueued = await service!.read(cancellationScope, cancellationJob.id);
+  assert.deepEqual([unchangedQueued.status, unchangedQueued.attempts, unchangedQueued.revision], ["queued", 0, cancellationJob.revision]);
+  const validClaim = await service!.claim(cancellationScope, cancellationJob.id);
+  assert.ok(validClaim);
+  const cancelledCompletion = cancellation();
+  await assert.rejects(() => cancelledCompletion.service.complete(cancellationScope, cancellationJob.id, validClaim.leaseToken, research(cancellationScope), cancelledCompletion.checkpoint), error => error === cancelledCompletion.reason);
+  assert.equal(cancelledCompletion.updates(), 1);
+  const cancelledRetry = cancellation();
+  await assert.rejects(() => cancelledRetry.service.retry(cancellationScope, cancellationJob.id, validClaim.leaseToken, cancelledRetry.checkpoint), error => error === cancelledRetry.reason);
+  assert.equal(cancelledRetry.updates(), 1);
+  const unchangedRunning = await service!.read(cancellationScope, cancellationJob.id);
+  assert.deepEqual([unchangedRunning.status, unchangedRunning.revision, unchangedRunning.researchReceipt], ["running", validClaim.job.revision, null]);
+  await service!.complete(cancellationScope, cancellationJob.id, validClaim.leaseToken, research(cancellationScope));
+  pass("real SQL rolls back cancelled claim, completion and retry callbacks; original row and lease remain usable");
+
   const retryJob = (await service!.enqueue(scope("202"), "synthetic-retry-key", input)).job;
   for (let attempt = 1; attempt <= 3; attempt++) {
     const claimed = await service!.claim(scope("202"), retryJob.id);
@@ -208,6 +267,9 @@ try {
     (req as any).user = { id };
     next();
   };
+  // Actual route and Express coverage is retained, outside initialization peak.
+  const [{ default: express }, { registerOnboardingJobRoutes }] = await Promise.all([import("express"), import("../server/routes/onboardingJobRoutes")]);
+  stage("actual-http-route-loaded");
   const app = express();
   app.use(express.json());
   registerOnboardingJobRoutes(app, { database: database as unknown as OnboardingDatabase, isAuthenticated: auth, limiter: (_req, _res, next) => next(), enabled: () => true });
@@ -262,6 +324,8 @@ try {
     peakRssBytes: peakRss,
     rssBudgetBytes: memoryLimit,
     deadlineSeconds: 45,
+    pgliteOptions,
+    initialization,
     externalFetchCalls,
     fixtureCleanupCompleted: true,
     scope: "Single disk-backed PGlite synthetic DB, actual durable service and actual new route handlers. Authentication/rate middleware are fixture stand-ins; no genuine native owner/provider/payment/production acceptance.",
