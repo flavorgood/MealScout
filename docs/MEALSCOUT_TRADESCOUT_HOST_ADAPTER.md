@@ -1,6 +1,6 @@
 # MealScout consumer boundary for the TradeScout hosting hub
 
-Thomas's current direction is that TradeScout profiles form the hosting hub alongside tools, while MealScout retains its food product and permissions. Shared profile/domain/hosting primitives belong to the TradeScout owner. This source slice changes only the existing MealScout SDK/API consumer; it creates no hosting backend, database, DNS policy or public redirect.
+Thomas's current direction is that TradeScout profiles form the hosting hub alongside tools, while MealScout retains its food product and permissions. Shared profile/domain/hosting primitives belong to the TradeScout owner. This consumer slice aligns the existing SDK/API transport and supplies a handler to the existing native HTTP runtime; it creates no parallel hosting backend, database, DNS policy or public redirect.
 
 ## Implemented consumer repair
 
@@ -12,7 +12,7 @@ The SDK context's `user`, `location` and `scoutBridge` are not proof of native a
 
 ## Interface coordination required from the hosting owner
 
-The TradeScout owner must supply the authoritative hosting contract revision before a complete host adapter can be connected:
+The shared registration contract is now pinned below. A live registration still needs verified existing identities and native configuration for these boundaries:
 
 - Actual TradeScout profile/tenant binding and the MealScout source restaurant/profile ID; an opaque public-link tenant is not an authenticated account mapping.
 - The mounted full-app route and native public profile mapping, including deep links, assets and native food/order/checkout/workspace journeys.
@@ -26,4 +26,30 @@ The TradeScout owner must supply the authoritative hosting contract revision bef
 
 Focused runtime fixtures evaluate the actual API module and SDK helper with synthetic browser/environment/React/App/fetch ports. They perform two isolated syntax transpiles, create no semantic program, mount no app and make no real SSO/network/provider call. These checks do not prove a library build, hosted routes, cookie/session behavior, shared scoring or live domain/owner admission. Those checks await the shared-owner contract and a coordinated resource slot; no unchanged failed low-memory compiler attempt should be repeated.
 
-The Meal onboarding branch and its heap-failure/owner-readback evidence remain separate. This four-file consumer patch is reversible and can be integrated independently by its native owner; it supplies no merge, public deployment, DNS, credential, consent or spending authority.
+The Meal onboarding branch and its heap-failure/owner-readback evidence remain separate. The initial four-file SDK repair and subsequent native HTTP adapter are reversible consumer changes; they supply no merge, public deployment, DNS, credential, consent or spending authority.
+
+## Pinned native HTTP adapter
+
+The shared owner's stable module is server/profileHostedRuntime.ts at c9b478337d86de60a56e23c9edec68808e78a7e1 (unchanged at hosting head b9aad0aba5e7b2ab6101b826bbecb7321eaacb64). Its machine-readable contract SHA256 is ac450cf287a207c43bf744485e78ee21680643b5a4bddfbff15a8294d2e2ee6e.
+
+server/integrations/tradeScoutHostedRuntime.ts now supplies createMealScoutHostedRuntimeBinding({ host, profileId, ownerUserId, upstreamOrigin }). The returned immutable object has exactly appId: "mealscout", host, profileId, ownerUserId and a complete Express handle. The shared server owner passes it to profileHostedRuntimeRegistry.register(binding) and retains that registry's identity-checked disposer. This module imports only native HTTP transport; construction starts no listener, worker, database, migration or external call. Nothing registers automatically.
+
+The owner selects one fixed, existing HTTPS native runtime (literal loopback HTTP is available for an existing local runtime). No request, profile content, environment activation flag, query, SDK user or forwarded host can choose or change that upstream. The exact public host/profile/owner eligibility gate in the pinned gateway remains mandatory before every request. Trade routing identities do not become native restaurant owners or database tenants.
+
+The adapter relays the entire unprefixed original method, encoded URL/query, raw body stream, native authorization/cookies/origin/signature headers and native response status/redirect/cookie values. Assets, APIs, OAuth callbacks, media ranges, HTTP streams and trailers go through the existing full MealScout runtime. HTTP framing/hop headers are regenerated for the new connection; payload bytes are never JSON-parsed, decompressed, accumulated or reserialized. Forwarding claims are replaced with the bound public host, HTTPS and the captured immediate peer; authentic end-user IP handling behind an additional edge needs an operator-reviewed trust policy. Reset, idle timeout, malformed target, parsed body and wrong-host failures end within the app boundary and cannot call TradeScout routes.
+
+The existing Meal server retains its own PUBLIC_BASE_URL, session secret/store/cookie policy, CSRF/allowed origins, OAuth receiver/identity mapping, role/business permissions, database, signed payment processing and workers. The adapter neither copies those configuration values into TradeScout nor rewrites cookie domains, callbacks, payment redirects, CSP or public canonicals to claim compatibility. Server assembly must verify the actual approved custom host/profile/owner and fixed native upstream and these native configuration boundaries before registration. No production registration or cutover is included.
+
+The fixed native ingress must accept the bound public HTTP Host; a public Render URL alone does not prove that routing policy. The native browser API base must also target the approved runtime: a hosted TradeScout subdomain still enters the existing SDK's Trade API fallback unless its native build has the correct explicit API base. Native public-profile chrome/canonical composition and actual OAuth/cookie/CSRF configuration are compatibility decisions, not transformations performed by this byte-stream adapter.
+
+A focused integration script uses real installed Express/HTTP, express-session with an isolated MemoryStore and the Stripe SDK's local HMAC verification, together with the exact pinned gateway module and a synthetic authority resolver. It checks transport transparency only. It does not start server/index.ts, create native owners/sessions in PostgreSQL, process payment journals, call providers, or prove production SSO/public-domain authority. Scoped semantic acceptance, if completed, concerns only this new adapter and its actual installed types; older onboarding typechecking remains separate.
+
+The ten-second connection deadline ends at TCP connection or TLS secureConnect; connected uploads use the configured idle allowance. Request and response completion are tracked independently, and chunked payload framing is restored for every method carrying a body, including GET and DELETE. Focused checks include an actively flowing upload beyond ten seconds and early native denial; these checks must execute under the recorded guards before being counted as runtime acceptance.
+
+Additional Transfer-Encoding codings fail explicitly on either leg instead of silently losing their declaration; standard chunked transfer, HTTP trailers and native Content-Encoding gzip remain supported. An actual native requirement for another transfer coding needs a reviewed extension. Trailer values use the installed Node API's name/value pair format.
+
+## Explicit full-functionality gaps
+
+MealScout's existing server/websocket.ts installs Socket.IO at /socket.io with both polling and WebSocket transports, including food-truck location updates and kitchen order subscriptions. The shared hosting contract supplies no WebSocket/HTTP upgrade boundary. This adapter does not silently disable native WebSockets or force polling. Actual upgraded requests bypass an Express handler; HTTP upgrade headers reaching the handler receive 426. Full hosted realtime acceptance requires the hosting owner to extend/review the shared server upgrade contract or independently approve a compatible existing-runtime transport.
+
+Existing native OAuth callbacks use PUBLIC_BASE_URL; browser mutation CSRF checks use the existing ALLOWED_ORIGINS; native sessions are named tradescout.sid with optional SESSION_COOKIE_DOMAIN. Exact callback/origin/cookie isolation and the reviewed native SSO issuer/audience/subject boundary are required before a live host is admitted. The shared contract keeps private TradeScout onboarding and online-presence scores on TradeScout's canonical origin; no cross-product score endpoint or data export is supplied. Native completion and quality evidence retain their existing meanings.
