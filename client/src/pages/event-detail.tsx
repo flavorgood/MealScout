@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { useParams } from "wouter";
 import { SEOHead } from "@/components/seo-head";
 import { apiUrl } from "@/lib/api";
@@ -8,7 +8,6 @@ import { Button } from "@/components/ui/button";
 import { extractIdFromSlug } from "@/lib/seo-slug";
 import { generateEventSchema } from "@/lib/schema-helpers";
 import { useAuth } from "@/hooks/useAuth";
-import { EventBookingModal } from "@/components/event-booking-modal";
 import { resolveStoredFoodBusinessType } from "@shared/businessTypes";
 
 type PublicEvent = {
@@ -19,6 +18,7 @@ type PublicEvent = {
   startTime?: string | null;
   endTime?: string | null;
   status?: string | null;
+  eventType?: string | null;
   requiresPayment?: boolean;
   hostPriceCents?: number | null;
   host: {
@@ -47,8 +47,6 @@ export default function EventDetailPage() {
   const eventId = extractIdFromSlug(eventParam);
   const { user, isAuthenticated, authState } = useAuth();
   const currentUserId = isAuthenticated ? String(user?.id || "") : "";
-  const queryClient = useQueryClient();
-  const [bookingOpen, setBookingOpen] = useState(false);
   const [truckContext, setTruckContext] = useState<{
     userId: string;
     truckId: string | null;
@@ -145,10 +143,18 @@ export default function EventDetailPage() {
   const canBook =
     isAuthenticated &&
     Boolean(truckId) &&
+    data?.eventType === "parking_pass" &&
     data?.requiresPayment === true &&
     data?.status === "open" &&
     !data?.ended;
   const eventLoading = waitingForOwnerContext || isLoading;
+  const parkingCheckoutPath = canBook && data && truckId
+    ? `/parking-pass?${new URLSearchParams({
+        pass: data.id,
+        date: String(data.date || "").slice(0, 10),
+        truckId,
+      }).toString()}`
+    : null;
 
   return (
     <div className="min-h-screen bg-background">
@@ -278,10 +284,9 @@ export default function EventDetailPage() {
               )}
 
               <div className="flex gap-2 flex-wrap">
-                {canBook && truckId ? (
-                  <Button onClick={() => setBookingOpen(true)}>
-                    Book This Spot — $
-                    {(((data?.hostPriceCents ?? 0) + 1000) / 100).toFixed(2)}
+                {parkingCheckoutPath ? (
+                  <Button asChild>
+                    <a href={parkingCheckoutPath}>Choose Parking Pass slots</a>
                   </Button>
                 ) : null}
                 <Button asChild variant={canBook ? "outline" : "default"}>
@@ -298,28 +303,6 @@ export default function EventDetailPage() {
                   </Button>
                 ) : null}
               </div>
-
-              {data && truckId && bookingOpen ? (
-                <EventBookingModal
-                  open={bookingOpen}
-                  onOpenChange={setBookingOpen}
-                  eventId={data.id}
-                  truckId={truckId}
-                  eventDetails={{
-                    name: data.title,
-                    date: dateText || "",
-                    startTime: data.startTime || "",
-                    endTime: data.endTime || "",
-                    hostName: data.host?.name || "Host location",
-                    hostPriceCents: data.hostPriceCents ?? 0,
-                  }}
-                  onSuccess={() => {
-                    void queryClient.invalidateQueries({
-                      queryKey: ["public-event", eventId],
-                    });
-                  }}
-                />
-              ) : null}
             </CardContent>
           </Card>
         </div>

@@ -1503,14 +1503,20 @@ export default function ParkingPassPage() {
   }, [truck?.id]);
 
   useEffect(() => {
-    if (!pendingPassId) return;
+    if (!pendingPassId || isLoading) return;
     const match = passListings.find((listing) => listing.id === pendingPassId);
     if (match) {
       setActiveLocationKey(getLocationKey(match));
       setSelectedDate(getListingDateKey(match.date));
+    } else {
+      toast({
+        title: "Parking Pass unavailable",
+        description: "This Parking Pass could not be found. Choose an available location and date before booking.",
+        variant: "destructive",
+      });
     }
     setPendingPassId(null);
-  }, [pendingPassId, passListings]);
+  }, [pendingPassId, passListings, isLoading, toast]);
 
   useEffect(() => {
     if (!requestedHostId) return;

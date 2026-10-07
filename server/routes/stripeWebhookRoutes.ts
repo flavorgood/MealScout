@@ -1043,9 +1043,19 @@ export function registerStripeWebhookRoutes(
                 const bookingIntentId = String(
                   booking.stripePaymentIntentId || "",
                 ).trim();
-                if (bookingIntentId && bookingIntentId !== paymentIntent.id) {
+                if (
+                  !bookingIntentId || bookingIntentId !== paymentIntent.id ||
+                  !["pending", "confirmed"].includes(String(booking.status)) ||
+                  paymentIntent.metadata?.eventId !== booking.eventId ||
+                  paymentIntent.metadata?.truckId !== booking.truckId ||
+                  paymentIntent.metadata?.hostId !== booking.hostId ||
+                  paymentIntent.currency !== "usd" ||
+                  paymentIntent.amount !== booking.totalCents ||
+                  !Number.isSafeInteger(paymentIntent.amount_received) ||
+                  paymentIntent.amount_received < booking.totalCents
+                ) {
                   throw new Error(
-                    `Booking ${bookingId} expected PaymentIntent ${bookingIntentId}, received ${paymentIntent.id}`,
+                    `Booking ${bookingId} requires reconciliation; payment or pending hold is no longer bound`,
                   );
                 }
 
@@ -1071,7 +1081,7 @@ export function registerStripeWebhookRoutes(
                 }
 
                 const now = new Date();
-                await db
+                const [confirmedBooking] = await db
                   .update(eventBookings)
                   .set({
                     status: "confirmed",
@@ -1080,7 +1090,17 @@ export function registerStripeWebhookRoutes(
                     bookingConfirmedAt: now,
                     updatedAt: now,
                   })
-                  .where(eq(eventBookings.id, bookingId));
+                  .where(
+                    and(
+                      eq(eventBookings.id, bookingId),
+                      eq(eventBookings.status, "pending"),
+                      eq(eventBookings.stripePaymentIntentId, bookingIntentId),
+                    ),
+                  )
+                  .returning({ id: eventBookings.id });
+                if (!confirmedBooking) {
+                  throw new Error(`Booking ${bookingId} changed during payment confirmation; reconciliation required`);
+                }
 
                 // Update event fill status
                 const [countRow] = await db
