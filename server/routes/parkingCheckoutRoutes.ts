@@ -8,6 +8,9 @@ import { storage } from "../storage";
 import { isAuthenticated } from "../unifiedAuth";
 
 type Hold = typeof eventBookings.$inferSelect;
+type CancellationTarget = Pick<Hold, "id" | "truckId" | "eventId"> & {
+  eventType: (typeof events.$inferSelect)["eventType"] | null;
+};
 type IntentReader = Pick<Stripe["paymentIntents"], "retrieve" | "cancel">;
 class CancellationDeferred extends Error {
   constructor(readonly status: 409 | 503, message: string) { super(message); }
@@ -75,7 +78,7 @@ export function registerParkingCheckoutRoutes(app: Express, { stripe }: { stripe
       const authorized = await storage.verifyRestaurantOwnership(truckId, req.user.id, "manageParkingPass");
       const admin = ["admin", "duper_admin", "super_admin", "staff"].includes(req.user?.userType || "");
       if (!authorized && !admin) return res.status(403).json({ message: "Not authorized" });
-      const initial = await db.select({ id: eventBookings.id, truckId: eventBookings.truckId, eventId: eventBookings.eventId, eventType: events.eventType })
+      const initial: CancellationTarget[] = await db.select({ id: eventBookings.id, truckId: eventBookings.truckId, eventId: eventBookings.eventId, eventType: events.eventType })
         .from(eventBookings).leftJoin(events, eq(events.id, eventBookings.eventId))
         .where(eq(eventBookings.stripePaymentIntentId, id));
       if (!initial.some(row => row.eventType === "parking_pass")) return next();
