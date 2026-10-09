@@ -1385,6 +1385,91 @@ const assertExecutedAdmission = (
   assert.ok(ts.isReturnStatement(admissionTry.catchClause.block.statements.at(-1)!),
     "canonical admission must return after failed hold creation");
 
+
+  // Ownership must be the awaited capability result that actually denies checkout.
+  const ownsBinding = (name: ts.BindingName, binding: string): boolean => ts.isIdentifier(name)
+    ? name.text === binding
+    : name.elements.some((element) => ts.isBindingElement(element) && ownsBinding(element.name, binding));
+  const directOwnershipBinding = (binding: string) => {
+    const matches: { declaration: ts.VariableDeclaration; statement: ts.VariableStatement; index: number }[] = [];
+    checkoutBlock.statements.forEach((statement, index) => {
+      if (ts.isVariableStatement(statement)) {
+        for (const declaration of statement.declarationList.declarations) {
+          if (ownsBinding(declaration.name, binding)) matches.push({ declaration, statement, index });
+        }
+      }
+    });
+    assert.equal(matches.length, 1, "ownership must use one direct " + binding + " binding");
+    assert.ok(matches[0].statement.declarationList.flags & ts.NodeFlags.Const,
+      "ownership must retain immutable identity and capability bindings");
+    return matches[0];
+  };
+  const ownershipTruckId = directOwnershipBinding("truckId");
+  const ownershipUserId = directOwnershipBinding("userId");
+  const ownershipTruck = directOwnershipBinding("truck");
+  const ownershipCapability = directOwnershipBinding("hasManageParkingPass");
+  const truckInput = ownershipTruckId.declaration;
+  assert.ok(ts.isObjectBindingPattern(truckInput.name) && truckInput.initializer &&
+    truckInput.initializer.getText().replace(/\s+/g, "") === "req.body",
+    "ownership must take the requested truck from the direct request body");
+  const truckFields = truckInput.name.elements.filter((element) => ownsBinding(element.name, "truckId"));
+  assert.ok(truckFields.length === 1 && ts.isIdentifier(truckFields[0].name) &&
+    truckFields[0].name.text === "truckId" && !truckFields[0].propertyName &&
+    !truckFields[0].initializer && !truckFields[0].dotDotDotToken,
+    "ownership must retain the unaliased requested truck without defaults");
+  assert.ok(ts.isIdentifier(ownershipUserId.declaration.name) && ownershipUserId.declaration.initializer &&
+    ownershipUserId.declaration.initializer.getText().replace(/\s+/g, "") === "req.user.id",
+    "ownership must use the authenticated user identity");
+  assert.ok(ownershipTruckId.index < ownershipTruck.index && ownershipUserId.index < ownershipTruck.index &&
+    ownershipCapability.index === ownershipTruck.index + 1 &&
+    ownershipCapability.index + 1 < checkoutBlock.statements.indexOf(admissionTry),
+    "ownership must read the truck, await capability and deny before admission");
+  const ownershipPrinter = ts.createPrinter({ removeComments: true });
+  const expectedOwnership = ts.createSourceFile("ownership-packet.ts", "const truck = await storage.getRestaurant(truckId);\nconst hasManageParkingPass = await storage.verifyRestaurantOwnership(truckId, userId, \"manageParkingPass\");\nif (!truck || !hasManageParkingPass) {\n          const ownedRestaurants = await storage.getRestaurantsByOwner(userId);\n          const hasOwnedTruckProfile = Array.isArray(ownedRestaurants)\n            ? ownedRestaurants.some((row: any) => {\n                const businessType = String(row?.businessType || \"\").toLowerCase();\n                return row?.isFoodTruck === true || businessType === \"food_truck\";\n              })\n            : false;\n\n          console.warn(\"[parking-pass] rejected booking attempt\", {\n            userId,\n            userType: req.user?.userType || null,\n            truckId,\n            truckIsFoodTruck: truck?.isFoodTruck ?? null,\n            hasManageParkingPass,\n            hasOwnedTruckProfile,\n            reason: !truck ? \"truck_not_found\" : \"missing_manageParkingPass\",\n          });\n\n          if (!hasOwnedTruckProfile) {\n            return res.status(409).json({\n              code: \"truck_profile_required\",\n              message:\n                \"Complete your food truck profile before booking Parking Pass spots.\",\n              onboardingPath:\n                \"/restaurant-signup?businessType=food_truck&source=parking-pass&claim=1\",\n            });\n          }\n\n          return res.status(403).json({ message: \"Not authorized\" });\n        }", ts.ScriptTarget.Latest, true);
+  for (let index = 0; index < 3; index += 1) {
+    assert.equal(ownershipPrinter.printNode(ts.EmitHint.Unspecified, checkoutBlock.statements[ownershipTruck.index + index], handler.getSourceFile()),
+      ownershipPrinter.printNode(ts.EmitHint.Unspecified, expectedOwnership.statements[index], expectedOwnership),
+      "ownership must use the exact awaited verifier and effective terminal denial");
+  }
+  const protectedOwnershipBindings = ["req", "storage", "truckId", "userId", "truck", "hasManageParkingPass"];
+  const allowedOwnershipDeclarations = new Map<string, ts.Node>([
+    ["truckId", truckInput], ["userId", ownershipUserId.declaration],
+    ["truck", ownershipTruck.declaration], ["hasManageParkingPass", ownershipCapability.declaration],
+  ]);
+  const writesOwnershipBinding = (expression: ts.Expression, binding: string): boolean => {
+    if (ts.isIdentifier(expression)) return expression.text === binding;
+    if (ts.isPropertyAccessExpression(expression) || ts.isElementAccessExpression(expression) ||
+        ts.isParenthesizedExpression(expression)) return writesOwnershipBinding(expression.expression, binding);
+    if (ts.isArrayLiteralExpression(expression)) return expression.elements.some((element) =>
+      ts.isSpreadElement(element) ? writesOwnershipBinding(element.expression, binding) : writesOwnershipBinding(element, binding));
+    if (ts.isObjectLiteralExpression(expression)) return expression.properties.some((property) =>
+      ts.isShorthandPropertyAssignment(property) ? property.name.text === binding :
+      ts.isPropertyAssignment(property) ? writesOwnershipBinding(property.initializer, binding) :
+      ts.isSpreadAssignment(property) && writesOwnershipBinding(property.expression, binding));
+    return false;
+  };
+  const assertOwnershipBindings = (node: ts.Node) => {
+    for (const binding of protectedOwnershipBindings) {
+      if ((ts.isVariableDeclaration(node) || ts.isParameter(node)) && ownsBinding(node.name, binding)) {
+        assert.ok(allowedOwnershipDeclarations.get(binding) === node,
+          "ownership must not shadow identity, truck or verifier bindings");
+      }
+      if ((ts.isFunctionDeclaration(node) || ts.isClassDeclaration(node)) && node.name) {
+        assert.ok(node.name.text !== binding, "ownership must not shadow identity, truck or verifier bindings");
+      }
+      if (ts.isBinaryExpression(node) && node.operatorToken.kind >= ts.SyntaxKind.FirstAssignment &&
+          node.operatorToken.kind <= ts.SyntaxKind.LastAssignment) {
+        assert.ok(!writesOwnershipBinding(node.left, binding), "ownership must not overwrite identity, truck or verifier bindings");
+      }
+      if ((ts.isPrefixUnaryExpression(node) || ts.isPostfixUnaryExpression(node)) &&
+          (node.operator === ts.SyntaxKind.PlusPlusToken || node.operator === ts.SyntaxKind.MinusMinusToken)) {
+        assert.ok(!writesOwnershipBinding(node.operand, binding), "ownership must not overwrite identity, truck or verifier bindings");
+      }
+    }
+    ts.forEachChild(node, assertOwnershipBindings);
+  };
+  assertOwnershipBindings(checkoutBlock);
+
   const callback = transaction.arguments[0];
   assert.ok(ts.isArrowFunction(callback) || ts.isFunctionExpression(callback));
   assert.ok(ts.isBlock(callback.body) && callback.body.statements.length === 5,
@@ -1466,10 +1551,9 @@ const executionMutations: [string, string, string][] = [
   ["disabled date loop", "index < sortedDateKeys.length;", "index < sortedDateKeys.length && false;"],
   ["skipped checkpoint", "await recordParkingBookingHolds(", "if (false) await recordParkingBookingHolds("],
 ];
-for (const [name, original, replacement] of executionMutations) {
-  assert.equal(canonicalParkingBookingRoute.split(original).length, 2, "execution regression fixture must replace one actual source fragment");
+const assertRejectedExecutionMutation = (name: string, mutatedSource: string) => {
   const parsed = ts.createSourceFile("admission-execution-negative.ts",
-    "const checkout = " + canonicalParkingBookingRoute.replace(original, replacement) + ";", ts.ScriptTarget.Latest, true);
+    "const checkout = " + mutatedSource + ";", ts.ScriptTarget.Latest, true);
   const declarationStatement = parsed.statements[0];
   assert.ok(ts.isVariableStatement(declarationStatement));
   const mutatedHandler = declarationStatement.declarationList.declarations[0].initializer!;
@@ -1485,8 +1569,33 @@ for (const [name, original, replacement] of executionMutations) {
   findMutatedAdmission(mutatedHandler.body);
   assert.equal(mutatedTransactions.length, 1);
   assert.throws(() => assertExecutedAdmission(mutatedTransactions[0], mutatedHandler),
-    /canonical admission must|admission callback must|admission loop must/, name);
+    /canonical admission must|admission callback must|admission loop must|ownership must/, name);
+};
+for (const [name, original, replacement] of executionMutations) {
+  assert.equal(canonicalParkingBookingRoute.split(original).length, 2, "execution regression fixture must replace one actual source fragment");
+  assertRejectedExecutionMutation(name, canonicalParkingBookingRoute.replace(original, replacement));
 }
+const ownershipMutations: [string, RegExp, string][] = [
+  ["request-body ownership bypass", /const hasManageParkingPass = await/, "const hasManageParkingPass = req.body?.skipOwnership === true || await"],
+  ["unawaited ownership promise", /const hasManageParkingPass = await/, "const hasManageParkingPass ="],
+  ["wrong ownership truck", /storage\.verifyRestaurantOwnership\(\s*truckId,/, "storage.verifyRestaurantOwnership(req.body.otherTruckId,"],
+  ["wrong ownership user", /storage\.verifyRestaurantOwnership\(\s*truckId,\s*userId,/, "storage.verifyRestaurantOwnership(truckId, req.body.userId,"],
+  ["wrong ownership capability", /storage\.verifyRestaurantOwnership\(\s*truckId,\s*userId,\s*"manageParkingPass"/, 'storage.verifyRestaurantOwnership(truckId, userId, "manageMenu"'],
+  ["disabled ownership denial", /if \(!truck \|\| !hasManageParkingPass\)/, "if (false && (!truck || !hasManageParkingPass))"],
+  ["nonterminal ownership denial", /return\s+res\.status\(403\)\.json\(\{\s*message:\s*"Not authorized"\s*\}\);/, 'res.status(403).json({ message: "Not authorized" });'],
+  ["request-body principal", /const userId = req\.user\.id;/, "const userId = req.body.userId;"],
+  ["default requested truck", /const \{\s*truckId,/, 'const { truckId = "fallback-truck",'],
+  ["shadowed verifier in body destructure", /const \{\s*truckId,/, "const { storage = { verifyRestaurantOwnership: async () => true }, truckId,"],
+  ["shadowed admission principal", /db\.transaction\(async \(tx: any\) => \{/, "db.transaction(async (tx: any) => { const userId = req.body.userId;"],
+  ["overwritten ownership verifier", /const userId = req\.user\.id;/, "const userId = req.user.id; storage.verifyRestaurantOwnership = async () => true;"],
+  ["overwritten authenticated principal", /const userId = req\.user\.id;/, "req.user.id = req.body.userId; const userId = req.user.id;"],
+];
+for (const [name, original, replacement] of ownershipMutations) {
+  assert.equal(canonicalParkingBookingRoute.split(original).length, 2, "ownership regression fixture must replace one actual source fragment");
+  assertRejectedExecutionMutation(name, canonicalParkingBookingRoute.replace(original, replacement));
+}
+console.log("Canonical checkout execution and ownership regressions: PASS");
+
 const admissionCallback = admissionTransaction.arguments[0];
 assert.ok(ts.isArrowFunction(admissionCallback) || ts.isFunctionExpression(admissionCallback));
 assert.equal(admissionCallback.parameters.length, 1);
