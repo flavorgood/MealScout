@@ -49,6 +49,7 @@ async function workerMain() {
   assert.equal(provider.hostname, '127.0.0.1');
   const pool = new pg.Pool({ connectionString: config.url, max: 4, application_name: 'mealscout-legacy-worker-' + process.pid });
   const schema = createRequire(import.meta.url)(config.schema);
+  const notify = value => { if (process.connected) process.send(value, error => { if (error) console.error('Fixture IPC closed:', error.code); }); };
   let gate = null;
   const originalQuery = pool.query.bind(pool);
   pool.query = async (...args) => {
@@ -56,11 +57,11 @@ async function workerMain() {
     const values = typeof query === 'string' ? args[1] : query.values ?? args[1];
     const result = await originalQuery(...args);
     if (/^\s*update\s+"event_bookings"/i.test(text)) {
-      process.send({ type: 'cas', sqlSha256: sha(text), affected: result.rowCount });
+      notify({ type: 'cas', sqlSha256: sha(text), affected: result.rowCount });
     }
     if (gate && !gate.seen && /^\s*select\b/i.test(text) && /from\s+"event_bookings"/i.test(text) && /\blimit\b/i.test(text) && values?.includes(gate.bookingId)) {
       const selected = gate; selected.seen = true;
-      process.send({ type: 'read-gate', id: selected.id, bookingId: selected.bookingId });
+      notify({ type: 'read-gate', id: selected.id, bookingId: selected.bookingId });
       await selected.promise;
     }
     return result;
@@ -108,7 +109,7 @@ async function workerMain() {
   api.registerStripeWebhookRoutes(app, { notifyHostCapacityWarning: async () => {} });
   const server = app.listen(0, '127.0.0.1');
   await new Promise(resolve => server.once('listening', resolve));
-  process.send({ type: 'ready', pid: process.pid, port: server.address().port });
+  notify({ type: 'ready', pid: process.pid, port: server.address().port });
   process.on('message', message => {
     if (message.op === 'arm') {
       assert.ok(!gate || gate.released, 'A read gate must be released before reuse');
@@ -117,9 +118,14 @@ async function workerMain() {
     } else if (message.op === 'release') {
       if (gate) { gate.released = true; gate.resolve(); }
     } else throw Error('Unexpected worker control');
-    process.send({ type: 'control', id: message.id });
+    notify({ type: 'control', id: message.id });
   });
-  const stop = async () => { if (gate) gate.resolve(); server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); await pool.end(); process.exit(0); };
+  let stopping = false;
+  const stop = async () => {
+    if (stopping) return; stopping = true;
+    try { if (gate) gate.resolve(); server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); await pool.end(); process.exit(0); }
+    catch (error) { console.error('Fixture worker shutdown failed:', error); process.exit(1); }
+  };
   process.once('SIGTERM', stop); process.once('disconnect', stop);
 }
 
@@ -136,11 +142,17 @@ async function main() {
   fs.mkdirSync(out, { recursive: true });
   const report = { source, startedAt: new Date().toISOString(), scope: 'Actual registered receipt/signed webhook routes, native PostgreSQL CAS and canonical earnings index/service, separate OS workers. Synthetic actors/grants and GET-only loopback provider. No live payment, refund, customer or production database action.', result: 'running', cases: [], workers: [], files: {}, cleanup: {}, providerWrites: 0, productionMutations: 0 };
   const workers = [], providerReads = [];
-  let postgres, database, databaseCleanup, pool, providerServer;
+  let postgres, database, databaseCleanup, pool, providerServer, helperError;
   const emit = value => console.log('LEGACY_NATIVE ' + JSON.stringify(value));
   const rpc = async (worker, op, bookingId) => {
-    const id = randomUUID(); worker.child.send({ id, op, bookingId });
-    await until(() => worker.messages.find(message => message.type === 'control' && message.id === id), 'worker ' + op);
+    assert.equal(worker.child.connected, true, 'Owned worker IPC must be connected');
+    const id = randomUUID(); let sendError;
+    worker.child.send({ id, op, bookingId }, error => { sendError = error; });
+    await until(() => {
+      if (sendError || worker.errors.length) throw sendError ?? Error(worker.errors.join('\n'));
+      if (worker.child.exitCode !== null || worker.child.signalCode !== null) throw Error('Owned worker exited during control');
+      return worker.messages.find(message => message.type === 'control' && message.id === id);
+    }, 'worker ' + op);
     return id;
   };
   async function test(name, fn) {
@@ -164,8 +176,9 @@ async function main() {
     readline.createInterface({ input: postgres.stdout }).on('line', line => {
       try { const value = JSON.parse(line); if (value.type === 'postgres-ready') database = value; else if (value.type === 'postgres-cleanup') databaseCleanup = value; else helperLogs.push(line); } catch { helperLogs.push(line); }
     });
-    postgres.once('error', error => helperLogs.push(String(error)));
-    await until(() => { if (postgres.exitCode !== null) throw Error(helperLogs.join('\n')); return database; }, 'owned PostgreSQL ready', 60000);
+    postgres.once('error', error => { helperError = error; helperLogs.push(String(error)); });
+    postgres.stdin?.on('error', error => { helperError = error; helperLogs.push('Fixture helper stdin: ' + error.code); });
+    await until(() => { if (helperError) throw helperError; if (postgres.exitCode !== null || postgres.signalCode !== null) throw Error(helperLogs.join('\n')); return database; }, 'owned PostgreSQL ready', 60000);
     const databaseUrl = new URL(database.url);
     assert.equal(databaseUrl.hostname, '127.0.0.1'); assert.equal(databaseUrl.pathname, '/mealscout_legacy_binding_test'); assert.equal(databaseUrl.port, String(database.port));
     pool = new pg.Pool({ connectionString: database.url, max: 8, application_name: 'mealscout-legacy-coordinator' });
@@ -235,9 +248,10 @@ async function main() {
     fs.writeFileSync(configPath, JSON.stringify({ url: database.url, provider: 'http://127.0.0.1:' + providerServer.address().port, schema: schemaFile, bundle, secret }), { mode: 0o600 });
     for (let index = 0; index < 4; index++) {
       const child = fork(file, ['--worker'], { cwd: root, env: { ...safeEnv(), MEALSCOUT_LEGACY_NATIVE_TEST: '1', MEALSCOUT_LEGACY_NATIVE_CONFIG: configPath }, execArgv: [], windowsHide: true, silent: true });
-      const worker = { child, messages: [], logs: [] }; workers.push(worker);
+      const worker = { child, messages: [], logs: [], errors: [] }; workers.push(worker);
+      child.on('error', error => worker.errors.push(String(error)));
       child.on('message', value => worker.messages.push(value)); child.stdout.on('data', value => worker.logs.push(value.toString())); child.stderr.on('data', value => worker.logs.push(value.toString()));
-      const ready = await until(() => { if (child.exitCode !== null) throw Error(worker.logs.join('')); return worker.messages.find(value => value.type === 'ready'); }, 'route worker ready');
+      const ready = await until(() => { if (worker.errors.length) throw Error(worker.errors.join('\n')); if (child.exitCode !== null || child.signalCode !== null) throw Error(worker.logs.join('')); return worker.messages.find(value => value.type === 'ready'); }, 'route worker ready');
       worker.port = ready.port; report.workers.push(ready);
     }
     async function seed(model, supplied) {
@@ -311,6 +325,8 @@ async function main() {
       else await Promise.all([rpc(receiptWorker, 'release'), rpc(webhookWorker, 'release')]);
       const results = await Promise.all([receipt, webhook]);
       assert.equal(results.filter(result => result.status === 200).length, 1, JSON.stringify(results));
+      if (winner === 'receipt') assert.deepEqual(results.map(result => result.status), [200, 500]);
+      if (winner === 'webhook') assert.deepEqual(results.map(result => result.status), [409, 200]);
       assert.ok([200, 409].includes(results[0].status)); assert.ok([200, 500].includes(results[1].status));
       assert.equal((await row(value)).status, 'confirmed');
       const stable = await row(value);
@@ -345,17 +361,26 @@ async function main() {
   } catch (error) { report.result = 'fail'; report.harnessFailure = error.stack || String(error); }
   finally {
     for (const worker of workers) {
-      if (worker.child.connected) worker.child.disconnect();
-      try { await until(() => worker.child.exitCode !== null || worker.child.signalCode !== null, 'owned worker stop'); if (worker.port) assert.equal(await closed(worker.port), true); }
-      catch (error) { report.cleanup.workerFailure = String(error); report.result = 'fail'; }
+      try {
+        if (worker.child.connected) worker.child.disconnect();
+        await until(() => worker.child.exitCode !== null || worker.child.signalCode !== null || !worker.child.pid, 'owned worker stop', 10000);
+        if (worker.port) assert.equal(await closed(worker.port), true);
+      } catch (error) {
+        report.cleanup.workerFailure = String(error); report.result = 'fail';
+        if (worker.child.pid && worker.child.exitCode === null && worker.child.signalCode === null) {
+          worker.child.kill('SIGKILL');
+          try { await until(() => worker.child.exitCode !== null || worker.child.signalCode !== null, 'owned worker termination', 10000); }
+          catch (terminationError) { report.cleanup.workerTerminationFailure = String(terminationError); }
+        }
+      }
       fs.writeFileSync(path.join(out, 'worker-' + worker.child.pid + '.log'), worker.logs.join(''));
     }
     if (providerServer) { providerServer.closeAllConnections(); await new Promise(resolve => providerServer.close(resolve)); }
     if (pool) await pool.end();
     if (postgres) {
-      postgres.stdin.end('stop\n');
       try {
-        await until(() => postgres.exitCode !== null, 'owned PostgreSQL helper stop');
+        if (postgres.stdin?.writable && !postgres.stdin.destroyed) postgres.stdin.end('stop\n');
+        await until(() => postgres.exitCode !== null || postgres.signalCode !== null || !postgres.pid, 'owned PostgreSQL helper stop', 60000);
         assert.equal(postgres.exitCode, 0); assert.equal(databaseCleanup?.stopped, true); assert.equal(databaseCleanup?.postgresStatus, 3); assert.equal(databaseCleanup?.ownedDirectoryRemoved, true);
         // WSL's Windows TCP relay may outlive the stopped Linux listener.
         // Native pg_ctl status above is the ownership/stop assertion.
