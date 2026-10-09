@@ -1,0 +1,72 @@
+name: MealScout native PgSession hosting proof
+on:
+  push:
+    branches:
+      - qa/mealscout-hosting-native-pg-20261009
+permissions:
+  contents: read
+concurrency:
+  group: mealscout-hosting-native-pg-20261009
+  cancel-in-progress: false
+jobs:
+  native:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout the isolated QA driver
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Preserve the bounded QA driver outside source checkout
+        run: cp scripts/qa/hosting-native-pg-proof.mjs "$RUNNER_TEMP/hosting-native-pg-proof.mjs"
+      - name: Checkout exact reviewed application source
+        uses: actions/checkout@v4
+        with:
+          ref: c102255fe8ed1d44b7807ad1891417ebe656ba23
+          persist-credentials: false
+      - name: Set up the proved native Node runtime
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.19.0
+          cache: npm
+      - name: Install exact locked dependencies without lifecycle scripts
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Build checksum-bound PostgreSQL 16.14
+        shell: bash
+        run: |
+          set -euo pipefail
+          hosting_pg_root="$RUNNER_TEMP/mealscout-hosting-pg16.14"
+          mkdir -p "$hosting_pg_root"
+          curl --fail --location --retry 2 https://ftp.postgresql.org/pub/source/v16.14/postgresql-16.14.tar.gz --output "$hosting_pg_root/source.tar.gz"
+          echo "ca18d43510bbb09a271383e1aa705b05b76bc8e9400f9857178ba8ec54cf461a  $hosting_pg_root/source.tar.gz" | sha256sum --check -
+          tar -xzf "$hosting_pg_root/source.tar.gz" -C "$hosting_pg_root"
+          cd "$hosting_pg_root/postgresql-16.14"
+          ./configure --prefix="$hosting_pg_root/install" --with-openssl --without-readline
+          make -j2
+          make install
+      - name: Prove the exact canonical PgSession through native sockets
+        shell: bash
+        env:
+          NODE_ENV: production
+          SESSION_SECRET: owned-public-loopback-fixture-not-provider-credential
+          DATABASE_URL: postgresql://hosting_fixture@127.0.0.1:55489/hosting_session_fixture
+        run: |
+          set -euo pipefail
+          hosting_pg_root="$RUNNER_TEMP/mealscout-hosting-pg16.14"
+          hosting_pg_bin="$hosting_pg_root/install/bin"
+          test "$(id -u)" != "0"
+          "$hosting_pg_bin/initdb" -D "$hosting_pg_root/data" --no-locale -E UTF8 -A trust -U hosting_fixture
+          "$hosting_pg_bin/pg_ctl" -D "$hosting_pg_root/data" -l "$hosting_pg_root/postgres.log" -o "-h 127.0.0.1 -p 55489 -k $hosting_pg_root" start -w
+          trap '"$hosting_pg_bin/pg_ctl" -D "$hosting_pg_root/data" stop -m immediate' EXIT
+          "$hosting_pg_bin/createdb" -h 127.0.0.1 -p 55489 -U hosting_fixture hosting_session_fixture
+          node "$RUNNER_TEMP/hosting-native-pg-proof.mjs"
+      - name: Preserve bounded native proof
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-hosting-pgsession-c102255f
+          path: |
+            .qa-evidence/hosting-native-pg/receipt.json
+            .qa-evidence/hosting-native-pg/native-pg.log
+          if-no-files-found: warn
+          retention-days: 14
