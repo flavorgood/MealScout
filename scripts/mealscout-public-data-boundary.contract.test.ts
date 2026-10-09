@@ -1322,6 +1322,26 @@ assert.match(
   /ensureParkingPassEventRow\(\{\s*passId,\s*requireFuture: true/,
   "canonical checkout must materialize a genuine future Parking Pass occurrence",
 );
+const availabilityQueries: ts.VariableStatement[] = [];
+const findAvailabilityQuery = (node: ts.Node) => {
+  if (ts.isVariableStatement(node) && node.declarationList.declarations.some((declaration) =>
+    ts.isIdentifier(declaration.name) && declaration.name.text === "bookingEvents")) availabilityQueries.push(node);
+  ts.forEachChild(node, (child) => { if (!ts.isFunctionLike(child)) findAvailabilityQuery(child); });
+};
+findAvailabilityQuery(canonicalParkingBooking.handler.body);
+assert.equal(availabilityQueries.length, 1, "canonical checkout must have one owning range availability query");
+const availabilityQuery = availabilityQueries[0];
+assert.ok(ts.isBlock(availabilityQuery.parent));
+const rangeStatements = availabilityQuery.parent.statements;
+const availabilityQueryIndex = rangeStatements.indexOf(availabilityQuery);
+assert.ok(availabilityQueryIndex >= 2);
+const expectedRangeMaterialization = ts.createSourceFile("range-materialization-contract.ts", "const parsedVirtualPassId = parseParkingPassVirtualId(passId);\nif (parsedVirtualPassId) {\n  await Promise.all(\n    expectedDateKeys.map((dateKey) =>\n      ensureParkingPassEventRow({\n        passId: buildParkingPassVirtualId(\n          parsedVirtualPassId.seriesId,\n          dateKey,\n        ),\n        requireFuture: true,\n      }),\n    ),\n  );\n}\nconst bookingEvents = await db\n  .select()\n  .from(events)\n  .where(\n    and(\n      eq(events.hostId, host.id),\n      eq(events.requiresPayment, true),\n      gte(events.date, rangeQueryStart),\n      lt(events.date, rangeQueryEnd),\n    ),\n  )\n  .orderBy(asc(events.date));", ts.ScriptTarget.Latest, true);
+const rangePrinter = ts.createPrinter({ removeComments: true });
+for (let index = 0; index < expectedRangeMaterialization.statements.length; index += 1) {
+  assert.equal(rangePrinter.printNode(ts.EmitHint.Unspecified, rangeStatements[availabilityQueryIndex - 2 + index], availabilityQuery.getSourceFile()),
+    rangePrinter.printNode(ts.EmitHint.Unspecified, expectedRangeMaterialization.statements[index], expectedRangeMaterialization),
+    "canonical checkout must await every requested virtual occurrence before querying range availability");
+}
 const admissionTransactions: ts.CallExpression[] = [];
 const findAdmissionAssignment = (node: ts.Node) => {
   if (ts.isBinaryExpression(node) && ts.isIdentifier(node.left) && node.left.text === "insertedHolds" &&
