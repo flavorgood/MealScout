@@ -1357,6 +1357,136 @@ findAdmissionAssignment(canonicalParkingBooking.handler.body);
 assert.equal(admissionTransactions.length, 1, "canonical admission must have one owning transaction");
 const admissionTransaction = admissionTransactions[0];
 assert.ok(ts.isAwaitExpression(admissionTransaction.parent), "canonical admission must await its transaction");
+const assertExecutedAdmission = (
+  transaction: ts.CallExpression,
+  handler: ts.ArrowFunction | ts.FunctionExpression,
+) => {
+  assert.ok(ts.isBlock(handler.body), "canonical admission must own the checkout block");
+  assert.ok(ts.isAwaitExpression(transaction.parent), "canonical admission must be awaited");
+  const assignment = transaction.parent.parent;
+  assert.ok(ts.isBinaryExpression(assignment) && ts.isIdentifier(assignment.left) &&
+    assignment.left.text === "insertedHolds" && assignment.operatorToken.kind === ts.SyntaxKind.EqualsToken,
+    "canonical admission must assign the actual holds");
+  const assignmentStatement = assignment.parent;
+  assert.ok(ts.isExpressionStatement(assignmentStatement) && assignmentStatement.expression === assignment,
+    "canonical admission must execute as a direct assignment, without a conditional skip");
+  const admissionBlock = assignmentStatement.parent;
+  assert.ok(ts.isBlock(admissionBlock) && admissionBlock.statements.length === 1 &&
+    admissionBlock.statements[0] === assignmentStatement,
+    "canonical admission must be the sole executed statement in its try block");
+  const admissionTry = admissionBlock.parent;
+  assert.ok(ts.isTryStatement(admissionTry) && admissionTry.tryBlock === admissionBlock && !admissionTry.finallyBlock,
+    "canonical admission must retain its direct error boundary");
+  const checkoutBlock = admissionTry.parent;
+  assert.ok(ts.isBlock(checkoutBlock) && ts.isTryStatement(checkoutBlock.parent) &&
+    checkoutBlock.parent.tryBlock === checkoutBlock && checkoutBlock.parent.parent === handler.body,
+    "canonical admission must execute directly on the owning checkout path");
+  assert.ok(admissionTry.catchClause, "canonical admission must abort failed hold creation");
+  assert.ok(ts.isReturnStatement(admissionTry.catchClause.block.statements.at(-1)!),
+    "canonical admission must return after failed hold creation");
+
+  const callback = transaction.arguments[0];
+  assert.ok(ts.isArrowFunction(callback) || ts.isFunctionExpression(callback));
+  assert.ok(ts.isBlock(callback.body) && callback.body.statements.length === 5,
+    "admission callback must execute its prelude, loop, checkpoint and return without alternate exits");
+  const executionPrinter = ts.createPrinter({ removeComments: true });
+  const expectedPrelude = ts.createSourceFile("admission-prelude.ts",
+    "const now = new Date(); const inserted: any[] = [];", ts.ScriptTarget.Latest, true);
+  for (let index = 0; index < 2; index += 1) {
+    assert.equal(executionPrinter.printNode(ts.EmitHint.Unspecified, callback.body.statements[index], callback.getSourceFile()),
+      executionPrinter.printNode(ts.EmitHint.Unspecified, expectedPrelude.statements[index], expectedPrelude),
+      "admission callback must initialize its own hold collection before the loop");
+  }
+  const loop = callback.body.statements[2];
+  assert.ok(ts.isForStatement(loop) && loop.initializer && loop.condition && loop.incrementor,
+    "admission loop must execute directly before the recovery checkpoint");
+  assert.equal(loop.initializer.getText().replace(/\s+/g, ""), "letindex=0", "admission loop must start at the first requested date");
+  assert.equal(loop.condition.getText().replace(/\s+/g, ""), "index<sortedDateKeys.length", "admission loop must cover every requested date");
+  assert.equal(loop.incrementor.getText().replace(/\s+/g, ""), "index+=1", "admission loop must advance one requested date at a time");
+  assert.ok(ts.isBlock(loop.statement));
+  const expectedRowPrelude = ts.createSourceFile("admission-row-prelude.ts",
+    "const dateKey = sortedDateKeys[index]; const row = eventsByDate.get(dateKey); if (!row) { throw new Error(\"Missing parking pass date in booking range.\"); }",
+    ts.ScriptTarget.Latest, true);
+  for (let index = 0; index < 3; index += 1) {
+    assert.equal(executionPrinter.printNode(ts.EmitHint.Unspecified, loop.statement.statements[index], loop.getSourceFile()),
+      executionPrinter.printNode(ts.EmitHint.Unspecified, expectedRowPrelude.statements[index], expectedRowPrelude),
+      "admission loop must reach its row lock without an early exit");
+  }
+  const checkpoint = callback.body.statements[3];
+  assert.ok(ts.isExpressionStatement(checkpoint) && ts.isAwaitExpression(checkpoint.expression) &&
+    ts.isCallExpression(checkpoint.expression.expression),
+    "admission callback must await its direct recovery checkpoint");
+  const checkpointCall = checkpoint.expression.expression;
+  assert.ok(ts.isIdentifier(checkpointCall.expression) && checkpointCall.expression.text === "recordParkingBookingHolds",
+    "admission callback must record its holds before returning");
+  assert.equal(checkpointCall.arguments.length, 3);
+  assert.ok(ts.isIdentifier(callback.parameters[0].name) && ts.isIdentifier(checkpointCall.arguments[0]) &&
+    checkpointCall.arguments[0].text === callback.parameters[0].name.text,
+    "admission callback must checkpoint through its owning transaction");
+  const checkpointInput = checkpointCall.arguments[2];
+  assert.ok(ts.isObjectLiteralExpression(checkpointInput) && checkpointInput.properties.every((property) =>
+    (ts.isPropertyAssignment(property) || ts.isShorthandPropertyAssignment(property)) && ts.isIdentifier(property.name)),
+    "admission callback must use direct checkpoint fields");
+  const checkpointHolds = checkpointInput.properties.filter((property) => property.name!.getText() === "holds");
+  assert.equal(checkpointHolds.length, 1);
+  assert.ok(ts.isPropertyAssignment(checkpointHolds[0]) && ts.isIdentifier(checkpointHolds[0].initializer) &&
+    checkpointHolds[0].initializer.text === "inserted", "admission callback must checkpoint its actual hold collection");
+  const completedHolds = callback.body.statements[4];
+  assert.ok(ts.isReturnStatement(completedHolds) && completedHolds.expression &&
+    ts.isIdentifier(completedHolds.expression) && completedHolds.expression.text === "inserted",
+    "admission callback must return its checkpointed holds");
+
+  const providerCalls: ts.CallExpression[] = [];
+  const findProviderCreation = (node: ts.Node) => {
+    if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) &&
+        node.expression.name.text === "create" && ts.isPropertyAccessExpression(node.expression.expression) &&
+        node.expression.expression.name.text === "paymentIntents" &&
+        ts.isIdentifier(node.expression.expression.expression) && node.expression.expression.expression.text === "stripe") providerCalls.push(node);
+    ts.forEachChild(node, (child) => { if (!ts.isFunctionLike(child)) findProviderCreation(child); });
+  };
+  findProviderCreation(checkoutBlock);
+  assert.equal(providerCalls.length, 1, "canonical admission must precede the actual provider creation");
+  const providerCall = providerCalls[0];
+  assert.ok(ts.isAwaitExpression(providerCall.parent));
+  const providerAssignment = providerCall.parent.parent;
+  assert.ok(ts.isBinaryExpression(providerAssignment) && ts.isIdentifier(providerAssignment.left) &&
+    providerAssignment.left.text === "paymentIntent" && providerAssignment.operatorToken.kind === ts.SyntaxKind.EqualsToken);
+  const providerStatement = providerAssignment.parent;
+  assert.ok(ts.isExpressionStatement(providerStatement) && ts.isBlock(providerStatement.parent));
+  const providerTry = providerStatement.parent.parent;
+  assert.ok(ts.isTryStatement(providerTry) && providerTry.tryBlock === providerStatement.parent &&
+    providerTry.parent === checkoutBlock &&
+    checkoutBlock.statements.indexOf(admissionTry) < checkoutBlock.statements.indexOf(providerTry),
+    "canonical admission must execute before the later sibling provider-creation path");
+};
+assertExecutedAdmission(admissionTransaction, canonicalParkingBooking.handler);
+const executionMutations: [string, string, string][] = [
+  ["conditional admission", "insertedHolds = await db.transaction", "if (false) insertedHolds = await db.transaction"],
+  ["early callback return", "const inserted: any[] = [];", "const inserted: any[] = []; return inserted;"],
+  ["disabled date loop", "index < sortedDateKeys.length;", "index < sortedDateKeys.length && false;"],
+  ["skipped checkpoint", "await recordParkingBookingHolds(", "if (false) await recordParkingBookingHolds("],
+];
+for (const [name, original, replacement] of executionMutations) {
+  assert.equal(canonicalParkingBookingRoute.split(original).length, 2, "execution regression fixture must replace one actual source fragment");
+  const parsed = ts.createSourceFile("admission-execution-negative.ts",
+    "const checkout = " + canonicalParkingBookingRoute.replace(original, replacement) + ";", ts.ScriptTarget.Latest, true);
+  const declarationStatement = parsed.statements[0];
+  assert.ok(ts.isVariableStatement(declarationStatement));
+  const mutatedHandler = declarationStatement.declarationList.declarations[0].initializer!;
+  assert.ok(ts.isArrowFunction(mutatedHandler) || ts.isFunctionExpression(mutatedHandler));
+  const mutatedTransactions: ts.CallExpression[] = [];
+  const findMutatedAdmission = (node: ts.Node) => {
+    if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) &&
+        ts.isIdentifier(node.expression.expression) && node.expression.expression.text === "db" &&
+        node.expression.name.text === "transaction") mutatedTransactions.push(node);
+    ts.forEachChild(node, (child) => { if (!ts.isFunctionLike(child)) findMutatedAdmission(child); });
+  };
+  assert.ok(ts.isBlock(mutatedHandler.body));
+  findMutatedAdmission(mutatedHandler.body);
+  assert.equal(mutatedTransactions.length, 1);
+  assert.throws(() => assertExecutedAdmission(mutatedTransactions[0], mutatedHandler),
+    /canonical admission must|admission callback must|admission loop must/, name);
+}
 const admissionCallback = admissionTransaction.arguments[0];
 assert.ok(ts.isArrowFunction(admissionCallback) || ts.isFunctionExpression(admissionCallback));
 assert.equal(admissionCallback.parameters.length, 1);
