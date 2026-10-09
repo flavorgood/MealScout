@@ -280,7 +280,8 @@ async function main() {
     async function request(worker, kind, value, options = {}) {
       const payload = JSON.stringify({ id: options.eventId ?? 'evt_native_' + value.booking.id, type: 'payment_intent.succeeded', account: value.account, data: { object: value.intent } });
       const response = await fetch('http://127.0.0.1:' + worker.port + (kind === 'receipt' ? '/api/bookings/' + value.booking.id + '/confirm' : '/api/stripe/webhook'), { method: 'POST', headers: kind === 'receipt' ? { 'Content-Type': 'application/json', 'X-QA-User': options.ownerId ?? value.owner.id } : { 'Content-Type': 'application/json', 'Stripe-Signature': options.badSignature ? 'invalid' : signer.webhooks.generateTestHeaderString({ payload, secret }) }, body: kind === 'receipt' ? '{}' : payload, signal: AbortSignal.timeout(20000) });
-      return { status: response.status, body: await response.json() };
+      const body = response.headers.get('content-type')?.includes('application/json') ? await response.json() : await response.text();
+      return { status: response.status, body };
     }
     const row = async value => (await pool.query('SELECT * FROM event_bookings WHERE id=$1', [value.booking.id])).rows[0];
     const earnings = async value => (await pool.query('SELECT * FROM host_earnings_ledger WHERE booking_id=$1', [value.booking.id])).rows;
