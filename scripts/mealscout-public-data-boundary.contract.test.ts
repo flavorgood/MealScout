@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import ts from "typescript";
 import { sql } from "drizzle-orm";
 import { PgDialect } from "drizzle-orm/pg-core";
 import {
@@ -1234,45 +1235,938 @@ assert.match(
   /hostPriceCents: row\.hostPriceCents \?\? null/,
   "eligible event detail must retain the consumer booking price",
 );
-const paidEventBookingRoute = sliceAfter(
-  eventRoutesSource,
-  '"/api/events/:eventId/book"',
-  15000,
+const exactPostRoute = (source: string, routePath: string) => {
+  const parsed = ts.createSourceFile("routes.ts", source, ts.ScriptTarget.Latest, true);
+  const matches: ts.CallExpression[] = [];
+  const visit = (node: ts.Node) => {
+    if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) &&
+        ts.isIdentifier(node.expression.expression) && node.expression.expression.text === "app" &&
+        node.expression.name.text === "post" && ts.isStringLiteral(node.arguments[0]) &&
+        node.arguments[0].text === routePath) matches.push(node);
+    ts.forEachChild(node, visit);
+  };
+  visit(parsed);
+  assert.equal(matches.length, 1, `expected exactly one POST ${routePath}`);
+  const handler = matches[0].arguments.at(-1)!;
+  assert.ok(ts.isArrowFunction(handler) || ts.isFunctionExpression(handler));
+  const printer = ts.createPrinter({ removeComments: true });
+  return {
+    call: matches[0],
+    handler,
+    source: printer.printNode(ts.EmitHint.Unspecified, handler, parsed),
+  };
+};
+const retiredEventCheckout = exactPostRoute(eventRoutesSource, "/api/events/:eventId/book");
+assert.equal(retiredEventCheckout.call.arguments.length, 3, "retired checkout must contain only its path, authentication and pure handoff handler");
+assert.ok(
+  retiredEventCheckout.call.arguments.some((argument) => ts.isIdentifier(argument) && argument.text === "isAuthenticated"),
+  "retired event checkout must retain authentication",
 );
 assert.match(
-  paidEventBookingRoute,
-  /,\s*isAuthenticated,/,
-  "paid event booking must accept authenticated food-truck accounts",
+  retiredEventCheckout.source,
+  /return res\.status\(409\)\.json\(\{[\s\S]*code: "canonical_checkout_required"[\s\S]*checkoutPath: `\/parking-pass\?\$\{params\.toString\(\)\}`/,
+  "retired event checkout must hand off to canonical Parking Pass selection without creating a booking",
+);
+const retiredHandler = retiredEventCheckout.handler;
+const handoffOnlyCalls = new Set(["String", "params.set", "params.toString", "res.status", "res.status(409).json"]);
+const retiredOperationIdentifiers = new Set(["db", "storage", "stripe", "fetch", "axios", "eventBookings"]);
+const inspectRetiredHandler = (node: ts.Node) => {
+  assert.ok(!ts.isAwaitExpression(node), "retired checkout must not perform asynchronous operations");
+  if (ts.isIdentifier(node)) {
+    assert.ok(!retiredOperationIdentifiers.has(node.text), "retired checkout must not reference database or provider owners");
+  }
+  if (ts.isCallExpression(node)) {
+    const stringTrim = ts.isPropertyAccessExpression(node.expression) &&
+      node.expression.name.text === "trim" && ts.isCallExpression(node.expression.expression) &&
+      ts.isIdentifier(node.expression.expression.expression) && node.expression.expression.expression.text === "String";
+    assert.ok(stringTrim || handoffOnlyCalls.has(node.expression.getText()),
+      `retired checkout must not call booking, database or provider operations: ${node.expression.getText()}`);
+  }
+  if (ts.isNewExpression(node)) {
+    assert.equal(node.expression.getText(), "URLSearchParams", "retired checkout may only construct its handoff URL");
+  }
+  ts.forEachChild(node, inspectRetiredHandler);
+};
+inspectRetiredHandler(retiredHandler.body);
+assert.ok(ts.isBlock(retiredHandler.body));
+assert.deepEqual(retiredHandler.parameters.map((parameter) => parameter.name.getText()), ["req", "res"]);
+const expectedRetiredHandoff = ts.createSourceFile("retired-handoff-contract.ts", "const params = new URLSearchParams({ pass: String(req.params.eventId) });\nconst truckId = String(req.body?.truckId || \"\").trim();\nif (truckId) params.set(\"truckId\", truckId);\nreturn res.status(409).json({\n  code: \"canonical_checkout_required\",\n  message: \"Choose your Parking Pass date and slots before checking out.\",\n  checkoutPath: `/parking-pass?${params.toString()}`,\n});", ts.ScriptTarget.Latest, true);
+assert.equal(retiredHandler.body.statements.length, expectedRetiredHandoff.statements.length,
+  "retired checkout must have only its effective URL handoff statements and terminal response");
+const handoffPrinter = ts.createPrinter({ removeComments: true });
+for (let index = 0; index < expectedRetiredHandoff.statements.length; index += 1) {
+  assert.equal(handoffPrinter.printNode(ts.EmitHint.Unspecified, retiredHandler.body.statements[index], retiredHandler.body.getSourceFile()),
+    handoffPrinter.printNode(ts.EmitHint.Unspecified, expectedRetiredHandoff.statements[index], expectedRetiredHandoff),
+    "every retired checkout response path must produce the exact canonical handoff without overrides");
+}
+const canonicalParkingBooking = exactPostRoute(
+  readSource("server/routes/hostRoutes.ts"), "/api/parking-pass/:passId/book",
+);
+const canonicalParkingBookingRoute = canonicalParkingBooking.source;
+assert.ok(
+  canonicalParkingBooking.call.arguments.some((argument) => ts.isIdentifier(argument) && argument.text === "isAuthenticated"),
+  "canonical Parking Pass checkout must require authentication",
 );
 assert.match(
-  paidEventBookingRoute,
-  /verifyRestaurantOwnership\([\s\S]*"manageParkingPass"[\s\S]*res\.status\(403\)/,
-  "paid event booking must still require exact truck ownership",
+  canonicalParkingBookingRoute,
+  /verifyRestaurantOwnership\([\s\S]*"manageParkingPass"[\s\S]*if \(!truck \|\| !hasManageParkingPass\)[\s\S]*res\.status\(403\)/,
+  "canonical Parking Pass checkout must require exact truck ownership",
 );
 assert.match(
-  paidEventBookingRoute,
+  canonicalParkingBookingRoute,
   /assessParkingPassTruckEligibility\([\s\S]*!truckEligibility\.isTruckProfile[\s\S]*truck_verification_required[\s\S]*!truckEligibility\.roleAllowed/,
-  "the legacy event checkout must enforce the canonical Parking Pass truck, verification, and role gates",
+  "canonical Parking Pass checkout must enforce truck classification, verification and role gates",
 );
 assert.match(
-  paidEventBookingRoute,
-  /ensureParkingPassEventRow\(\{[\s\S]*passId: eventId[\s\S]*requireFuture: true[\s\S]*now: bookingRequestNow/,
-  "eligible booking must materialize a genuine series-only Parking Pass occurrence",
+  canonicalParkingBookingRoute,
+  /ensureParkingPassEventRow\(\{\s*passId,\s*requireFuture: true/,
+  "canonical checkout must materialize a genuine future Parking Pass occurrence",
+);
+const availabilityQueries: ts.VariableStatement[] = [];
+const findAvailabilityQuery = (node: ts.Node) => {
+  if (ts.isVariableStatement(node) && node.declarationList.declarations.some((declaration) =>
+    ts.isIdentifier(declaration.name) && declaration.name.text === "bookingEvents")) availabilityQueries.push(node);
+  ts.forEachChild(node, (child) => { if (!ts.isFunctionLike(child)) findAvailabilityQuery(child); });
+};
+findAvailabilityQuery(canonicalParkingBooking.handler.body);
+assert.equal(availabilityQueries.length, 1, "canonical checkout must have one owning range availability query");
+const availabilityQuery = availabilityQueries[0];
+assert.ok(ts.isBlock(availabilityQuery.parent));
+const rangeStatements = availabilityQuery.parent.statements;
+const availabilityQueryIndex = rangeStatements.indexOf(availabilityQuery);
+assert.ok(availabilityQueryIndex >= 2);
+const expectedRangeMaterialization = ts.createSourceFile("range-materialization-contract.ts", "const parsedVirtualPassId = parseParkingPassVirtualId(passId);\nif (parsedVirtualPassId) {\n  await Promise.all(\n    expectedDateKeys.map((dateKey) =>\n      ensureParkingPassEventRow({\n        passId: buildParkingPassVirtualId(\n          parsedVirtualPassId.seriesId,\n          dateKey,\n        ),\n        requireFuture: true,\n      }),\n    ),\n  );\n}\nconst bookingEvents = await db\n  .select()\n  .from(events)\n  .where(\n    and(\n      eq(events.hostId, host.id),\n      eq(events.requiresPayment, true),\n      gte(events.date, rangeQueryStart),\n      lt(events.date, rangeQueryEnd),\n    ),\n  )\n  .orderBy(asc(events.date));", ts.ScriptTarget.Latest, true);
+const rangePrinter = ts.createPrinter({ removeComments: true });
+for (let index = 0; index < expectedRangeMaterialization.statements.length; index += 1) {
+  assert.equal(rangePrinter.printNode(ts.EmitHint.Unspecified, rangeStatements[availabilityQueryIndex - 2 + index], availabilityQuery.getSourceFile()),
+    rangePrinter.printNode(ts.EmitHint.Unspecified, expectedRangeMaterialization.statements[index], expectedRangeMaterialization),
+    "canonical checkout must await every requested virtual occurrence before querying range availability");
+}
+const admissionTransactions: ts.CallExpression[] = [];
+const findAdmissionAssignment = (node: ts.Node) => {
+  if (ts.isBinaryExpression(node) && ts.isIdentifier(node.left) && node.left.text === "insertedHolds" &&
+      node.operatorToken.kind === ts.SyntaxKind.EqualsToken && ts.isAwaitExpression(node.right) &&
+      ts.isCallExpression(node.right.expression)) {
+    const call = node.right.expression;
+    if (ts.isPropertyAccessExpression(call.expression) && ts.isIdentifier(call.expression.expression) &&
+        call.expression.expression.text === "db" && call.expression.name.text === "transaction") admissionTransactions.push(call);
+  }
+  ts.forEachChild(node, (child) => { if (!ts.isFunctionLike(child)) findAdmissionAssignment(child); });
+};
+findAdmissionAssignment(canonicalParkingBooking.handler.body);
+assert.equal(admissionTransactions.length, 1, "canonical admission must have one owning transaction");
+const admissionTransaction = admissionTransactions[0];
+assert.ok(ts.isAwaitExpression(admissionTransaction.parent), "canonical admission must await its transaction");
+const assertExecutedAdmission = (
+  transaction: ts.CallExpression,
+  handler: ts.ArrowFunction | ts.FunctionExpression,
+) => {
+  assert.ok(ts.isBlock(handler.body), "canonical admission must own the checkout block");
+  assert.ok(ts.isAwaitExpression(transaction.parent), "canonical admission must be awaited");
+  const assignment = transaction.parent.parent;
+  assert.ok(ts.isBinaryExpression(assignment) && ts.isIdentifier(assignment.left) &&
+    assignment.left.text === "insertedHolds" && assignment.operatorToken.kind === ts.SyntaxKind.EqualsToken,
+    "canonical admission must assign the actual holds");
+  const assignmentStatement = assignment.parent;
+  assert.ok(ts.isExpressionStatement(assignmentStatement) && assignmentStatement.expression === assignment,
+    "canonical admission must execute as a direct assignment, without a conditional skip");
+  const admissionBlock = assignmentStatement.parent;
+  assert.ok(ts.isBlock(admissionBlock) && admissionBlock.statements.length === 1 &&
+    admissionBlock.statements[0] === assignmentStatement,
+    "canonical admission must be the sole executed statement in its try block");
+  const admissionTry = admissionBlock.parent;
+  assert.ok(ts.isTryStatement(admissionTry) && admissionTry.tryBlock === admissionBlock && !admissionTry.finallyBlock,
+    "canonical admission must retain its direct error boundary");
+  const checkoutBlock = admissionTry.parent;
+  assert.ok(ts.isBlock(checkoutBlock) && ts.isTryStatement(checkoutBlock.parent) &&
+    checkoutBlock.parent.tryBlock === checkoutBlock && checkoutBlock.parent.parent === handler.body,
+    "canonical admission must execute directly on the owning checkout path");
+  assert.ok(admissionTry.catchClause, "canonical admission must abort failed hold creation");
+  assert.ok(ts.isReturnStatement(admissionTry.catchClause.block.statements.at(-1)!),
+    "canonical admission must return after failed hold creation");
+
+
+  // Ownership must be the awaited capability result that actually denies checkout.
+  const ownsBinding = (name: ts.BindingName, binding: string): boolean => ts.isIdentifier(name)
+    ? name.text === binding
+    : name.elements.some((element) => ts.isBindingElement(element) && ownsBinding(element.name, binding));
+  const directOwnershipBinding = (binding: string) => {
+    const matches: { declaration: ts.VariableDeclaration; statement: ts.VariableStatement; index: number }[] = [];
+    checkoutBlock.statements.forEach((statement, index) => {
+      if (ts.isVariableStatement(statement)) {
+        for (const declaration of statement.declarationList.declarations) {
+          if (ownsBinding(declaration.name, binding)) matches.push({ declaration, statement, index });
+        }
+      }
+    });
+    assert.equal(matches.length, 1, "ownership must use one direct " + binding + " binding");
+    assert.ok(matches[0].statement.declarationList.flags & ts.NodeFlags.Const,
+      "ownership must retain immutable identity and capability bindings");
+    return matches[0];
+  };
+  const ownershipTruckId = directOwnershipBinding("truckId");
+  const ownershipUserId = directOwnershipBinding("userId");
+  const ownershipTruck = directOwnershipBinding("truck");
+  const ownershipCapability = directOwnershipBinding("hasManageParkingPass");
+  const truckInput = ownershipTruckId.declaration;
+  assert.ok(ts.isObjectBindingPattern(truckInput.name) && truckInput.initializer &&
+    truckInput.initializer.getText().replace(/\s+/g, "") === "req.body",
+    "ownership must take the requested truck from the direct request body");
+  const truckFields = truckInput.name.elements.filter((element) => ownsBinding(element.name, "truckId"));
+  assert.ok(truckFields.length === 1 && ts.isIdentifier(truckFields[0].name) &&
+    truckFields[0].name.text === "truckId" && !truckFields[0].propertyName &&
+    !truckFields[0].initializer && !truckFields[0].dotDotDotToken,
+    "ownership must retain the unaliased requested truck without defaults");
+  assert.ok(ts.isIdentifier(ownershipUserId.declaration.name) && ownershipUserId.declaration.initializer &&
+    ownershipUserId.declaration.initializer.getText().replace(/\s+/g, "") === "req.user.id",
+    "ownership must use the authenticated user identity");
+  assert.ok(ownershipTruckId.index < ownershipTruck.index && ownershipUserId.index < ownershipTruck.index &&
+    ownershipCapability.index === ownershipTruck.index + 1 &&
+    ownershipCapability.index + 1 < checkoutBlock.statements.indexOf(admissionTry),
+    "ownership must read the truck, await capability and deny before admission");
+  const ownershipPrinter = ts.createPrinter({ removeComments: true });
+  const expectedOwnership = ts.createSourceFile("ownership-packet.ts", "const truck = await storage.getRestaurant(truckId);\nconst hasManageParkingPass = await storage.verifyRestaurantOwnership(truckId, userId, \"manageParkingPass\");\nif (!truck || !hasManageParkingPass) {\n          const ownedRestaurants = await storage.getRestaurantsByOwner(userId);\n          const hasOwnedTruckProfile = Array.isArray(ownedRestaurants)\n            ? ownedRestaurants.some((row: any) => {\n                const businessType = String(row?.businessType || \"\").toLowerCase();\n                return row?.isFoodTruck === true || businessType === \"food_truck\";\n              })\n            : false;\n\n          console.warn(\"[parking-pass] rejected booking attempt\", {\n            userId,\n            userType: req.user?.userType || null,\n            truckId,\n            truckIsFoodTruck: truck?.isFoodTruck ?? null,\n            hasManageParkingPass,\n            hasOwnedTruckProfile,\n            reason: !truck ? \"truck_not_found\" : \"missing_manageParkingPass\",\n          });\n\n          if (!hasOwnedTruckProfile) {\n            return res.status(409).json({\n              code: \"truck_profile_required\",\n              message:\n                \"Complete your food truck profile before booking Parking Pass spots.\",\n              onboardingPath:\n                \"/restaurant-signup?businessType=food_truck&source=parking-pass&claim=1\",\n            });\n          }\n\n          return res.status(403).json({ message: \"Not authorized\" });\n        }", ts.ScriptTarget.Latest, true);
+  for (let index = 0; index < 3; index += 1) {
+    assert.equal(ownershipPrinter.printNode(ts.EmitHint.Unspecified, checkoutBlock.statements[ownershipTruck.index + index], handler.getSourceFile()),
+      ownershipPrinter.printNode(ts.EmitHint.Unspecified, expectedOwnership.statements[index], expectedOwnership),
+      "ownership must use the exact awaited verifier and effective terminal denial");
+  }
+
+  const bypassFlag = directOwnershipBinding("bypassStripe");
+  assert.ok(ts.isIdentifier(bypassFlag.declaration.name) &&
+    bypassFlag.declaration.name.text === "bypassStripe" && bypassFlag.index < checkoutBlock.statements.indexOf(admissionTry),
+    "ownership must retain the direct configured bypass flag before admission");
+  const expectedBypassFlag = ts.createSourceFile("checkout-bypass-flag.ts",
+    'const bypassStripe = String(process.env.MEALSCOUT_BYPASS_STRIPE || "").toLowerCase() === "true" || String(process.env.MEALSCOUT_TEST_MODE || "").toLowerCase() === "true";',
+    ts.ScriptTarget.Latest, true);
+  assert.equal(ownershipPrinter.printNode(ts.EmitHint.Unspecified, bypassFlag.statement, handler.getSourceFile()),
+    ownershipPrinter.printNode(ts.EmitHint.Unspecified, expectedBypassFlag.statements[0], expectedBypassFlag),
+    "ownership must permit payment bypass only through the actual configured environment flags");
+
+  const protectedOwnershipBindings = ["req", "storage", "db", "stripe", "String", "process", "recordParkingBookingHolds", "parkingBookingProviderKey", "bypassStripe", "truckId", "userId", "truck", "hasManageParkingPass"];
+  const allowedOwnershipDeclarations = new Map<string, ts.Node>([
+    ["truckId", truckInput], ["userId", ownershipUserId.declaration],
+    ["truck", ownershipTruck.declaration], ["hasManageParkingPass", ownershipCapability.declaration],
+    ["bypassStripe", bypassFlag.declaration],
+  ]);
+  const writesOwnershipBinding = (expression: ts.Expression, binding: string): boolean => {
+    if (ts.isIdentifier(expression)) return expression.text === binding;
+    if (ts.isPropertyAccessExpression(expression) || ts.isElementAccessExpression(expression) ||
+        ts.isParenthesizedExpression(expression)) return writesOwnershipBinding(expression.expression, binding);
+    if (ts.isArrayLiteralExpression(expression)) return expression.elements.some((element) =>
+      ts.isSpreadElement(element) ? writesOwnershipBinding(element.expression, binding) : writesOwnershipBinding(element, binding));
+    if (ts.isObjectLiteralExpression(expression)) return expression.properties.some((property) =>
+      ts.isShorthandPropertyAssignment(property) ? property.name.text === binding :
+      ts.isPropertyAssignment(property) ? writesOwnershipBinding(property.initializer, binding) :
+      ts.isSpreadAssignment(property) && writesOwnershipBinding(property.expression, binding));
+    return false;
+  };
+  const assertOwnershipBindings = (node: ts.Node) => {
+    for (const binding of protectedOwnershipBindings) {
+      if ((ts.isVariableDeclaration(node) || ts.isParameter(node)) && ownsBinding(node.name, binding)) {
+        assert.ok(allowedOwnershipDeclarations.get(binding) === node,
+          "ownership must not shadow identity, truck or verifier bindings");
+      }
+      if ((ts.isFunctionDeclaration(node) || ts.isClassDeclaration(node)) && node.name) {
+        assert.ok(node.name.text !== binding, "ownership must not shadow identity, truck or verifier bindings");
+      }
+      if (ts.isBinaryExpression(node) && node.operatorToken.kind >= ts.SyntaxKind.FirstAssignment &&
+          node.operatorToken.kind <= ts.SyntaxKind.LastAssignment) {
+        assert.ok(!writesOwnershipBinding(node.left, binding), "ownership must not overwrite identity, truck or verifier bindings");
+      }
+      if ((ts.isPrefixUnaryExpression(node) || ts.isPostfixUnaryExpression(node)) &&
+          (node.operator === ts.SyntaxKind.PlusPlusToken || node.operator === ts.SyntaxKind.MinusMinusToken)) {
+        assert.ok(!writesOwnershipBinding(node.operand, binding), "ownership must not overwrite identity, truck or verifier bindings");
+      }
+    }
+    ts.forEachChild(node, assertOwnershipBindings);
+  };
+  assertOwnershipBindings(checkoutBlock);
+
+  const callback = transaction.arguments[0];
+  assert.ok(ts.isArrowFunction(callback) || ts.isFunctionExpression(callback));
+  assert.ok(ts.isBlock(callback.body) && callback.body.statements.length === 5,
+    "admission callback must execute its prelude, loop, checkpoint and return without alternate exits");
+  assert.ok(callback.parameters.length === 1 && ts.isIdentifier(callback.parameters[0].name),
+    "admission callback must retain one direct owning transaction client");
+  const owningAdmissionClient = callback.parameters[0].name.text;
+  const executionPrinter = ts.createPrinter({ removeComments: true });
+  const expectedPrelude = ts.createSourceFile("admission-prelude.ts",
+    "const now = new Date(); const inserted: any[] = [];", ts.ScriptTarget.Latest, true);
+  for (let index = 0; index < 2; index += 1) {
+    assert.equal(executionPrinter.printNode(ts.EmitHint.Unspecified, callback.body.statements[index], callback.getSourceFile()),
+      executionPrinter.printNode(ts.EmitHint.Unspecified, expectedPrelude.statements[index], expectedPrelude),
+      "admission callback must initialize its own hold collection before the loop");
+  }
+  const loop = callback.body.statements[2];
+  assert.ok(ts.isForStatement(loop) && loop.initializer && loop.condition && loop.incrementor,
+    "admission loop must execute directly before the recovery checkpoint");
+  assert.equal(loop.initializer.getText().replace(/\s+/g, ""), "letindex=0", "admission loop must start at the first requested date");
+  assert.equal(loop.condition.getText().replace(/\s+/g, ""), "index<sortedDateKeys.length", "admission loop must cover every requested date");
+  assert.equal(loop.incrementor.getText().replace(/\s+/g, ""), "index+=1", "admission loop must advance one requested date at a time");
+  assert.ok(ts.isBlock(loop.statement));
+  const expectedRowPrelude = ts.createSourceFile("admission-row-prelude.ts",
+    "const dateKey = sortedDateKeys[index]; const row = eventsByDate.get(dateKey); if (!row) { throw new Error(\"Missing parking pass date in booking range.\"); }",
+    ts.ScriptTarget.Latest, true);
+  for (let index = 0; index < 3; index += 1) {
+    assert.equal(executionPrinter.printNode(ts.EmitHint.Unspecified, loop.statement.statements[index], loop.getSourceFile()),
+      executionPrinter.printNode(ts.EmitHint.Unspecified, expectedRowPrelude.statements[index], expectedRowPrelude),
+      "admission loop must reach its row lock without an early exit");
+  }
+
+  // Every successful insert must reach the checkpoint through the owning collection.
+  const collectionPrelude = callback.body.statements[1];
+  assert.ok(ts.isVariableStatement(collectionPrelude) && collectionPrelude.declarationList.declarations.length === 1,
+    "admission loop must retain its callback hold collection");
+  const collectionDeclaration = collectionPrelude.declarationList.declarations[0];
+  const producedHoldStatement = loop.statement.statements.at(-3)!;
+  assert.ok(ts.isVariableStatement(producedHoldStatement) &&
+    (producedHoldStatement.declarationList.flags & ts.NodeFlags.Const) &&
+    producedHoldStatement.declarationList.declarations.length === 1,
+    "admission loop must directly bind its terminal inserted hold");
+  const producedHold = producedHoldStatement.declarationList.declarations[0];
+  assert.ok(ts.isArrayBindingPattern(producedHold.name) && producedHold.name.elements.length === 1,
+    "admission loop must bind the one returned hold");
+  const createdBinding = producedHold.name.elements[0];
+  assert.ok(ts.isBindingElement(createdBinding) && ts.isIdentifier(createdBinding.name) &&
+    createdBinding.name.text === "created" && !createdBinding.initializer &&
+    !createdBinding.propertyName && !createdBinding.dotDotDotToken,
+    "admission loop must retain the direct created result without fallback values");
+  assert.ok(producedHold.initializer && ts.isAwaitExpression(producedHold.initializer),
+    "admission loop must await the actual inserted hold");
+  const returningCall = producedHold.initializer.expression;
+  assert.ok(ts.isCallExpression(returningCall) && returningCall.arguments.length === 0 &&
+    ts.isPropertyAccessExpression(returningCall.expression) && returningCall.expression.name.text === "returning",
+    "admission loop must return the inserted hold from its query");
+  const valuesCall = returningCall.expression.expression;
+  assert.ok(ts.isCallExpression(valuesCall) && valuesCall.arguments.length === 1 &&
+    ts.isObjectLiteralExpression(valuesCall.arguments[0]) && ts.isPropertyAccessExpression(valuesCall.expression) &&
+    valuesCall.expression.name.text === "values",
+    "admission loop must return its admitted hold values");
+  const insertCall = valuesCall.expression.expression;
+  assert.ok(ts.isCallExpression(insertCall) && insertCall.arguments.length === 1 &&
+    ts.isIdentifier(insertCall.arguments[0]) && insertCall.arguments[0].text === "eventBookings" &&
+    ts.isPropertyAccessExpression(insertCall.expression) && insertCall.expression.name.text === "insert" &&
+    ts.isIdentifier(insertCall.expression.expression) && ts.isIdentifier(callback.parameters[0].name) &&
+    insertCall.expression.expression.text === callback.parameters[0].name.text,
+    "admission loop must append the hold produced by its owning transaction");
+  const expectedCollectionTail = ts.createSourceFile("admission-collection-tail.ts",
+    'if (!created) { throw new Error("Failed to reserve parking pass hold."); } inserted.push(created);',
+    ts.ScriptTarget.Latest, true);
+  for (let index = 0; index < 2; index += 1) {
+    assert.equal(executionPrinter.printNode(ts.EmitHint.Unspecified, loop.statement.statements[loop.statement.statements.length - 2 + index], loop.getSourceFile()),
+      executionPrinter.printNode(ts.EmitHint.Unspecified, expectedCollectionTail.statements[index], expectedCollectionTail),
+      "admission loop must reject an absent result and unconditionally append each created hold");
+  }
+
+  const directLockStatement = loop.statement.statements[3];
+  assert.ok(ts.isExpressionStatement(directLockStatement) && ts.isAwaitExpression(directLockStatement.expression) &&
+    ts.isCallExpression(directLockStatement.expression.expression),
+    "admission loop must acquire its row lock immediately after the canonical row prelude");
+  const directLockCall = directLockStatement.expression.expression;
+  assert.ok(ts.isPropertyAccessExpression(directLockCall.expression) &&
+    ts.isIdentifier(directLockCall.expression.expression) &&
+    directLockCall.expression.expression.text === owningAdmissionClient &&
+    directLockCall.expression.name.text === "execute",
+    "admission loop must acquire its direct lock through the owning transaction");
+
+  const appendStatement = loop.statement.statements.at(-1)!;
+  const allowedCollectionDeclarations = new Map<string, ts.Node>([
+    ["inserted", collectionDeclaration], ["created", producedHold],
+  ]);
+  const assertCollectionBindings = (node: ts.Node) => {
+    for (const binding of ["inserted", "created", owningAdmissionClient]) {
+      if ((ts.isVariableDeclaration(node) || ts.isParameter(node)) && ownsBinding(node.name, binding)) {
+        assert.ok(allowedCollectionDeclarations.get(binding) === node,
+          "admission loop must not shadow the owning transaction, hold collection or inserted result");
+      }
+      if ((ts.isFunctionDeclaration(node) || ts.isClassDeclaration(node)) && node.name) {
+        assert.ok(node.name.text !== binding, "admission loop must not shadow the owning transaction, hold collection or inserted result");
+      }
+      if (ts.isBinaryExpression(node) && node.operatorToken.kind >= ts.SyntaxKind.FirstAssignment &&
+          node.operatorToken.kind <= ts.SyntaxKind.LastAssignment) {
+        assert.ok(!writesOwnershipBinding(node.left, binding),
+          "admission loop must not reassign or clear the owning transaction, hold collection or inserted result");
+      }
+      if ((ts.isPrefixUnaryExpression(node) || ts.isPostfixUnaryExpression(node)) &&
+          (node.operator === ts.SyntaxKind.PlusPlusToken || node.operator === ts.SyntaxKind.MinusMinusToken)) {
+        assert.ok(!writesOwnershipBinding(node.operand, binding),
+          "admission loop must not reassign or clear the owning transaction, hold collection or inserted result");
+      }
+    }
+    if (ts.isCallExpression(node) &&
+        (ts.isPropertyAccessExpression(node.expression) || ts.isElementAccessExpression(node.expression)) &&
+        writesOwnershipBinding(node.expression, "inserted")) {
+      assert.ok(node.parent === appendStatement && ts.isExpressionStatement(appendStatement) &&
+        appendStatement.expression === node,
+        "admission loop must mutate its hold collection only through the required append");
+    }
+    ts.forEachChild(node, assertCollectionBindings);
+  };
+  assertCollectionBindings(callback.body);
+  const assertNoCollectionEscape = (node: ts.Node) => {
+    assert.ok(!ts.isReturnStatement(node) && !ts.isContinueStatement(node) && !ts.isBreakStatement(node),
+      "admission loop must not skip the required hold append");
+    ts.forEachChild(node, (child) => { if (!ts.isFunctionLike(child)) assertNoCollectionEscape(child); });
+  };
+  assertNoCollectionEscape(loop.statement);
+
+  const checkpoint = callback.body.statements[3];
+  assert.ok(ts.isExpressionStatement(checkpoint) && ts.isAwaitExpression(checkpoint.expression) &&
+    ts.isCallExpression(checkpoint.expression.expression),
+    "admission callback must await its direct recovery checkpoint");
+  const checkpointCall = checkpoint.expression.expression;
+  assert.ok(ts.isIdentifier(checkpointCall.expression) && checkpointCall.expression.text === "recordParkingBookingHolds",
+    "admission callback must record its holds before returning");
+  assert.equal(checkpointCall.arguments.length, 3);
+  assert.ok(ts.isIdentifier(callback.parameters[0].name) && ts.isIdentifier(checkpointCall.arguments[0]) &&
+    checkpointCall.arguments[0].text === callback.parameters[0].name.text,
+    "admission callback must checkpoint through its owning transaction");
+  const checkpointInput = checkpointCall.arguments[2];
+  assert.ok(ts.isObjectLiteralExpression(checkpointInput) && checkpointInput.properties.every((property) =>
+    (ts.isPropertyAssignment(property) || ts.isShorthandPropertyAssignment(property)) && ts.isIdentifier(property.name)),
+    "admission callback must use direct checkpoint fields");
+  const checkpointHolds = checkpointInput.properties.filter((property) => property.name!.getText() === "holds");
+  assert.equal(checkpointHolds.length, 1);
+  assert.ok(ts.isPropertyAssignment(checkpointHolds[0]) && ts.isIdentifier(checkpointHolds[0].initializer) &&
+    checkpointHolds[0].initializer.text === "inserted", "admission callback must checkpoint its actual hold collection");
+
+  const normalizedRequestKeySource = 'String(req.get("Idempotency-Key") || "").trim()';
+  const providerRequestKeySource = "parkingBookingProviderKey(userId, req.path, " + normalizedRequestKeySource + ")";
+  const requireDirectField = (object: ts.ObjectLiteralExpression, field: string): ts.Expression => {
+    const matches: ts.Expression[] = [];
+    for (const property of object.properties) {
+      assert.ok((ts.isPropertyAssignment(property) || ts.isShorthandPropertyAssignment(property)) &&
+        ts.isIdentifier(property.name), "canonical admission must use direct ordinary identity fields");
+      if (property.name.text === field) {
+        matches.push(ts.isPropertyAssignment(property) ? property.initializer : property.name);
+      }
+    }
+    assert.equal(matches.length, 1, "canonical admission must have one direct " + field + " field");
+    return matches[0];
+  };
+  const assertIdentityFields = (object: ts.ObjectLiteralExpression, fields: [string, string][]) => {
+    for (const [field, expectedValue] of fields) {
+      const value = requireDirectField(object, field);
+      const expected = ts.createSourceFile("checkout-identity-expression.ts",
+        "const expected = " + expectedValue + ";", ts.ScriptTarget.Latest, true);
+      const expectedStatement = expected.statements[0];
+      assert.ok(ts.isVariableStatement(expectedStatement));
+      const expectedExpression = expectedStatement.declarationList.declarations[0].initializer!;
+      assert.equal(executionPrinter.printNode(ts.EmitHint.Unspecified, value, value.getSourceFile()),
+        executionPrinter.printNode(ts.EmitHint.Unspecified, expectedExpression, expected),
+        "canonical admission must bind " + field + " to the actual checkpoint and payment identity");
+    }
+  };
+  const expectedRequestKey = ts.createSourceFile("checkout-request-key.ts",
+    "const expected = " + normalizedRequestKeySource + ";", ts.ScriptTarget.Latest, true);
+  const expectedRequestKeyStatement = expectedRequestKey.statements[0];
+  assert.ok(ts.isVariableStatement(expectedRequestKeyStatement));
+  assert.equal(executionPrinter.printNode(ts.EmitHint.Unspecified, checkpointCall.arguments[1], checkpointCall.getSourceFile()),
+    executionPrinter.printNode(ts.EmitHint.Unspecified, expectedRequestKeyStatement.declarationList.declarations[0].initializer!, expectedRequestKey),
+    "canonical admission must checkpoint the normalized actual request reference");
+  assertIdentityFields(checkpointInput, [
+    ["userId", "userId"], ["route", "req.path"], ["passId", "String(event.id)"],
+    ["truckId", "truckId"], ["hostId", "String(host.id)"],
+    ["bookingStartDate", "sortedDateKeys[0]"], ["slotTypes", 'selectedSlotTypes.join(",")'],
+    ["destination", "hostStripeAccountId || null"], ["holds", "inserted"],
+  ]);
+  const checkpointSetup = requireDirectField(checkpointInput, "setup");
+  assert.ok(ts.isObjectLiteralExpression(checkpointSetup),
+    "canonical admission must checkpoint its actual payment setup");
+  assertIdentityFields(checkpointSetup, [
+    ["totalCents", "totalCents"], ["hostPaymentsReady", "hostPaymentsEnabled"],
+  ]);
+  const checkpointBreakdown = requireDirectField(checkpointSetup, "breakdown");
+  assert.ok(ts.isObjectLiteralExpression(checkpointBreakdown),
+    "canonical admission must checkpoint its actual payment breakdown");
+  assertIdentityFields(checkpointBreakdown, [
+    ["hostPrice", "adjustedHostPriceCents"], ["platformFee", "adjustedPlatformFeeCents"],
+    ["creditsApplied", "creditAppliedCents"], ["promoDiscount", "promoDiscountCents"],
+    ["promoCode", "normalizedPromoCode || undefined"],
+  ]);
+
+  const completedHolds = callback.body.statements[4];
+  assert.ok(ts.isReturnStatement(completedHolds) && completedHolds.expression &&
+    ts.isIdentifier(completedHolds.expression) && completedHolds.expression.text === "inserted",
+    "admission callback must return its checkpointed holds");
+
+  const providerCalls: ts.CallExpression[] = [];
+  const findProviderCreation = (node: ts.Node) => {
+    if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) &&
+        node.expression.name.text === "create" && ts.isPropertyAccessExpression(node.expression.expression) &&
+        node.expression.expression.name.text === "paymentIntents" &&
+        ts.isIdentifier(node.expression.expression.expression) && node.expression.expression.expression.text === "stripe") providerCalls.push(node);
+    ts.forEachChild(node, (child) => { if (!ts.isFunctionLike(child)) findProviderCreation(child); });
+  };
+  findProviderCreation(checkoutBlock);
+  assert.equal(providerCalls.length, 1, "canonical admission must precede the actual provider creation");
+  const providerCall = providerCalls[0];
+  assert.ok(ts.isAwaitExpression(providerCall.parent));
+  const providerAssignment = providerCall.parent.parent;
+  assert.ok(ts.isBinaryExpression(providerAssignment) && ts.isIdentifier(providerAssignment.left) &&
+    providerAssignment.left.text === "paymentIntent" && providerAssignment.operatorToken.kind === ts.SyntaxKind.EqualsToken);
+  const providerStatement = providerAssignment.parent;
+  assert.ok(ts.isExpressionStatement(providerStatement) && ts.isBlock(providerStatement.parent));
+  const providerTry = providerStatement.parent.parent;
+  assert.ok(ts.isTryStatement(providerTry) && providerTry.tryBlock === providerStatement.parent &&
+    providerTry.parent === checkoutBlock &&
+    checkoutBlock.statements.indexOf(admissionTry) < checkoutBlock.statements.indexOf(providerTry),
+    "canonical admission must execute before the later sibling provider-creation path");
+  const admissionIndex = checkoutBlock.statements.indexOf(admissionTry);
+  const providerIndex = checkoutBlock.statements.indexOf(providerTry);
+  assert.equal(providerIndex, admissionIndex + 4,
+    "canonical admission must reach provider setup without an intervening terminal statement");
+  const bypassBranch = checkoutBlock.statements[admissionIndex + 1];
+  assert.ok(ts.isIfStatement(bypassBranch) && ts.isIdentifier(bypassBranch.expression) &&
+    bypassBranch.expression.text === "bypassStripe" && !bypassBranch.elseStatement &&
+    ts.isBlock(bypassBranch.thenStatement),
+    "canonical admission must retain only the explicit bypass branch before payment setup");
+  const stripeAvailability = checkoutBlock.statements[admissionIndex + 2];
+  const expectedStripeAvailability = ts.createSourceFile("stripe-availability.ts",
+    'if (!stripe) { return res.status(500).json({ message: "Stripe is not configured" }); }',
+    ts.ScriptTarget.Latest, true);
+  assert.equal(executionPrinter.printNode(ts.EmitHint.Unspecified, stripeAvailability, handler.getSourceFile()),
+    executionPrinter.printNode(ts.EmitHint.Unspecified, expectedStripeAvailability.statements[0], expectedStripeAvailability),
+    "canonical admission must return early only when its provider is unavailable");
+  const intentBindingStatement = checkoutBlock.statements[admissionIndex + 3];
+  assert.ok(ts.isVariableStatement(intentBindingStatement) &&
+    (intentBindingStatement.declarationList.flags & ts.NodeFlags.Let) &&
+    intentBindingStatement.declarationList.declarations.length === 1,
+    "canonical admission must retain its direct payment result binding");
+  const intentBinding = intentBindingStatement.declarationList.declarations[0];
+  assert.ok(ts.isIdentifier(intentBinding.name) && intentBinding.name.text === "paymentIntent" && !intentBinding.initializer,
+    "canonical admission must assign the actual provider result without a prior substitute");
+  assert.equal(providerTry.tryBlock.statements.length, 3,
+    "canonical admission must reach provider creation without an early setup return");
+  assert.ok(providerTry.tryBlock.statements[2] === providerStatement,
+    "canonical admission must execute provider creation as the terminal setup statement");
+  const paramsStatement = providerTry.tryBlock.statements[0];
+  assert.ok(ts.isVariableStatement(paramsStatement) &&
+    (paramsStatement.declarationList.flags & ts.NodeFlags.Const) &&
+    paramsStatement.declarationList.declarations.length === 1,
+    "canonical admission must construct its direct provider parameters");
+  const paramsDeclaration = paramsStatement.declarationList.declarations[0];
+  assert.ok(ts.isIdentifier(paramsDeclaration.name) && paramsDeclaration.name.text === "intentParams" &&
+    paramsDeclaration.initializer && ts.isObjectLiteralExpression(paramsDeclaration.initializer),
+    "canonical admission must create payment from its own direct parameter object");
+  const params = paramsDeclaration.initializer;
+  assertIdentityFields(params, [["amount", "totalCents"], ["currency", '"usd"']]);
+  const metadata = requireDirectField(params, "metadata");
+  assert.ok(ts.isObjectLiteralExpression(metadata),
+    "canonical admission must bind direct provider metadata to its checkpoint");
+  assertIdentityFields(metadata, [
+    ["bookingRequestKey", providerRequestKeySource], ["passId", "event.id"], ["hostId", "host.id"],
+    ["truckId", "truckId"], ["userId", "userId"], ["slotTypes", 'selectedSlotTypes.join(",")'],
+    ["bookingDays", "bookingDays.toString()"], ["bookingStartDate", "sortedDateKeys[0]"],
+    ["hostPriceCents", "adjustedHostPriceCents.toString()"],
+    ["platformFeeCents", "adjustedPlatformFeeCents.toString()"], ["totalCents", "totalCents.toString()"],
+    ["creditAppliedCents", "creditAppliedCents.toString()"],
+    ["bookingPromoCode", 'normalizedPromoCode || ""'],
+    ["bookingPromoDiscountCents", "promoDiscountCents.toString()"],
+  ]);
+  const expectedDestination = ts.createSourceFile("checkout-provider-destination.ts",
+    "if (hostStripeAccountId) { intentParams.application_fee_amount = adjustedPlatformFeeCents; intentParams.transfer_data = { destination: hostStripeAccountId }; }",
+    ts.ScriptTarget.Latest, true);
+  assert.equal(executionPrinter.printNode(ts.EmitHint.Unspecified, providerTry.tryBlock.statements[1], handler.getSourceFile()),
+    executionPrinter.printNode(ts.EmitHint.Unspecified, expectedDestination.statements[0], expectedDestination),
+    "canonical admission must preserve the actual provider fee and destination without a setup escape");
+  assert.ok(providerCall.arguments.length === 2 && ts.isIdentifier(providerCall.arguments[0]) &&
+    providerCall.arguments[0].text === "intentParams" && ts.isObjectLiteralExpression(providerCall.arguments[1]),
+    "canonical admission must create payment from its bound parameters and options");
+  assertIdentityFields(providerCall.arguments[1], [["idempotencyKey", providerRequestKeySource]]);
+
+};
+assertExecutedAdmission(admissionTransaction, canonicalParkingBooking.handler);
+const executionMutations: [string, string, string][] = [
+  ["conditional admission", "insertedHolds = await db.transaction", "if (false) insertedHolds = await db.transaction"],
+  ["early callback return", "const inserted: any[] = [];", "const inserted: any[] = []; return inserted;"],
+  ["disabled date loop", "index < sortedDateKeys.length;", "index < sortedDateKeys.length && false;"],
+  ["skipped checkpoint", "await recordParkingBookingHolds(", "if (false) await recordParkingBookingHolds("],
+  ["omitted created hold", "inserted.push(created);", ""],
+  ["conditional created hold", "inserted.push(created);", "if (false) inserted.push(created);"],
+  ["skipped created hold", "inserted.push(created);", "continue; inserted.push(created);"],
+  ["wrong hold collection", "inserted.push(created);", "insertedHolds.push(created);"],
+  ["wrong appended hold", "inserted.push(created);", "inserted.push({});"],
+  ["fallback created hold", "const [created] = await tx", "const [created = {}] = await tx"],
+  ["terminal return before provider setup", "let paymentIntent: Stripe.PaymentIntent;", 'return res.status(503).json({ message: "stopped" }); let paymentIntent: Stripe.PaymentIntent;'],
+  ["widened payment bypass", "if (bypassStripe) {", "if (bypassStripe || true) {"],
+  ["bypass else return", "if (!stripe) {", 'else { return res.status(503).json({ message: "stopped" }); } if (!stripe) {'],
+  ["terminal return inside provider setup", "const intentParams: Stripe.PaymentIntentCreateParams = {", 'return res.status(503).json({ message: "stopped" }); const intentParams: Stripe.PaymentIntentCreateParams = {'],
+
+
+];
+const assertRejectedExecutionMutation = (name: string, mutatedSource: string) => {
+  const parsed = ts.createSourceFile("admission-execution-negative.ts",
+    "const checkout = " + mutatedSource + ";", ts.ScriptTarget.Latest, true);
+  const declarationStatement = parsed.statements[0];
+  assert.ok(ts.isVariableStatement(declarationStatement));
+  const mutatedHandler = declarationStatement.declarationList.declarations[0].initializer!;
+  assert.ok(ts.isArrowFunction(mutatedHandler) || ts.isFunctionExpression(mutatedHandler));
+  const mutatedTransactions: ts.CallExpression[] = [];
+  const findMutatedAdmission = (node: ts.Node) => {
+    if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) &&
+        ts.isIdentifier(node.expression.expression) && node.expression.expression.text === "db" &&
+        node.expression.name.text === "transaction") mutatedTransactions.push(node);
+    ts.forEachChild(node, (child) => { if (!ts.isFunctionLike(child)) findMutatedAdmission(child); });
+  };
+  assert.ok(ts.isBlock(mutatedHandler.body));
+  findMutatedAdmission(mutatedHandler.body);
+  assert.equal(mutatedTransactions.length, 1);
+  assert.throws(() => assertExecutedAdmission(mutatedTransactions[0], mutatedHandler),
+    /canonical admission must|admission callback must|admission loop must|ownership must/, name);
+};
+for (const [name, original, replacement] of executionMutations) {
+  assert.equal(canonicalParkingBookingRoute.split(original).length, 2, "execution regression fixture must replace one actual source fragment");
+  assertRejectedExecutionMutation(name, canonicalParkingBookingRoute.replace(original, replacement));
+}
+const ownershipMutations: [string, RegExp, string][] = [
+  ["request-body ownership bypass", /const hasManageParkingPass = await/, "const hasManageParkingPass = req.body?.skipOwnership === true || await"],
+  ["unawaited ownership promise", /const hasManageParkingPass = await/, "const hasManageParkingPass ="],
+  ["wrong ownership truck", /storage\.verifyRestaurantOwnership\(\s*truckId,/, "storage.verifyRestaurantOwnership(req.body.otherTruckId,"],
+  ["wrong ownership user", /storage\.verifyRestaurantOwnership\(\s*truckId,\s*userId,/, "storage.verifyRestaurantOwnership(truckId, req.body.userId,"],
+  ["wrong ownership capability", /storage\.verifyRestaurantOwnership\(\s*truckId,\s*userId,\s*"manageParkingPass"/, 'storage.verifyRestaurantOwnership(truckId, userId, "manageMenu"'],
+  ["disabled ownership denial", /if \(!truck \|\| !hasManageParkingPass\)/, "if (false && (!truck || !hasManageParkingPass))"],
+  ["nonterminal ownership denial", /return\s+res\.status\(403\)\.json\(\{\s*message:\s*"Not authorized"\s*\}\);/, 'res.status(403).json({ message: "Not authorized" });'],
+  ["request-body principal", /const userId = req\.user\.id;/, "const userId = req.body.userId;"],
+  ["default requested truck", /const \{\s*truckId,/, 'const { truckId = "fallback-truck",'],
+  ["shadowed verifier in body destructure", /const \{\s*truckId,/, "const { storage = { verifyRestaurantOwnership: async () => true }, truckId,"],
+  ["shadowed admission principal", /db\.transaction\(async \(tx: any\) => \{/, "db.transaction(async (tx: any) => { const userId = req.body.userId;"],
+  ["overwritten ownership verifier", /const userId = req\.user\.id;/, "const userId = req.user.id; storage.verifyRestaurantOwnership = async () => true;"],
+  ["overwritten authenticated principal", /const userId = req\.user\.id;/, "req.user.id = req.body.userId; const userId = req.user.id;"],
+  ["overwritten owning transaction factory", /const userId = req\.user\.id;/, "const userId = req.user.id; db.transaction = (callback: any) => callback(db);"],
+  ["forced payment bypass flag", /const bypassStripe =[\s\S]*?;/, "const bypassStripe = true;"],
+  ["shadowed identity coercion", /const testModeEnabled =/, 'const String = (...args: any[]) => "wrong-pass"; const testModeEnabled ='],
+  ["shadowed bypass environment", /const testModeEnabled =/, 'const process: any = { env: { MEALSCOUT_BYPASS_STRIPE: "true" } }; const testModeEnabled ='],
+
+
+];
+for (const [name, original, replacement] of ownershipMutations) {
+  assert.equal(canonicalParkingBookingRoute.split(original).length, 2, "ownership regression fixture must replace one actual source fragment");
+  assertRejectedExecutionMutation(name, canonicalParkingBookingRoute.replace(original, replacement));
+}
+
+
+const collectionPreludePattern = /if \(!row\) \{\s*throw new Error\("Missing parking pass date in booking range\."\);\s*\}/;
+const collectionMutations: [string, RegExp, (source: string) => string][] = [
+  ["missing returned inserted hold", /const \[created\] = await tx[\s\S]*?\.returning\(\);/,
+    (producer) => producer.replace(/\.returning\(\);$/, ";")],
+  ["shadowed callback hold collection", collectionPreludePattern,
+    (prelude) => prelude + " const inserted: any[] = [];"],
+  ["cleared callback hold collection", collectionPreludePattern,
+    (prelude) => prelude + " inserted.length = 0;"],
+  ["mutated callback hold collection", collectionPreludePattern,
+    (prelude) => prelude + " inserted.splice(0);"],
+  ["indirectly cleared callback hold collection", collectionPreludePattern,
+    (prelude) => prelude + " inserted.splice.call(inserted, 0);"],
+  ["overwritten transaction lock method", collectionPreludePattern,
+    (prelude) => prelude + " tx.execute = (...args: any[]) => db.execute(...args);"],
+  ["overwritten indexed transaction lock method", collectionPreludePattern,
+    (prelude) => prelude + ' tx["execute"] = (...args: any[]) => db.execute(...args);'],
+  ["replaced transaction client", collectionPreludePattern,
+    (prelude) => prelude + " tx = db;"],
+
+];
+for (const [name, original, replacement] of collectionMutations) {
+  assert.equal(canonicalParkingBookingRoute.split(original).length, 2,
+    "collection regression fixture must replace one actual source fragment");
+  assertRejectedExecutionMutation(name, canonicalParkingBookingRoute.replace(original, replacement));
+}
+
+const checkpointIdentityPattern = /await recordParkingBookingHolds\([\s\S]*?\}\);/;
+const providerIdentityPattern = /const intentParams: Stripe\.PaymentIntentCreateParams = \{[\s\S]*?\n\s*\};/;
+const providerOptionsPattern = /paymentIntent = await stripe\.paymentIntents\.create\([\s\S]*?\}\);/;
+const identityMutations: [string, RegExp, (source: string) => string][] = [
+  ["checkpoint wrong pass", checkpointIdentityPattern, (source) => source.replace(/passId:\s*String\(event\.id\)/, 'passId: "wrong-pass"')],
+  ["checkpoint wrong request reference", checkpointIdentityPattern, (source) => source.replace(/String\(\s*req\.get\("Idempotency-Key"\)\s*\|\|\s*""\s*\)\.trim\(\)/, '"wrong-reference"')],
+  ["checkpoint wrong user", checkpointIdentityPattern, (source) => source.replace(/\buserId,/, "userId: req.body.userId,")],
+  ["checkpoint wrong truck", checkpointIdentityPattern, (source) => source.replace(/\btruckId,/, "truckId: req.body.otherTruckId,")],
+  ["checkpoint wrong host", checkpointIdentityPattern, (source) => source.replace(/hostId:\s*String\(host\.id\)/, 'hostId: "wrong-host"')],
+  ["checkpoint wrong start date", checkpointIdentityPattern, (source) => source.replace(/bookingStartDate:\s*sortedDateKeys\[0\]/, 'bookingStartDate: "wrong-date"')],
+  ["checkpoint wrong slots", checkpointIdentityPattern, (source) => source.replace(/slotTypes:\s*selectedSlotTypes\.join\(","\)/, 'slotTypes: "wrong-slots"')],
+  ["checkpoint wrong destination", checkpointIdentityPattern, (source) => source.replace(/destination:\s*hostStripeAccountId\s*\|\|\s*null/, 'destination: "wrong-destination"')],
+  ["checkpoint duplicate pass", checkpointIdentityPattern, (source) => source.replace(/passId:\s*String\(event\.id\),/, 'passId: "wrong-pass", passId: String(event.id),')],
+  ["provider metadata wrong pass", providerIdentityPattern, (source) => source.replace(/passId:\s*event\.id/, 'passId: "wrong-pass"')],
+  ["provider metadata wrong request key", providerIdentityPattern, (source) => source.replace(/bookingRequestKey:\s*parkingBookingProviderKey\([\s\S]*?\.trim\(\)\)/, 'bookingRequestKey: "wrong-reference"')],
+  ["provider wrong amount", providerIdentityPattern, (source) => source.replace(/amount:\s*totalCents/, "amount: 1")],
+  ["provider options wrong request key", providerOptionsPattern, (source) => source.replace(/idempotencyKey:\s*parkingBookingProviderKey\([\s\S]*?\.trim\(\)\)/, 'idempotencyKey: "wrong-reference"')],
+];
+for (const [name, original, replacement] of identityMutations) {
+  assert.equal(canonicalParkingBookingRoute.split(original).length, 2,
+    "identity regression fixture must replace one actual source fragment");
+  assertRejectedExecutionMutation(name, canonicalParkingBookingRoute.replace(original, replacement));
+}
+console.log("Canonical checkout execution, ownership, collection and identity regressions: PASS");
+
+
+
+const admissionCallback = admissionTransaction.arguments[0];
+assert.ok(ts.isArrowFunction(admissionCallback) || ts.isFunctionExpression(admissionCallback));
+assert.equal(admissionCallback.parameters.length, 1);
+assert.ok(ts.isIdentifier(admissionCallback.parameters[0].name));
+const transactionClient = admissionCallback.parameters[0].name.text;
+assert.ok(ts.isBlock(admissionCallback.body));
+const bindsClient = (name: ts.BindingName, binding = transactionClient): boolean => ts.isIdentifier(name)
+  ? name.text === binding
+  : name.elements.some((element) => ts.isBindingElement(element) && bindsClient(element.name, binding));
+const writesClient = (expression: ts.Expression, binding = transactionClient): boolean => {
+  if (ts.isIdentifier(expression)) return expression.text === binding;
+  if (ts.isPropertyAccessExpression(expression) || ts.isElementAccessExpression(expression)) {
+    return writesClient(expression.expression, binding);
+  }
+  if (ts.isParenthesizedExpression(expression)) return writesClient(expression.expression, binding);
+  if (ts.isArrayLiteralExpression(expression)) return expression.elements.some((element) =>
+    ts.isSpreadElement(element) ? writesClient(element.expression, binding) : writesClient(element, binding));
+  if (ts.isObjectLiteralExpression(expression)) return expression.properties.some((property) =>
+    ts.isShorthandPropertyAssignment(property) ? property.name.text === binding :
+    ts.isPropertyAssignment(property) ? writesClient(property.initializer, binding) :
+    ts.isSpreadAssignment(property) && writesClient(property.expression, binding));
+  return false;
+};
+const assertTransactionClientBinding = (node: ts.Node) => {
+  if (ts.isVariableDeclaration(node) || ts.isParameter(node)) {
+    assert.ok(!bindsClient(node.name), "the admission callback client must not be redeclared or shadowed");
+  }
+  if (ts.isBinaryExpression(node) && node.operatorToken.kind >= ts.SyntaxKind.FirstAssignment &&
+      node.operatorToken.kind <= ts.SyntaxKind.LastAssignment) {
+    assert.ok(!writesClient(node.left), "the admission callback client must not be reassigned");
+  }
+  ts.forEachChild(node, assertTransactionClientBinding);
+};
+assertTransactionClientBinding(admissionCallback.body);
+const assertAssessmentBinding = (node: ts.Node) => {
+  const protectedBindings = ["assessParkingPassTruckEligibility", "Number", "Boolean", "Math"];
+  for (const assessor of protectedBindings) {
+  if (ts.isVariableDeclaration(node) || ts.isParameter(node)) {
+    assert.ok(!bindsClient(node.name, assessor), "the current eligibility assessor must not be locally shadowed");
+  }
+  if ((ts.isFunctionDeclaration(node) || ts.isClassDeclaration(node)) && node.name) assert.notEqual(node.name.text, assessor);
+  if (ts.isBinaryExpression(node) && node.operatorToken.kind >= ts.SyntaxKind.FirstAssignment &&
+      node.operatorToken.kind <= ts.SyntaxKind.LastAssignment) {
+    assert.ok(!writesClient(node.left, assessor), "the current eligibility assessor must not be reassigned");
+  }
+  }
+  ts.forEachChild(node, assertAssessmentBinding);
+};
+assertAssessmentBinding(canonicalParkingBooking.handler.body);
+const admissionLoops = admissionCallback.body.statements.filter(ts.isForStatement);
+assert.equal(admissionLoops.length, 1, "admission must bind the per-date loop inside its owning transaction");
+const admissionLoop = admissionLoops[0];
+assert.match(admissionLoop.condition!.getText(), /index < sortedDateKeys\.length/);
+assert.ok(ts.isBlock(admissionLoop.statement));
+const admissionStatements = admissionLoop.statement.statements;
+const admissionPrinter = ts.createPrinter({ removeComments: true });
+const admissionLoopSource = admissionPrinter.printNode(ts.EmitHint.Unspecified, admissionLoop, admissionLoop.getSourceFile());
+const eventLocks = admissionStatements.flatMap((statement, index) => {
+  if (!ts.isExpressionStatement(statement) || !ts.isAwaitExpression(statement.expression)) return [];
+  const call = statement.expression.expression;
+  if (!ts.isCallExpression(call) || !ts.isPropertyAccessExpression(call.expression) ||
+      !ts.isIdentifier(call.expression.expression) || call.expression.expression.text !== transactionClient ||
+      call.expression.name.text !== "execute") return [];
+  return [{ call, index }];
+});
+assert.equal(eventLocks.length, 1, "the event lock must be awaited through the admission transaction client");
+const eventLock = eventLocks[0];
+assert.equal(eventLock.call.arguments.length, 1);
+const eventLockQuery = admissionPrinter.printNode(ts.EmitHint.Unspecified, eventLock.call.arguments[0], eventLock.call.getSourceFile());
+assert.match(eventLockQuery, /^sql\s*`select \$\{events\.id\} from \$\{events\} where \$\{events\.id\} = \$\{row\.id\} for update`$/i,
+  "the admission transaction must acquire the exact event-row FOR UPDATE lock");
+const admissionDeclaration = (name: string) => {
+  const declarations = admissionStatements.flatMap((statement, index) => {
+    if (!ts.isVariableStatement(statement)) return [];
+    return statement.declarationList.declarations.filter((declaration) => {
+      if (ts.isIdentifier(declaration.name)) return declaration.name.text === name;
+      return ts.isArrayBindingPattern(declaration.name) && declaration.name.elements.some((element) =>
+        ts.isBindingElement(element) && ts.isIdentifier(element.name) && element.name.text === name);
+    }).map((declaration) => ({ declaration, index }));
+  });
+  assert.equal(declarations.length, 1, `admission must directly bind ${name} in its transaction loop`);
+  return declarations[0];
+};
+const currentTruckRead = admissionDeclaration("currentTruck");
+const currentUserRead = admissionDeclaration("currentUser");
+const currentEligibilityRead = admissionDeclaration("currentEligibility");
+const currentEligibilityInitializer = currentEligibilityRead.declaration.initializer!;
+assert.ok(ts.isConditionalExpression(currentEligibilityInitializer),
+  "current eligibility must be assessed from the locked truck and user reads");
+const currentEligibilityCondition = currentEligibilityInitializer.condition;
+assert.ok(ts.isBinaryExpression(currentEligibilityCondition) &&
+  currentEligibilityCondition.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken &&
+  ts.isIdentifier(currentEligibilityCondition.left) && currentEligibilityCondition.left.text === "currentTruck" &&
+  ts.isIdentifier(currentEligibilityCondition.right) && currentEligibilityCondition.right.text === "currentUser");
+const currentAssessment = currentEligibilityInitializer.whenTrue;
+assert.ok(ts.isCallExpression(currentAssessment) && ts.isIdentifier(currentAssessment.expression) &&
+  currentAssessment.expression.text === "assessParkingPassTruckEligibility",
+  "current eligibility must call the assessment directly, without a preflight fallback");
+assert.equal(currentAssessment.arguments.length, 1);
+const currentAssessmentInput = currentAssessment.arguments[0];
+assert.ok(ts.isObjectLiteralExpression(currentAssessmentInput));
+assert.equal(currentAssessmentInput.properties.length, 2);
+for (const [field, binding] of [["user", "currentUser"], ["truck", "currentTruck"]]) {
+  assert.equal(currentAssessmentInput.properties.filter((property) => ts.isPropertyAssignment(property) &&
+    ts.isIdentifier(property.name) && property.name.text === field &&
+    ts.isIdentifier(property.initializer) && property.initializer.text === binding).length, 1,
+    `current eligibility ${field} must use its locked transaction read`);
+}
+assert.equal(currentEligibilityInitializer.whenFalse.kind, ts.SyntaxKind.NullKeyword,
+  "missing locked eligibility reads must fail closed");
+const holdInsert = admissionDeclaration("created");
+const awaitedClientMethod = (initializer: ts.Expression, method: string) => {
+  assert.ok(ts.isAwaitExpression(initializer), "the admission operation must be awaited");
+  let call = initializer.expression;
+  while (ts.isCallExpression(call) && ts.isPropertyAccessExpression(call.expression)) {
+    if (ts.isIdentifier(call.expression.expression) && call.expression.expression.text === transactionClient &&
+        call.expression.name.text === method) return call;
+    call = call.expression.expression;
+  }
+  assert.fail(`admission ${method} must use the owning transaction receiver chain`);
+};
+const compactAdmissionExpression = (expression: ts.Expression) => {
+  const source = admissionPrinter.printNode(ts.EmitHint.Unspecified, expression, expression.getSourceFile());
+  const scanner = ts.createScanner(ts.ScriptTarget.Latest, true, ts.LanguageVariant.Standard, source);
+  let compact = "";
+  for (let token = scanner.scan(); token !== ts.SyntaxKind.EndOfFileToken; token = scanner.scan()) compact += scanner.getTokenText();
+  return compact.replace(/,\}/g, "}").replace(/,\)/g, ")");
+};
+const lockedEligibilityReads = [
+  { read: currentTruckRead, name: "currentTruck", query: `await ${transactionClient}.select({businessType:restaurants.businessType,isFoodTruck:restaurants.isFoodTruck,insuranceVerified:restaurants.insuranceVerified,insuranceExpiresAt:restaurants.insuranceExpiresAt}).from(restaurants).where(eq(restaurants.id,truckId)).for("share")` },
+  { read: currentUserRead, name: "currentUser", query: `await ${transactionClient}.select({userType:users.userType,emailVerified:users.emailVerified}).from(users).where(eq(users.id,userId)).for("share")` },
+];
+for (const { read, name, query } of lockedEligibilityReads) {
+  assert.ok(read.declaration.parent.flags & ts.NodeFlags.Const, "locked eligibility reads must remain const");
+  assert.ok(ts.isArrayBindingPattern(read.declaration.name) && read.declaration.name.elements.length === 1);
+  const binding = read.declaration.name.elements[0];
+  assert.ok(ts.isBindingElement(binding) && ts.isIdentifier(binding.name) && binding.name.text === name &&
+    !binding.initializer && !binding.dotDotDotToken, "locked eligibility reads must not fall back to preflight values");
+  awaitedClientMethod(read.declaration.initializer!, "select");
+  assert.equal(compactAdmissionExpression(read.declaration.initializer!), query.replace(/\s+/g, ""),
+    `locked ${name} must select current verification fields for its exact ID under a share lock`);
+}
+assert.ok(currentEligibilityRead.declaration.parent.flags & ts.NodeFlags.Const);
+assert.ok(ts.isIdentifier(currentEligibilityRead.declaration.name), "current eligibility must retain its direct const binding");
+const holdInsertCall = awaitedClientMethod(holdInsert.declaration.initializer!, "insert");
+assert.ok(ts.isIdentifier(holdInsertCall.arguments[0]) && holdInsertCall.arguments[0].text === "eventBookings",
+  "the owning admission transaction must insert the booking hold");
+assert.ok(eventLock.index < currentTruckRead.index && currentTruckRead.index < currentUserRead.index &&
+  currentUserRead.index < currentEligibilityRead.index && currentEligibilityRead.index < holdInsert.index,
+  "admission must acquire its lock before reading and rechecking current eligibility, before inserting holds");
+const eligibilityDenials = admissionStatements.flatMap((statement, index) => {
+  if (!ts.isIfStatement(statement) || !ts.isBlock(statement.thenStatement)) return [];
+  if (statement.thenStatement.statements.length !== 1) return [];
+  const condition = admissionPrinter.printNode(ts.EmitHint.Unspecified, statement.expression, statement.getSourceFile());
+  const requiredCondition = "!currentEligibility || !currentEligibility.isTruckProfile || !currentEligibility.roleAllowed || (!currentEligibility.shouldBypassVerificationGate && (!currentEligibility.emailVerified || !currentEligibility.storedInsuranceValid))";
+  if (condition.replace(/\s+/g, "") !== requiredCondition.replace(/\s+/g, "")) return [];
+  const throws = statement.thenStatement.statements.filter(ts.isThrowStatement);
+  if (throws.length !== 1 || !throws[0].expression || !ts.isCallExpression(throws[0].expression)) return [];
+  const error = throws[0].expression;
+  if (!ts.isPropertyAccessExpression(error.expression) || !ts.isIdentifier(error.expression.expression) ||
+      error.expression.expression.text !== "Object" || error.expression.name.text !== "assign") return [];
+  const fields = error.arguments[1];
+  if (!fields || !ts.isObjectLiteralExpression(fields) || !fields.properties.some((property) =>
+    ts.isPropertyAssignment(property) && ts.isIdentifier(property.name) && property.name.text === "code" &&
+    ts.isStringLiteral(property.initializer) && property.initializer.text === "TRUCK_ELIGIBILITY_CHANGED")) return [];
+  return [index];
+});
+assert.equal(eligibilityDenials.length, 1, "current eligibility must have one fail-closed transaction denial");
+assert.ok(currentTruckRead.index + 1 === currentUserRead.index &&
+  currentUserRead.index + 1 === currentEligibilityRead.index &&
+  currentEligibilityRead.index + 1 === eligibilityDenials[0],
+  "locked eligibility reads, assessment and denial must remain consecutive without intervening field mutations");
+assert.ok(currentEligibilityRead.index < eligibilityDenials[0] && eligibilityDenials[0] < holdInsert.index,
+  "current qualification denial must execute after the locked recheck and before hold insertion");
+const lockedEventRead = admissionDeclaration("lockedRow");
+const capacityCounts = admissionDeclaration("counts");
+const reservedCountRead = admissionDeclaration("reservedCount");
+const hardCapRead = admissionDeclaration("hardCapEnabled");
+const maxSpotsRead = admissionDeclaration("maxSpots");
+const hostCentsRead = admissionDeclaration("hostCents");
+const feeCentsRead = admissionDeclaration("feeCents");
+const canonicalCapacityExpressions = [
+  { read: lockedEventRead, expression: `await${transactionClient}.select().from(events).where(eq(events.id,row.id)).limit(1)` },
+  { read: capacityCounts, expression: `await${transactionClient}.select({count:sql<number>\`count(*)\`}).from(eventBookings).where(and(eq(eventBookings.eventId,row.id),inArray(eventBookings.status,["confirmed","pending"])))` },
+  { read: reservedCountRead, expression: "Number(counts[0]?.count||0)" },
+  { read: hardCapRead, expression: "Boolean(lockedRow.hardCapEnabled)" },
+  { read: maxSpotsRead, expression: "Math.max(1,Number(lockedRow.maxTrucks??1)||1)" },
+  { read: hostCentsRead, expression: "hostSplit[index]??0" },
+  { read: feeCentsRead, expression: "platformSplit[index]??0" },
+];
+for (const { read, expression } of canonicalCapacityExpressions) {
+  assert.ok(read.declaration.parent.flags & ts.NodeFlags.Const, "capacity producers must retain direct const bindings");
+  assert.equal(compactAdmissionExpression(read.declaration.initializer!), expression,
+    "capacity admission must use the exact locked event row and same-transaction active booking count");
+}
+assert.ok(ts.isArrayBindingPattern(lockedEventRead.declaration.name) && lockedEventRead.declaration.name.elements.length === 1);
+const lockedEventBinding = lockedEventRead.declaration.name.elements[0];
+assert.ok(ts.isBindingElement(lockedEventBinding) && ts.isIdentifier(lockedEventBinding.name) &&
+  lockedEventBinding.name.text === "lockedRow" && !lockedEventBinding.initializer && !lockedEventBinding.dotDotDotToken,
+  "the locked event read must not fall back to a preflight row");
+for (const read of [capacityCounts, reservedCountRead, hardCapRead, maxSpotsRead, hostCentsRead, feeCentsRead]) {
+  assert.ok(ts.isIdentifier(read.declaration.name), "capacity values must retain their direct bindings");
+}
+const capacityDenials = admissionStatements.flatMap((statement, index) => {
+  if (!ts.isIfStatement(statement) || !ts.isBlock(statement.thenStatement) ||
+      compactAdmissionExpression(statement.expression) !== "hardCapEnabled&&reservedCount>=maxSpots") return [];
+  return [{ statement, index }];
+});
+assert.equal(capacityDenials.length, 1, "capacity admission must have one effective hard-cap denial");
+const capacityDenial = capacityDenials[0];
+assert.ok(ts.isBlock(capacityDenial.statement.thenStatement));
+const expectedCapacityDenial = ts.createSourceFile("capacity-denial-contract.ts", "const err: any = new Error(\"This parking pass is fully booked.\");\nerr.code = \"FULLY_BOOKED\";\nthrow err;", ts.ScriptTarget.Latest, true);
+assert.deepEqual(capacityDenial.statement.thenStatement.statements.map((statement) =>
+  admissionPrinter.printNode(ts.EmitHint.Unspecified, statement, statement.getSourceFile())),
+  expectedCapacityDenial.statements.map((statement) => admissionPrinter.printNode(ts.EmitHint.Unspecified, statement, expectedCapacityDenial)),
+  "capacity denial must construct its FULLY_BOOKED error and throw it without unreachable or alternate exits");
+const rowAvailability = admissionStatements[lockedEventRead.index + 1];
+assert.ok(ts.isIfStatement(rowAvailability) && ts.isBlock(rowAvailability.thenStatement));
+const expectedRowAvailability = ts.createSourceFile("locked-row-policy-contract.ts", "if (!lockedRow || lockedRow.hostId !== row.hostId ||\n    lockedRow.status !== \"open\" || !lockedRow.requiresPayment ||\n    new Date(lockedRow.date).getTime() !== new Date(row.date).getTime() ||\n    selectedSlotTypes.some((slot) => !isSlotWithinHours(slot, lockedRow.startTime, lockedRow.endTime))) {\n  throw Object.assign(new Error(\"This parking pass changed while booking. Please refresh.\"), {\n    code: \"BOOKING_AVAILABILITY_CHANGED\",\n  });\n}", ts.ScriptTarget.Latest, true).statements[0];
+assert.equal(admissionPrinter.printNode(ts.EmitHint.Unspecified, rowAvailability, rowAvailability.getSourceFile()),
+  admissionPrinter.printNode(ts.EmitHint.Unspecified, expectedRowAvailability, expectedRowAvailability.getSourceFile()),
+  "the locked event policy must fail closed without mutating its capacity fields");
+assert.ok(eventLock.index + 1 === lockedEventRead.index && lockedEventRead.index + 2 === currentTruckRead.index &&
+  eligibilityDenials[0] + 1 === capacityCounts.index && capacityCounts.index + 1 === reservedCountRead.index &&
+  reservedCountRead.index + 1 === hardCapRead.index && hardCapRead.index + 1 === maxSpotsRead.index &&
+  maxSpotsRead.index + 1 === capacityDenial.index && capacityDenial.index + 1 === hostCentsRead.index &&
+  hostCentsRead.index + 1 === feeCentsRead.index && feeCentsRead.index + 1 === holdInsert.index,
+  "the locked policy, active counts, effective capacity denial and admitted hold must retain their uninterrupted pipeline");
+const holdValueCalls: ts.CallExpression[] = [];
+let holdChain = (holdInsert.declaration.initializer! as ts.AwaitExpression).expression;
+while (ts.isCallExpression(holdChain) && ts.isPropertyAccessExpression(holdChain.expression)) {
+  if (holdChain.expression.name.text === "values") holdValueCalls.push(holdChain);
+  holdChain = holdChain.expression.expression;
+}
+assert.equal(holdValueCalls.length, 1);
+assert.equal(holdValueCalls[0].arguments.length, 1);
+const holdValues = holdValueCalls[0].arguments[0];
+assert.ok(ts.isObjectLiteralExpression(holdValues));
+assert.ok(holdValues.properties.every((property) =>
+  (ts.isPropertyAssignment(property) || ts.isShorthandPropertyAssignment(property)) && ts.isIdentifier(property.name)),
+  "admitted holds must use direct identifier fields without spreads, computed keys, accessors or methods");
+for (const [field, value] of [["eventId", "row.id"], ["status", '"pending"']]) {
+  const fields = holdValues.properties.filter((property) => (ts.isPropertyAssignment(property) || ts.isShorthandPropertyAssignment(property)) && property.name.getText() === field);
+  assert.equal(fields.length, 1, `admitted hold must have exactly one ${field}`);
+  assert.ok(ts.isPropertyAssignment(fields[0]));
+  assert.equal(compactAdmissionExpression(fields[0].initializer), value, `admitted hold ${field} must match the counted row and pending state`);
+}
+
+assert.match(
+  admissionLoopSource,
+  /from \$\{events\} where \$\{events\.id\} = \$\{row\.id\} for update[\s\S]*Boolean\(lockedRow\.hardCapEnabled\)[\s\S]*hardCapEnabled && reservedCount >= maxSpots/,
+  "canonical checkout must serialize capacity admission under the actual event-row lock and current hard-cap policy",
 );
 assert.match(
-  paidEventBookingRoute,
-  /from \$\{events\} where \$\{events\.id\} = \$\{eventId\} for update[\s\S]*hardCapEnabled: events\.hardCapEnabled[\s\S]*lockedEvent\.hardCapEnabled && reservedCount >= maxSpots/,
-  "legacy and canonical Parking Pass checkout must share the event-row lock and hard-cap policy",
+  admissionLoopSource,
+  /const currentEligibility[\s\S]*assessParkingPassTruckEligibility\([\s\S]*!currentEligibility\.isTruckProfile[\s\S]*!currentEligibility\.roleAllowed[\s\S]*!currentEligibility\.emailVerified[\s\S]*!currentEligibility\.storedInsuranceValid[\s\S]*TRUCK_ELIGIBILITY_CHANGED/,
+  "canonical admission must recheck current truck verification and role after acquiring the event lock",
 );
 assert.doesNotMatch(
-  paidEventBookingRoute,
+  canonicalParkingBookingRoute,
   /pg_advisory_xact_lock/,
-  "legacy checkout must not use a private advisory lock that canonical checkout cannot observe",
+  "canonical capacity admission must retain its shared event-row lock rather than a private advisory lock",
 );
 assert.match(
-  paidEventBookingRoute,
-  /buildSlotDateTimes\([\s\S]*bookingInterval\.startUtc\.getTime\(\) < bookingRequestNow\.getTime\(\)/,
-  "the legacy event checkout must evaluate the zoned slot start rather than rejecting all same-day slots",
+  canonicalParkingBookingRoute,
+  /if \(rowDayStart < todayStart\)[\s\S]*if \(isSameDayBooking\)[\s\S]*getSlotWindowMinutesWithCleanup\([\s\S]*window\.startMinutes <= nowMinutes/,
+  "canonical checkout must reject past dates and elapsed same-day slots without rejecting every same-day booking",
 );
 const eventDetailClientSource = readSource("client/src/pages/event-detail.tsx");
 assert.match(
