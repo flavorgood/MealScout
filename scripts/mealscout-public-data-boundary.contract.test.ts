@@ -1497,6 +1497,92 @@ const assertExecutedAdmission = (
       executionPrinter.printNode(ts.EmitHint.Unspecified, expectedRowPrelude.statements[index], expectedRowPrelude),
       "admission loop must reach its row lock without an early exit");
   }
+
+  // Every successful insert must reach the checkpoint through the owning collection.
+  const collectionPrelude = callback.body.statements[1];
+  assert.ok(ts.isVariableStatement(collectionPrelude) && collectionPrelude.declarationList.declarations.length === 1,
+    "admission loop must retain its callback hold collection");
+  const collectionDeclaration = collectionPrelude.declarationList.declarations[0];
+  const producedHoldStatement = loop.statement.statements.at(-3)!;
+  assert.ok(ts.isVariableStatement(producedHoldStatement) &&
+    (producedHoldStatement.declarationList.flags & ts.NodeFlags.Const) &&
+    producedHoldStatement.declarationList.declarations.length === 1,
+    "admission loop must directly bind its terminal inserted hold");
+  const producedHold = producedHoldStatement.declarationList.declarations[0];
+  assert.ok(ts.isArrayBindingPattern(producedHold.name) && producedHold.name.elements.length === 1,
+    "admission loop must bind the one returned hold");
+  const createdBinding = producedHold.name.elements[0];
+  assert.ok(ts.isBindingElement(createdBinding) && ts.isIdentifier(createdBinding.name) &&
+    createdBinding.name.text === "created" && !createdBinding.initializer &&
+    !createdBinding.propertyName && !createdBinding.dotDotDotToken,
+    "admission loop must retain the direct created result without fallback values");
+  assert.ok(producedHold.initializer && ts.isAwaitExpression(producedHold.initializer),
+    "admission loop must await the actual inserted hold");
+  const returningCall = producedHold.initializer.expression;
+  assert.ok(ts.isCallExpression(returningCall) && returningCall.arguments.length === 0 &&
+    ts.isPropertyAccessExpression(returningCall.expression) && returningCall.expression.name.text === "returning",
+    "admission loop must return the inserted hold from its query");
+  const valuesCall = returningCall.expression.expression;
+  assert.ok(ts.isCallExpression(valuesCall) && valuesCall.arguments.length === 1 &&
+    ts.isObjectLiteralExpression(valuesCall.arguments[0]) && ts.isPropertyAccessExpression(valuesCall.expression) &&
+    valuesCall.expression.name.text === "values",
+    "admission loop must return its admitted hold values");
+  const insertCall = valuesCall.expression.expression;
+  assert.ok(ts.isCallExpression(insertCall) && insertCall.arguments.length === 1 &&
+    ts.isIdentifier(insertCall.arguments[0]) && insertCall.arguments[0].text === "eventBookings" &&
+    ts.isPropertyAccessExpression(insertCall.expression) && insertCall.expression.name.text === "insert" &&
+    ts.isIdentifier(insertCall.expression.expression) && ts.isIdentifier(callback.parameters[0].name) &&
+    insertCall.expression.expression.text === callback.parameters[0].name.text,
+    "admission loop must append the hold produced by its owning transaction");
+  const expectedCollectionTail = ts.createSourceFile("admission-collection-tail.ts",
+    'if (!created) { throw new Error("Failed to reserve parking pass hold."); } inserted.push(created);',
+    ts.ScriptTarget.Latest, true);
+  for (let index = 0; index < 2; index += 1) {
+    assert.equal(executionPrinter.printNode(ts.EmitHint.Unspecified, loop.statement.statements[loop.statement.statements.length - 2 + index], loop.getSourceFile()),
+      executionPrinter.printNode(ts.EmitHint.Unspecified, expectedCollectionTail.statements[index], expectedCollectionTail),
+      "admission loop must reject an absent result and unconditionally append each created hold");
+  }
+  const appendStatement = loop.statement.statements.at(-1)!;
+  const allowedCollectionDeclarations = new Map<string, ts.Node>([
+    ["inserted", collectionDeclaration], ["created", producedHold],
+  ]);
+  const assertCollectionBindings = (node: ts.Node) => {
+    for (const binding of ["inserted", "created"]) {
+      if ((ts.isVariableDeclaration(node) || ts.isParameter(node)) && ownsBinding(node.name, binding)) {
+        assert.ok(allowedCollectionDeclarations.get(binding) === node,
+          "admission loop must not shadow the owning collection or inserted result");
+      }
+      if ((ts.isFunctionDeclaration(node) || ts.isClassDeclaration(node)) && node.name) {
+        assert.ok(node.name.text !== binding, "admission loop must not shadow the owning collection or inserted result");
+      }
+      if (ts.isBinaryExpression(node) && node.operatorToken.kind >= ts.SyntaxKind.FirstAssignment &&
+          node.operatorToken.kind <= ts.SyntaxKind.LastAssignment) {
+        assert.ok(!writesOwnershipBinding(node.left, binding),
+          "admission loop must not reassign or clear the owning collection or inserted result");
+      }
+      if ((ts.isPrefixUnaryExpression(node) || ts.isPostfixUnaryExpression(node)) &&
+          (node.operator === ts.SyntaxKind.PlusPlusToken || node.operator === ts.SyntaxKind.MinusMinusToken)) {
+        assert.ok(!writesOwnershipBinding(node.operand, binding),
+          "admission loop must not reassign or clear the owning collection or inserted result");
+      }
+    }
+    if (ts.isCallExpression(node) &&
+        (ts.isPropertyAccessExpression(node.expression) || ts.isElementAccessExpression(node.expression)) &&
+        writesOwnershipBinding(node.expression, "inserted")) {
+      assert.ok(node.parent === appendStatement && ts.isExpressionStatement(appendStatement) &&
+        appendStatement.expression === node,
+        "admission loop must mutate its hold collection only through the required append");
+    }
+    ts.forEachChild(node, assertCollectionBindings);
+  };
+  assertCollectionBindings(callback.body);
+  const assertNoCollectionEscape = (node: ts.Node) => {
+    assert.ok(!ts.isReturnStatement(node) && !ts.isContinueStatement(node) && !ts.isBreakStatement(node),
+      "admission loop must not skip the required hold append");
+    ts.forEachChild(node, (child) => { if (!ts.isFunctionLike(child)) assertNoCollectionEscape(child); });
+  };
+  assertNoCollectionEscape(loop.statement);
+
   const checkpoint = callback.body.statements[3];
   assert.ok(ts.isExpressionStatement(checkpoint) && ts.isAwaitExpression(checkpoint.expression) &&
     ts.isCallExpression(checkpoint.expression.expression),
@@ -1550,6 +1636,13 @@ const executionMutations: [string, string, string][] = [
   ["early callback return", "const inserted: any[] = [];", "const inserted: any[] = []; return inserted;"],
   ["disabled date loop", "index < sortedDateKeys.length;", "index < sortedDateKeys.length && false;"],
   ["skipped checkpoint", "await recordParkingBookingHolds(", "if (false) await recordParkingBookingHolds("],
+  ["omitted created hold", "inserted.push(created);", ""],
+  ["conditional created hold", "inserted.push(created);", "if (false) inserted.push(created);"],
+  ["skipped created hold", "inserted.push(created);", "continue; inserted.push(created);"],
+  ["wrong hold collection", "inserted.push(created);", "insertedHolds.push(created);"],
+  ["wrong appended hold", "inserted.push(created);", "inserted.push({});"],
+  ["fallback created hold", "const [created] = await tx", "const [created = {}] = await tx"],
+
 ];
 const assertRejectedExecutionMutation = (name: string, mutatedSource: string) => {
   const parsed = ts.createSourceFile("admission-execution-negative.ts",
@@ -1594,7 +1687,28 @@ for (const [name, original, replacement] of ownershipMutations) {
   assert.equal(canonicalParkingBookingRoute.split(original).length, 2, "ownership regression fixture must replace one actual source fragment");
   assertRejectedExecutionMutation(name, canonicalParkingBookingRoute.replace(original, replacement));
 }
-console.log("Canonical checkout execution and ownership regressions: PASS");
+
+
+const collectionPreludePattern = /if \(!row\) \{\s*throw new Error\("Missing parking pass date in booking range\."\);\s*\}/;
+const collectionMutations: [string, RegExp, (source: string) => string][] = [
+  ["missing returned inserted hold", /const \[created\] = await tx[\s\S]*?\.returning\(\);/,
+    (producer) => producer.replace(/\.returning\(\);$/, ";")],
+  ["shadowed callback hold collection", collectionPreludePattern,
+    (prelude) => prelude + " const inserted: any[] = [];"],
+  ["cleared callback hold collection", collectionPreludePattern,
+    (prelude) => prelude + " inserted.length = 0;"],
+  ["mutated callback hold collection", collectionPreludePattern,
+    (prelude) => prelude + " inserted.splice(0);"],
+  ["indirectly cleared callback hold collection", collectionPreludePattern,
+    (prelude) => prelude + " inserted.splice.call(inserted, 0);"],
+];
+for (const [name, original, replacement] of collectionMutations) {
+  assert.equal(canonicalParkingBookingRoute.split(original).length, 2,
+    "collection regression fixture must replace one actual source fragment");
+  assertRejectedExecutionMutation(name, canonicalParkingBookingRoute.replace(original, replacement));
+}
+console.log("Canonical checkout execution, ownership and hold collection regressions: PASS");
+
 
 const admissionCallback = admissionTransaction.arguments[0];
 assert.ok(ts.isArrowFunction(admissionCallback) || ts.isFunctionExpression(admissionCallback));
