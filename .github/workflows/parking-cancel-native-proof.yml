@@ -1,0 +1,66 @@
+name: Parking Pass native cancellation proof
+on:
+  push:
+    branches:
+      - qa/parking-cancel-native-20261009
+permissions:
+  contents: read
+concurrency:
+  group: parking-cancel-native-20261009
+  cancel-in-progress: false
+jobs:
+  native:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Checkout exact deployed application source
+        uses: actions/checkout@v4
+        with:
+          ref: 7cf7083806a874e70814d099f281ce14a6b9f987
+          persist-credentials: false
+      - name: Set up original CI Node runtime
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.20.2
+          cache: npm
+      - name: Install exact locked dependencies without lifecycle scripts
+        run: npm ci --ignore-scripts
+      - name: Build checksum-bound PostgreSQL 16.14
+        shell: bash
+        run: |
+          set -euo pipefail
+          pg_cache="$HOME/.cache/mealscout-host-route-pg16.14"
+          mkdir -p "$pg_cache"
+          curl --fail --location --retry 2 https://ftp.postgresql.org/pub/source/v16.14/postgresql-16.14.tar.gz --output "$pg_cache/source.tar.gz"
+          echo "ca18d43510bbb09a271383e1aa705b05b76bc8e9400f9857178ba8ec54cf461a  $pg_cache/source.tar.gz" | sha256sum --check -
+          tar -xzf "$pg_cache/source.tar.gz" -C "$pg_cache"
+          cd "$pg_cache/postgresql-16.14"
+          ./configure --prefix="$pg_cache/install" --with-openssl --without-readline
+          make -j2
+          make install
+      - name: Run original source-bound native cancellation and signed webhook executor
+        shell: bash
+        env:
+          RENDER_GIT_COMMIT: 7cf7083806a874e70814d099f281ce14a6b9f987
+          MEALSCOUT_HOST_ROUTE_PROOF: "1"
+          MEALSCOUT_HOST_ROUTE_RELEASE_CHECKS: "1"
+          MEALSCOUT_PARKING_WEBHOOK_PROOF: "1"
+          MEALSCOUT_PARKING_CANCEL_PROOF: "1"
+          NODE_ENV: test
+        run: |
+          set -euo pipefail
+          export MEALSCOUT_NATIVE_PG_BIN="$HOME/.cache/mealscout-host-route-pg16.14/install/bin"
+          test "$(id -u)" != "0"
+          test -z "$(git status --porcelain)"
+          node scripts/qa/parking-host-route-native.mjs
+      - name: Preserve bounded native proof receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: parking-cancellation-native-7cf70838
+          path: |
+            .qa-evidence/host-route-native/receipt.json
+            .qa-evidence/host-route-native/signed-webhook.log
+            .qa-evidence/host-route-native/native-extension-*.log
+          if-no-files-found: warn
+          retention-days: 14
