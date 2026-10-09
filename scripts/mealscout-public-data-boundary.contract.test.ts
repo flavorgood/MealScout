@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import ts from "typescript";
 import { sql } from "drizzle-orm";
 import { PgDialect } from "drizzle-orm/pg-core";
 import {
@@ -1234,45 +1235,101 @@ assert.match(
   /hostPriceCents: row\.hostPriceCents \?\? null/,
   "eligible event detail must retain the consumer booking price",
 );
-const paidEventBookingRoute = sliceAfter(
-  eventRoutesSource,
-  '"/api/events/:eventId/book"',
-  15000,
+const exactPostRoute = (source: string, routePath: string) => {
+  const parsed = ts.createSourceFile("routes.ts", source, ts.ScriptTarget.Latest, true);
+  const matches: ts.CallExpression[] = [];
+  const visit = (node: ts.Node) => {
+    if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) &&
+        ts.isIdentifier(node.expression.expression) && node.expression.expression.text === "app" &&
+        node.expression.name.text === "post" && ts.isStringLiteral(node.arguments[0]) &&
+        node.arguments[0].text === routePath) matches.push(node);
+    ts.forEachChild(node, visit);
+  };
+  visit(parsed);
+  assert.equal(matches.length, 1, `expected exactly one POST ${routePath}`);
+  const handler = matches[0].arguments.at(-1)!;
+  assert.ok(ts.isArrowFunction(handler) || ts.isFunctionExpression(handler));
+  const printer = ts.createPrinter({ removeComments: true });
+  return {
+    call: matches[0],
+    handler,
+    source: printer.printNode(ts.EmitHint.Unspecified, handler, parsed),
+  };
+};
+const retiredEventCheckout = exactPostRoute(eventRoutesSource, "/api/events/:eventId/book");
+assert.equal(retiredEventCheckout.call.arguments.length, 3, "retired checkout must contain only its path, authentication and pure handoff handler");
+assert.ok(
+  retiredEventCheckout.call.arguments.some((argument) => ts.isIdentifier(argument) && argument.text === "isAuthenticated"),
+  "retired event checkout must retain authentication",
 );
 assert.match(
-  paidEventBookingRoute,
-  /,\s*isAuthenticated,/,
-  "paid event booking must accept authenticated food-truck accounts",
+  retiredEventCheckout.source,
+  /return res\.status\(409\)\.json\(\{[\s\S]*code: "canonical_checkout_required"[\s\S]*checkoutPath: `\/parking-pass\?\$\{params\.toString\(\)\}`/,
+  "retired event checkout must hand off to canonical Parking Pass selection without creating a booking",
+);
+const retiredHandler = retiredEventCheckout.handler;
+const handoffOnlyCalls = new Set(["String", "params.set", "params.toString", "res.status", "res.status(409).json"]);
+const retiredOperationIdentifiers = new Set(["db", "storage", "stripe", "fetch", "axios", "eventBookings"]);
+const inspectRetiredHandler = (node: ts.Node) => {
+  assert.ok(!ts.isAwaitExpression(node), "retired checkout must not perform asynchronous operations");
+  if (ts.isIdentifier(node)) {
+    assert.ok(!retiredOperationIdentifiers.has(node.text), "retired checkout must not reference database or provider owners");
+  }
+  if (ts.isCallExpression(node)) {
+    const stringTrim = ts.isPropertyAccessExpression(node.expression) &&
+      node.expression.name.text === "trim" && ts.isCallExpression(node.expression.expression) &&
+      ts.isIdentifier(node.expression.expression.expression) && node.expression.expression.expression.text === "String";
+    assert.ok(stringTrim || handoffOnlyCalls.has(node.expression.getText()),
+      `retired checkout must not call booking, database or provider operations: ${node.expression.getText()}`);
+  }
+  if (ts.isNewExpression(node)) {
+    assert.equal(node.expression.getText(), "URLSearchParams", "retired checkout may only construct its handoff URL");
+  }
+  ts.forEachChild(node, inspectRetiredHandler);
+};
+inspectRetiredHandler(retiredHandler.body);
+const canonicalParkingBooking = exactPostRoute(
+  readSource("server/routes/hostRoutes.ts"), "/api/parking-pass/:passId/book",
+);
+const canonicalParkingBookingRoute = canonicalParkingBooking.source;
+assert.ok(
+  canonicalParkingBooking.call.arguments.some((argument) => ts.isIdentifier(argument) && argument.text === "isAuthenticated"),
+  "canonical Parking Pass checkout must require authentication",
 );
 assert.match(
-  paidEventBookingRoute,
-  /verifyRestaurantOwnership\([\s\S]*"manageParkingPass"[\s\S]*res\.status\(403\)/,
-  "paid event booking must still require exact truck ownership",
+  canonicalParkingBookingRoute,
+  /verifyRestaurantOwnership\([\s\S]*"manageParkingPass"[\s\S]*if \(!truck \|\| !hasManageParkingPass\)[\s\S]*res\.status\(403\)/,
+  "canonical Parking Pass checkout must require exact truck ownership",
 );
 assert.match(
-  paidEventBookingRoute,
+  canonicalParkingBookingRoute,
   /assessParkingPassTruckEligibility\([\s\S]*!truckEligibility\.isTruckProfile[\s\S]*truck_verification_required[\s\S]*!truckEligibility\.roleAllowed/,
-  "the legacy event checkout must enforce the canonical Parking Pass truck, verification, and role gates",
+  "canonical Parking Pass checkout must enforce truck classification, verification and role gates",
 );
 assert.match(
-  paidEventBookingRoute,
-  /ensureParkingPassEventRow\(\{[\s\S]*passId: eventId[\s\S]*requireFuture: true[\s\S]*now: bookingRequestNow/,
-  "eligible booking must materialize a genuine series-only Parking Pass occurrence",
+  canonicalParkingBookingRoute,
+  /ensureParkingPassEventRow\(\{\s*passId,\s*requireFuture: true/,
+  "canonical checkout must materialize a genuine future Parking Pass occurrence",
 );
 assert.match(
-  paidEventBookingRoute,
-  /from \$\{events\} where \$\{events\.id\} = \$\{eventId\} for update[\s\S]*hardCapEnabled: events\.hardCapEnabled[\s\S]*lockedEvent\.hardCapEnabled && reservedCount >= maxSpots/,
-  "legacy and canonical Parking Pass checkout must share the event-row lock and hard-cap policy",
+  canonicalParkingBookingRoute,
+  /from \$\{events\} where \$\{events\.id\} = \$\{row\.id\} for update[\s\S]*Boolean\(lockedRow\.hardCapEnabled\)[\s\S]*hardCapEnabled && reservedCount >= maxSpots/,
+  "canonical checkout must serialize capacity admission under the actual event-row lock and current hard-cap policy",
+);
+assert.match(
+  canonicalParkingBookingRoute,
+  /const currentEligibility[\s\S]*assessParkingPassTruckEligibility\([\s\S]*!currentEligibility\.isTruckProfile[\s\S]*!currentEligibility\.roleAllowed[\s\S]*!currentEligibility\.emailVerified[\s\S]*!currentEligibility\.storedInsuranceValid[\s\S]*TRUCK_ELIGIBILITY_CHANGED/,
+  "canonical admission must recheck current truck verification and role after acquiring the event lock",
 );
 assert.doesNotMatch(
-  paidEventBookingRoute,
+  canonicalParkingBookingRoute,
   /pg_advisory_xact_lock/,
-  "legacy checkout must not use a private advisory lock that canonical checkout cannot observe",
+  "canonical capacity admission must retain its shared event-row lock rather than a private advisory lock",
 );
 assert.match(
-  paidEventBookingRoute,
-  /buildSlotDateTimes\([\s\S]*bookingInterval\.startUtc\.getTime\(\) < bookingRequestNow\.getTime\(\)/,
-  "the legacy event checkout must evaluate the zoned slot start rather than rejecting all same-day slots",
+  canonicalParkingBookingRoute,
+  /if \(rowDayStart < todayStart\)[\s\S]*if \(isSameDayBooking\)[\s\S]*getSlotWindowMinutesWithCleanup\([\s\S]*window\.startMinutes <= nowMinutes/,
+  "canonical checkout must reject past dates and elapsed same-day slots without rejecting every same-day booking",
 );
 const eventDetailClientSource = readSource("client/src/pages/event-detail.tsx");
 assert.match(
