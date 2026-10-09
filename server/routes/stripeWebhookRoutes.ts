@@ -38,6 +38,7 @@ import {
 } from "../services/pickupOrderCancellationService";
 import { reconcileCompletedPickupOrderRefund } from "../services/pickupOrderCompletedRefundService";
 import { reconcilePickupOrderDispute } from "../services/pickupOrderDisputeService";
+import { isLegacyParkingPaymentBound } from "../services/legacyParkingPaymentBinding";
 import {
   pickupDisputePaymentIntentId,
   retrieveAuthoritativePickupOrderDispute,
@@ -1044,15 +1045,8 @@ export function registerStripeWebhookRoutes(
                   booking.stripePaymentIntentId || "",
                 ).trim();
                 if (
-                  !bookingIntentId || bookingIntentId !== paymentIntent.id ||
                   !["pending", "confirmed"].includes(String(booking.status)) ||
-                  paymentIntent.metadata?.eventId !== booking.eventId ||
-                  paymentIntent.metadata?.truckId !== booking.truckId ||
-                  paymentIntent.metadata?.hostId !== booking.hostId ||
-                  paymentIntent.currency !== "usd" ||
-                  paymentIntent.amount !== booking.totalCents ||
-                  !Number.isSafeInteger(paymentIntent.amount_received) ||
-                  paymentIntent.amount_received < booking.totalCents
+                  !isLegacyParkingPaymentBound(booking, paymentIntent, event.account ?? null)
                 ) {
                   throw new Error(
                     `Booking ${bookingId} requires reconciliation; payment or pending hold is no longer bound`,
@@ -1095,6 +1089,18 @@ export function registerStripeWebhookRoutes(
                       eq(eventBookings.id, bookingId),
                       eq(eventBookings.status, "pending"),
                       eq(eventBookings.stripePaymentIntentId, bookingIntentId),
+                      eq(eventBookings.eventId, booking.eventId),
+                      eq(eventBookings.truckId, booking.truckId),
+                      eq(eventBookings.hostId, booking.hostId),
+                      eq(eventBookings.hostPriceCents, booking.hostPriceCents),
+                      eq(eventBookings.platformFeeCents, booking.platformFeeCents),
+                      eq(eventBookings.totalCents, booking.totalCents),
+                      booking.stripeApplicationFeeAmount === null
+                        ? isNull(eventBookings.stripeApplicationFeeAmount)
+                        : eq(eventBookings.stripeApplicationFeeAmount, booking.stripeApplicationFeeAmount),
+                      booking.stripeTransferDestination === null
+                        ? isNull(eventBookings.stripeTransferDestination)
+                        : eq(eventBookings.stripeTransferDestination, booking.stripeTransferDestination),
                     ),
                   )
                   .returning({ id: eventBookings.id });
