@@ -4440,15 +4440,14 @@ export default function ParkingPassPage() {
   }, [filteredLocations, hostLocationsByHostId, parkingCoords, geocodeCache]);
 
   useEffect(() => {
-    if (!activeLocation) {
-      setActiveLocationKey(null);
-      return;
-    }
-    if (activeLocationKey && activeLocationKey === activeLocation.key) {
-      return;
-    }
-    setActiveLocationKey(activeLocation.key);
-  }, [activeLocation, activeLocationKey]);
+    // Preserve a valid selection queued by the requested-pass effect above.
+    setActiveLocationKey((currentKey) => {
+      if (filteredLocations.some((group) => group.key === currentKey)) {
+        return currentKey;
+      }
+      return filteredLocations[0]?.key ?? null;
+    });
+  }, [filteredLocations, activeLocationKey]);
 
   const cartTotals = getCartTotals();
   const hasCartTotal = cartItems.length > 0 && cartTotals.totalCents > 0;
@@ -8057,7 +8056,7 @@ export default function ParkingPassPage() {
                                     {displayListing && (
                                       <p className="text-[color:var(--text-muted)]">
                                         {format(
-                                          new Date(displayListing.date),
+                                          new Date(`${getListingDateKey(displayListing.date)}T00:00:00`),
                                           "EEE, MMM d",
                                         )}{" "}
                                         -{" "}
@@ -8537,7 +8536,7 @@ export default function ParkingPassPage() {
                                   <div className="text-xs text-[color:var(--text-muted)]">
                                     {displayListing
                                       ? format(
-                                          new Date(displayListing.date),
+                                          new Date(`${getListingDateKey(displayListing.date)}T00:00:00`),
                                           "EEE, MMM d",
                                         )
                                       : "No dates listed"}
@@ -8899,7 +8898,7 @@ export default function ParkingPassPage() {
                                 <p className="text-xs text-[color:var(--text-muted)]">
                                   {displayListing
                                     ? format(
-                                        new Date(displayListing.date),
+                                        new Date(`${getListingDateKey(displayListing.date)}T00:00:00`),
                                         "EEE, MMM d",
                                       )
                                     : "No dates listed"}
@@ -9203,7 +9202,7 @@ export default function ParkingPassPage() {
                             </div>
                             <p>
                               {format(
-                                new Date(item.listing.date),
+                                new Date(`${getListingDateKey(item.listing.date)}T00:00:00`),
                                 "EEE, MMM d",
                               )}{" "}
                               - {item.slotTypes.join(", ")}
@@ -9710,7 +9709,7 @@ export default function ParkingPassPage() {
             selectedDates={selectedListing?.date ? [selectedListing.date] : []}
             eventDetails={{
               name: "Parking Pass",
-              date: format(new Date(selectedListing.date), "MMMM d, yyyy"),
+              date: format(new Date(`${getListingDateKey(selectedListing.date)}T00:00:00`), "MMMM d, yyyy"),
               startTime: selectedListing.startTime,
               endTime: selectedListing.endTime,
               hostName: selectedListing.host.businessName,
