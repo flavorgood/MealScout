@@ -1311,13 +1311,134 @@ assert.match(
   /ensureParkingPassEventRow\(\{\s*passId,\s*requireFuture: true/,
   "canonical checkout must materialize a genuine future Parking Pass occurrence",
 );
+const admissionTransactions: ts.CallExpression[] = [];
+const findAdmissionAssignment = (node: ts.Node) => {
+  if (ts.isBinaryExpression(node) && ts.isIdentifier(node.left) && node.left.text === "insertedHolds" &&
+      node.operatorToken.kind === ts.SyntaxKind.EqualsToken && ts.isAwaitExpression(node.right) &&
+      ts.isCallExpression(node.right.expression)) {
+    const call = node.right.expression;
+    if (ts.isPropertyAccessExpression(call.expression) && ts.isIdentifier(call.expression.expression) &&
+        call.expression.expression.text === "db" && call.expression.name.text === "transaction") admissionTransactions.push(call);
+  }
+  ts.forEachChild(node, (child) => { if (!ts.isFunctionLike(child)) findAdmissionAssignment(child); });
+};
+findAdmissionAssignment(canonicalParkingBooking.handler.body);
+assert.equal(admissionTransactions.length, 1, "canonical admission must have one owning transaction");
+const admissionTransaction = admissionTransactions[0];
+assert.ok(ts.isAwaitExpression(admissionTransaction.parent), "canonical admission must await its transaction");
+const admissionCallback = admissionTransaction.arguments[0];
+assert.ok(ts.isArrowFunction(admissionCallback) || ts.isFunctionExpression(admissionCallback));
+assert.equal(admissionCallback.parameters.length, 1);
+assert.ok(ts.isIdentifier(admissionCallback.parameters[0].name));
+const transactionClient = admissionCallback.parameters[0].name.text;
+assert.ok(ts.isBlock(admissionCallback.body));
+const bindsClient = (name: ts.BindingName): boolean => ts.isIdentifier(name)
+  ? name.text === transactionClient
+  : name.elements.some((element) => ts.isBindingElement(element) && bindsClient(element.name));
+const writesClient = (expression: ts.Expression): boolean => {
+  if (ts.isIdentifier(expression)) return expression.text === transactionClient;
+  if (ts.isParenthesizedExpression(expression)) return writesClient(expression.expression);
+  if (ts.isArrayLiteralExpression(expression)) return expression.elements.some((element) =>
+    ts.isSpreadElement(element) ? writesClient(element.expression) : writesClient(element));
+  if (ts.isObjectLiteralExpression(expression)) return expression.properties.some((property) =>
+    ts.isShorthandPropertyAssignment(property) ? property.name.text === transactionClient :
+    ts.isPropertyAssignment(property) ? writesClient(property.initializer) :
+    ts.isSpreadAssignment(property) && writesClient(property.expression));
+  return false;
+};
+const assertTransactionClientBinding = (node: ts.Node) => {
+  if (ts.isVariableDeclaration(node) || ts.isParameter(node)) {
+    assert.ok(!bindsClient(node.name), "the admission callback client must not be redeclared or shadowed");
+  }
+  if (ts.isBinaryExpression(node) && node.operatorToken.kind >= ts.SyntaxKind.FirstAssignment &&
+      node.operatorToken.kind <= ts.SyntaxKind.LastAssignment) {
+    assert.ok(!writesClient(node.left), "the admission callback client must not be reassigned");
+  }
+  ts.forEachChild(node, assertTransactionClientBinding);
+};
+assertTransactionClientBinding(admissionCallback.body);
+const admissionLoops = admissionCallback.body.statements.filter(ts.isForStatement);
+assert.equal(admissionLoops.length, 1, "admission must bind the per-date loop inside its owning transaction");
+const admissionLoop = admissionLoops[0];
+assert.match(admissionLoop.condition!.getText(), /index < sortedDateKeys\.length/);
+assert.ok(ts.isBlock(admissionLoop.statement));
+const admissionStatements = admissionLoop.statement.statements;
+const admissionPrinter = ts.createPrinter({ removeComments: true });
+const admissionLoopSource = admissionPrinter.printNode(ts.EmitHint.Unspecified, admissionLoop, admissionLoop.getSourceFile());
+const eventLocks = admissionStatements.flatMap((statement, index) => {
+  if (!ts.isExpressionStatement(statement) || !ts.isAwaitExpression(statement.expression)) return [];
+  const call = statement.expression.expression;
+  if (!ts.isCallExpression(call) || !ts.isPropertyAccessExpression(call.expression) ||
+      !ts.isIdentifier(call.expression.expression) || call.expression.expression.text !== transactionClient ||
+      call.expression.name.text !== "execute") return [];
+  return [{ call, index }];
+});
+assert.equal(eventLocks.length, 1, "the event lock must be awaited through the admission transaction client");
+const eventLock = eventLocks[0];
+assert.equal(eventLock.call.arguments.length, 1);
+const eventLockQuery = admissionPrinter.printNode(ts.EmitHint.Unspecified, eventLock.call.arguments[0], eventLock.call.getSourceFile());
+assert.match(eventLockQuery, /^sql\s*`select \$\{events\.id\} from \$\{events\} where \$\{events\.id\} = \$\{row\.id\} for update`$/i,
+  "the admission transaction must acquire the exact event-row FOR UPDATE lock");
+const admissionDeclaration = (name: string) => {
+  const declarations = admissionStatements.flatMap((statement, index) => {
+    if (!ts.isVariableStatement(statement)) return [];
+    return statement.declarationList.declarations.filter((declaration) => {
+      if (ts.isIdentifier(declaration.name)) return declaration.name.text === name;
+      return ts.isArrayBindingPattern(declaration.name) && declaration.name.elements.some((element) =>
+        ts.isBindingElement(element) && ts.isIdentifier(element.name) && element.name.text === name);
+    }).map((declaration) => ({ declaration, index }));
+  });
+  assert.equal(declarations.length, 1, `admission must directly bind ${name} in its transaction loop`);
+  return declarations[0];
+};
+const currentTruckRead = admissionDeclaration("currentTruck");
+const currentUserRead = admissionDeclaration("currentUser");
+const currentEligibilityRead = admissionDeclaration("currentEligibility");
+const holdInsert = admissionDeclaration("created");
+const awaitedClientMethod = (initializer: ts.Expression, method: string) => {
+  assert.ok(ts.isAwaitExpression(initializer), "the admission operation must be awaited");
+  let call = initializer.expression;
+  while (ts.isCallExpression(call) && ts.isPropertyAccessExpression(call.expression)) {
+    if (ts.isIdentifier(call.expression.expression) && call.expression.expression.text === transactionClient &&
+        call.expression.name.text === method) return call;
+    call = call.expression.expression;
+  }
+  assert.fail(`admission ${method} must use the owning transaction receiver chain`);
+};
+for (const currentRead of [currentTruckRead, currentUserRead]) {
+  awaitedClientMethod(currentRead.declaration.initializer!, "select");
+}
+const holdInsertCall = awaitedClientMethod(holdInsert.declaration.initializer!, "insert");
+assert.ok(ts.isIdentifier(holdInsertCall.arguments[0]) && holdInsertCall.arguments[0].text === "eventBookings",
+  "the owning admission transaction must insert the booking hold");
+assert.ok(eventLock.index < currentTruckRead.index && currentTruckRead.index < currentUserRead.index &&
+  currentUserRead.index < currentEligibilityRead.index && currentEligibilityRead.index < holdInsert.index,
+  "admission must acquire its lock before reading and rechecking current eligibility, before inserting holds");
+const eligibilityDenials = admissionStatements.flatMap((statement, index) => {
+  if (!ts.isIfStatement(statement) || !ts.isBlock(statement.thenStatement)) return [];
+  const condition = admissionPrinter.printNode(ts.EmitHint.Unspecified, statement.expression, statement.getSourceFile());
+  if (!/!currentEligibility\.isTruckProfile[\s\S]*!currentEligibility\.roleAllowed[\s\S]*!currentEligibility\.emailVerified[\s\S]*!currentEligibility\.storedInsuranceValid/.test(condition)) return [];
+  const throws = statement.thenStatement.statements.filter(ts.isThrowStatement);
+  if (throws.length !== 1 || !throws[0].expression || !ts.isCallExpression(throws[0].expression)) return [];
+  const error = throws[0].expression;
+  if (!ts.isPropertyAccessExpression(error.expression) || !ts.isIdentifier(error.expression.expression) ||
+      error.expression.expression.text !== "Object" || error.expression.name.text !== "assign") return [];
+  const fields = error.arguments[1];
+  if (!fields || !ts.isObjectLiteralExpression(fields) || !fields.properties.some((property) =>
+    ts.isPropertyAssignment(property) && ts.isIdentifier(property.name) && property.name.text === "code" &&
+    ts.isStringLiteral(property.initializer) && property.initializer.text === "TRUCK_ELIGIBILITY_CHANGED")) return [];
+  return [index];
+});
+assert.equal(eligibilityDenials.length, 1, "current eligibility must have one fail-closed transaction denial");
+assert.ok(currentEligibilityRead.index < eligibilityDenials[0] && eligibilityDenials[0] < holdInsert.index,
+  "current qualification denial must execute after the locked recheck and before hold insertion");
 assert.match(
-  canonicalParkingBookingRoute,
+  admissionLoopSource,
   /from \$\{events\} where \$\{events\.id\} = \$\{row\.id\} for update[\s\S]*Boolean\(lockedRow\.hardCapEnabled\)[\s\S]*hardCapEnabled && reservedCount >= maxSpots/,
   "canonical checkout must serialize capacity admission under the actual event-row lock and current hard-cap policy",
 );
 assert.match(
-  canonicalParkingBookingRoute,
+  admissionLoopSource,
   /const currentEligibility[\s\S]*assessParkingPassTruckEligibility\([\s\S]*!currentEligibility\.isTruckProfile[\s\S]*!currentEligibility\.roleAllowed[\s\S]*!currentEligibility\.emailVerified[\s\S]*!currentEligibility\.storedInsuranceValid[\s\S]*TRUCK_ELIGIBILITY_CHANGED/,
   "canonical admission must recheck current truck verification and role after acquiring the event lock",
 );
