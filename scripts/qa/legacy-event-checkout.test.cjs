@@ -1,6 +1,6 @@
 // Focused in-memory regression for the actual changed route callbacks/effect.
 // No app startup, listener, database, browser, provider API, or environment file.
-// Run only after resource admission: node scripts/qa/legacy-event-checkout.test.cjs
+// Run with normal Node defaults; --legacy-only excludes already-proved binding cases.
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
@@ -12,7 +12,9 @@ const root = path.resolve(__dirname, "../..");
 const sources = new Map();
 const beforeSources = new Map();
 const bindingOnly = process.argv.includes("--payment-binding-only");
+const legacyOnly = process.argv.includes("--legacy-only");
 const compareBefore = process.argv.includes("--compare-before");
+assert.ok(!(legacyOnly && (bindingOnly || compareBefore)), "Choose one focused fixture mode");
 const beforeRevision = process.argv.find((argument) => argument.startsWith("--before-revision="))?.split("=")[1];
 const helperModule = { exports: {} };
 vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.join(root,
@@ -77,6 +79,7 @@ function fixture(options = {}) {
     platformFeeCents: 1000, stripeApplicationFeeAmount: null, stripeTransferDestination: null, ...options.row };
   const intent = { id: "pi_fixture", status: "succeeded", currency: "usd", amount: 2500, amount_received: 2500,
     metadata: { bookingId: row.id, eventId: row.eventId, truckId: row.truckId, hostId: row.hostId }, ...options.intent };
+  const requestedIntentId = row.stripePaymentIntentId;
   const state = { row, intent, writes: 0, fillWrites: 0, earnings: 0, notifications: 0, reads: 0, retrievedAccounts: [] };
   const db = {
     select(fields) {
@@ -119,7 +122,7 @@ function fixture(options = {}) {
   const verifier = new Stripe("local-fixture-no-provider-access");
   const stripe = options.noStripe ? null : {
     paymentIntents: { retrieve: async (id, requestOptions) => {
-      assert.equal(id, row.stripePaymentIntentId);
+      assert.equal(id, requestedIntentId);
       const account = requestOptions?.stripeAccount ?? null;
       state.retrievedAccounts.push(account);
       if ((!account && options.platformRetrieveFails) || (account && options.connectedRetrieveFails)) {
@@ -163,6 +166,7 @@ function noFollowups(state) {
 }
 async function main() {
   let cases = 0;
+  if (!legacyOnly) {
   const destination = { row: { stripeTransferDestination: "acct_host", stripeApplicationFeeAmount: 1000 },
     intent: { application_fee_amount: 1000, transfer_data: { destination: "acct_host" } } };
   const held = { row: {}, intent: {} };
@@ -235,6 +239,7 @@ async function main() {
       scope: "changed legacy payment callbacks with in-memory database and signed local fixtures; no provider or PostgreSQL acceptance" }));
     return;
   }
+  }
   for (const passId of ["event-fixture", "pp:series-fixture:2026-10-09", "x&truckId=foreign"]) {
     const response = { statusCode: 200, status(code) { this.statusCode = code; return this; }, json(body) { this.body = body; return this; } };
     const handler = route(eventFile, "/api/events/:eventId/book", {});
@@ -253,6 +258,10 @@ async function main() {
     ]) {
       const current = fixture(options), response = await current.run(kind);
       assert.ok(response.statusCode >= 400, `${kind} must withhold success for ${JSON.stringify(options)}`);
+      if (kind === "receipt") {
+        assert.equal(response.statusCode, ["cancelled", "refunded"].includes(options.row?.status) ? 400 : 409,
+          "The booking guard must reject the input, rather than a fixture retrieval exception");
+      }
       noFollowups(current.state); cases++;
     }
     const success = fixture(), response = await success.run(kind);
