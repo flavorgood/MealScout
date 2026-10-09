@@ -926,7 +926,8 @@ app.use((req, res, next) => {
   if (process.env.NODE_ENV === "production") {
     console.log("🌐 trust proxy enabled");
   }
-  app.use(getSession());
+  const nativeSessionMiddleware = getSession();
+  app.use(nativeSessionMiddleware);
   app.use(passport.initialize());
   app.use(passport.session());
 
@@ -1273,7 +1274,7 @@ app.use((req, res, next) => {
   await registerSchedulers(app);
 
   // Setup WebSocket server for food truck GPS tracking
-  setupWebSocketServer(server);
+  setupWebSocketServer(server, nativeSessionMiddleware);
   console.log("[express] WebSocket server initialized for food truck tracking");
 
   app.use((err: any, _req: Request, res: Response, next: NextFunction) => {
