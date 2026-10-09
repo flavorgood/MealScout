@@ -10,6 +10,23 @@ const Stripe = require("stripe");
 
 const root = path.resolve(__dirname, "../..");
 const sources = new Map();
+const beforeSources = new Map();
+const bindingOnly = process.argv.includes("--payment-binding-only");
+const compareBefore = process.argv.includes("--compare-before");
+const beforeRevision = process.argv.find((argument) => argument.startsWith("--before-revision="))?.split("=")[1];
+const helperModule = { exports: {} };
+vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.join(root,
+  "server/services/legacyParkingPaymentBinding.ts"), "utf8"), {
+  compilerOptions: { target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.CommonJS },
+}).outputText, { module: helperModule, exports: helperModule.exports }, { timeout: 1000 });
+const { isLegacyParkingPaymentBound } = helperModule.exports;
+if (compareBefore) {
+  assert.match(beforeRevision ?? "", /^[a-f0-9]{40}$/, "Provide the exact pre-repair --before-revision for comparison");
+  const { execFileSync } = require("node:child_process");
+  for (const file of ["server/routes/eventRoutes.ts", "server/routes/stripeWebhookRoutes.ts"]) {
+    beforeSources.set(file, execFileSync("git", ["-c", `safe.directory=${root}`, "show", `${beforeRevision}:${file}`], { cwd: root, encoding: "utf8" }));
+  }
+}
 function source(file) {
   if (!sources.has(file)) {
     sources.set(file, ts.createSourceFile(file, fs.readFileSync(path.join(root, file), "utf8"), ts.ScriptTarget.Latest, true));
@@ -51,15 +68,16 @@ const eq = (field, value) => ({ field, value });
 const and = (...conditions) => ({ conditions });
 function matches(row, condition) {
   if (condition.conditions) return condition.conditions.every((part) => matches(row, part));
+  if (condition.isNull) return row[condition.field.field] === null;
   return row[condition.field.field] === condition.value;
 }
 function fixture(options = {}) {
   const row = { id: "booking-fixture", eventId: "event-fixture", truckId: "truck-fixture", hostId: "host-fixture",
     status: "pending", stripePaymentIntentId: "pi_fixture", totalCents: 2500, hostPriceCents: 1500,
-    stripeTransferDestination: null, ...options.row };
+    platformFeeCents: 1000, stripeApplicationFeeAmount: null, stripeTransferDestination: null, ...options.row };
   const intent = { id: "pi_fixture", status: "succeeded", currency: "usd", amount: 2500, amount_received: 2500,
     metadata: { bookingId: row.id, eventId: row.eventId, truckId: row.truckId, hostId: row.hostId }, ...options.intent };
-  const state = { row, intent, writes: 0, fillWrites: 0, earnings: 0, notifications: 0, reads: 0 };
+  const state = { row, intent, writes: 0, fillWrites: 0, earnings: 0, notifications: 0, reads: 0, retrievedAccounts: [] };
   const db = {
     select(fields) {
       let selectedTable;
@@ -100,10 +118,19 @@ function fixture(options = {}) {
   };
   const verifier = new Stripe("local-fixture-no-provider-access");
   const stripe = options.noStripe ? null : {
-    paymentIntents: { retrieve: async () => ({ ...state.intent }) },
+    paymentIntents: { retrieve: async (id, requestOptions) => {
+      assert.equal(id, row.stripePaymentIntentId);
+      const account = requestOptions?.stripeAccount ?? null;
+      state.retrievedAccounts.push(account);
+      if ((!account && options.platformRetrieveFails) || (account && options.connectedRetrieveFails)) {
+        throw new Error("local fixture retrieval unavailable");
+      }
+      return { ...state.intent };
+    } },
     webhooks: { constructEvent: verifier.webhooks.constructEvent.bind(verifier.webhooks) },
   };
-  const bindings = { ...schema, db, stripe, eq, and, sql: () => ({}),
+  const bindings = { ...schema, db, stripe, eq, and, isNull: (field) => ({ field, isNull: true }),
+    isLegacyParkingPaymentBound, sql: () => ({}),
     storage: { verifyRestaurantOwnership: async () => true, getUser: async () => null },
     emailService: new Proxy({}, { get: () => async () => { state.notifications++; } }),
     notifyHostCapacityWarning: async () => { state.notifications++; },
@@ -121,7 +148,8 @@ function fixture(options = {}) {
     if (kind === "receipt") {
       await route(eventFile, "/api/bookings/:bookingId/confirm", bindings)({ params: { bookingId: row.id }, user: { id: "owner-fixture" } }, response);
     } else {
-      const payload = JSON.stringify({ id: "evt_fixture", type: "payment_intent.succeeded", data: { object: state.intent } });
+      const payload = JSON.stringify({ id: "evt_fixture", type: "payment_intent.succeeded",
+        account: options.eventAccount, data: { object: state.intent } });
       const signature = verifier.webhooks.generateTestHeaderString({ payload, secret: "local-fixture-signing-secret" });
       await route(webhookFile, "/api/stripe/webhook", bindings)({ body: Buffer.from(payload), headers: { "stripe-signature": signature } }, response);
     }
@@ -135,6 +163,78 @@ function noFollowups(state) {
 }
 async function main() {
   let cases = 0;
+  const destination = { row: { stripeTransferDestination: "acct_host", stripeApplicationFeeAmount: 1000 },
+    intent: { application_fee_amount: 1000, transfer_data: { destination: "acct_host" } } };
+  const held = { row: {}, intent: {} };
+  const rejectedBindings = [
+    { name: "provider fee mismatch", row: destination.row, intent: { ...destination.intent, application_fee_amount: 500 } },
+    { name: "provider destination mismatch", row: destination.row, intent: { ...destination.intent, transfer_data: { destination: "acct_foreign" } } },
+    { name: "stored fee contradicts booking split", row: { ...destination.row, stripeApplicationFeeAmount: 500 },
+      intent: { ...destination.intent, application_fee_amount: 500 } },
+    { name: "stored split mismatch", row: { hostPriceCents: 1501 } },
+    { name: "negative host price", row: { hostPriceCents: -1, platformFeeCents: 2501 } },
+    { name: "fractional fee", row: { hostPriceCents: 1499.5, platformFeeCents: 1000.5 } },
+    { name: "missing stored fee", row: { stripeApplicationFeeAmount: undefined } },
+    { name: "missing stored destination", row: { stripeTransferDestination: undefined } },
+    { name: "unexpected fee on held charge", intent: { application_fee_amount: 1000 } },
+    { name: "unexpected destination on held charge", intent: { transfer_data: { destination: "acct_foreign" } } },
+    { name: "explicit partial transfer", row: destination.row,
+      intent: { ...destination.intent, transfer_data: { destination: "acct_host", amount: 1500 } } },
+    { name: "metadata cannot authorize direct scope", row: destination.row, intent: { application_fee_amount: 1000 } },
+  ];
+  const rejectedRaces = [
+    { platformFeeCents: 900 }, { hostPriceCents: 1400 }, { totalCents: 2400 },
+    { stripeApplicationFeeAmount: 500 }, { stripeTransferDestination: "acct_foreign" },
+    { eventId: "event_foreign" }, { truckId: "truck_foreign" }, { hostId: "host_foreign" },
+  ].map((raceAfterRead) => ({ name: `binding changed after read: ${Object.keys(raceAfterRead)[0]}`, raceAfterRead }));
+  const rejects = [...rejectedBindings, ...rejectedRaces];
+  for (const kind of ["receipt", "webhook"]) {
+    const kindRejects = [...rejects];
+    if (kind === "webhook") kindRejects.push(
+      { name: "foreign signed account", ...destination, eventAccount: "acct_foreign" },
+      { name: "connected scope cannot authorize destination transfer", ...destination, eventAccount: "acct_host" },
+      { name: "connected scope cannot authorize platform-held charge", ...held, eventAccount: "acct_foreign" },
+      { name: "confirmed retry rejects wrong fee before earnings", row: { ...destination.row, status: "confirmed" },
+        intent: { ...destination.intent, application_fee_amount: 500 } },
+    );
+    for (const options of kindRejects) {
+      const current = fixture(options), response = await current.run(kind);
+      assert.ok(response.statusCode >= 400, `${kind} must withhold success: ${options.name}`);
+      noFollowups(current.state); cases++;
+    }
+    const direct = { row: destination.row, intent: { application_fee_amount: 1000 },
+      platformRetrieveFails: true, eventAccount: "acct_host" };
+    for (const options of [held, destination, { ...destination,
+      intent: { ...destination.intent, transfer_data: { destination: { id: "acct_host" } } } }, direct,
+      { row: { ...destination.row, hostPriceCents: 2500, platformFeeCents: 0, stripeApplicationFeeAmount: 0 },
+        intent: { ...destination.intent, application_fee_amount: 0 } },
+      { row: { ...destination.row, hostPriceCents: 0, platformFeeCents: 2500, stripeApplicationFeeAmount: 2500 },
+        intent: { ...destination.intent, application_fee_amount: 2500 } }]) {
+      const current = fixture(options), response = await current.run(kind);
+      assert.equal(response.statusCode, 200); assert.equal(current.state.row.status, "confirmed");
+      assert.equal(current.state.writes, 1); assert.equal(current.state.fillWrites, 1);
+      assert.equal(current.state.earnings, kind === "webhook" && current.state.row.hostPriceCents > 0 ? 1 : 0);
+      if (options === direct && kind === "receipt") assert.deepEqual(current.state.retrievedAccounts, [null, "acct_host"]);
+      cases++;
+    }
+  }
+  let beforeAccepted = 0;
+  if (compareBefore) {
+    for (const [file, text] of beforeSources) sources.set(file, ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true));
+    for (const kind of ["receipt", "webhook"]) {
+      for (const options of rejects) {
+        const previous = fixture(options), response = await previous.run(kind);
+        assert.equal(response.statusCode, 200, `${kind} baseline should expose defect: ${options.name}`);
+        assert.equal(previous.state.writes, 1); beforeAccepted++;
+      }
+    }
+    for (const file of beforeSources.keys()) sources.delete(file);
+  }
+  if (bindingOnly) {
+    console.log(JSON.stringify({ result: "PASS", cases, beforeAccepted, beforeRevision,
+      scope: "changed legacy payment callbacks with in-memory database and signed local fixtures; no provider or PostgreSQL acceptance" }));
+    return;
+  }
   for (const passId of ["event-fixture", "pp:series-fixture:2026-10-09", "x&truckId=foreign"]) {
     const response = { statusCode: 200, status(code) { this.statusCode = code; return this; }, json(body) { this.body = body; return this; } };
     const handler = route(eventFile, "/api/events/:eventId/book", {});

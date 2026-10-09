@@ -21,7 +21,7 @@ import {
   CLAIM_STATUS,
   CLAIM_TYPES,
 } from "@shared/schema";
-import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, sql } from "drizzle-orm";
 
 const stripe = process.env.STRIPE_SECRET_KEY
   ? new Stripe(process.env.STRIPE_SECRET_KEY)
@@ -71,6 +71,7 @@ import { isPublicDiscoveryEligibleEntity } from "@shared/publicDiscoveryIntegrit
 import { resolvePublicProfileVisibility } from "../publicProfiles/publicProfileUtils";
 import { resolvePublicCanonicalOrigin } from "../seo/publicCanonicalOrigin";
 import { assessParkingPassTruckEligibility } from "../services/parkingPassTruckEligibility";
+import { isLegacyParkingPaymentBound } from "../services/legacyParkingPaymentBinding";
 
 const normalizeParkingStatus = (value: unknown) =>
   String(value ?? "")
@@ -2460,6 +2461,7 @@ export function registerEventRoutes(
         if (booking.stripePaymentIntentId && stripe) {
           const hostStripeAccountId = booking.stripeTransferDestination;
           let intent: Stripe.PaymentIntent;
+          let retrievedStripeAccount: string | null = null;
           try {
             try {
               intent = await stripe.paymentIntents.retrieve(
@@ -2472,6 +2474,7 @@ export function registerEventRoutes(
                 booking.stripePaymentIntentId,
                 { stripeAccount: hostStripeAccountId },
               );
+              retrievedStripeAccount = hostStripeAccountId;
             }
           } catch (e: any) {
             console.error("[event-booking] Error retrieving PaymentIntent:", {
@@ -2499,17 +2502,7 @@ export function registerEventRoutes(
               message: "Parking Pass confirmation is still being reconciled. Check My Schedule before paying again.",
             });
           }
-          if (
-            intent.id !== booking.stripePaymentIntentId ||
-            intent.metadata?.bookingId !== booking.id ||
-            intent.metadata?.eventId !== booking.eventId ||
-            intent.metadata?.truckId !== booking.truckId ||
-            intent.metadata?.hostId !== booking.hostId ||
-            intent.currency !== "usd" ||
-            intent.amount !== booking.totalCents ||
-            !Number.isSafeInteger(intent.amount_received) ||
-            intent.amount_received < booking.totalCents
-          ) {
+          if (!isLegacyParkingPaymentBound(booking, intent, retrievedStripeAccount)) {
             return res.status(409).json({
               code: "booking_reconciliation_required",
               message: "Payment could not be matched to this booking.",
@@ -2532,6 +2525,18 @@ export function registerEventRoutes(
               eq(eventBookings.id, bookingId),
               eq(eventBookings.status, "pending"),
               eq(eventBookings.stripePaymentIntentId, booking.stripePaymentIntentId),
+              eq(eventBookings.eventId, booking.eventId),
+              eq(eventBookings.truckId, booking.truckId),
+              eq(eventBookings.hostId, booking.hostId),
+              eq(eventBookings.hostPriceCents, booking.hostPriceCents),
+              eq(eventBookings.platformFeeCents, booking.platformFeeCents),
+              eq(eventBookings.totalCents, booking.totalCents),
+              booking.stripeApplicationFeeAmount === null
+                ? isNull(eventBookings.stripeApplicationFeeAmount)
+                : eq(eventBookings.stripeApplicationFeeAmount, booking.stripeApplicationFeeAmount),
+              booking.stripeTransferDestination === null
+                ? isNull(eventBookings.stripeTransferDestination)
+                : eq(eventBookings.stripeTransferDestination, booking.stripeTransferDestination),
             ),
           )
           .returning({ id: eventBookings.id });
