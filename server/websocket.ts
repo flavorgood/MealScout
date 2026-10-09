@@ -120,7 +120,8 @@ type SessionRequest = IncomingMessage & {
 // Global WebSocket server instance
 let io: SocketIOServer | null = null;
 
-// Store user subscriptions for cleanup
+// Each native socket owns its subscriptions. Multiple tabs/devices may share
+// one user or session; their unsubscribe and disconnect lifecycles are separate.
 const userSubscriptions = new Map<string, Set<string>>();
 
 export function setupWebSocketServer(
@@ -278,9 +279,8 @@ export function setupWebSocketServer(
         // Initialize user subscriptions tracking
         const userKey =
           socket.userId || socket.sessionID || `fallback_${socket.id}`;
-        if (!userSubscriptions.has(userKey)) {
-          userSubscriptions.set(userKey, new Set());
-        }
+        const subscriptionKey = socket.id;
+        userSubscriptions.set(subscriptionKey, new Set());
 
         // Handle subscription to nearby trucks by location
         socket.on(
@@ -315,7 +315,7 @@ export function setupWebSocketServer(
               const roomKey = `grid_${gridLat}_${gridLng}`;
 
               // Leave previous geographic rooms
-              const userSubs = userSubscriptions.get(userKey);
+              const userSubs = userSubscriptions.get(subscriptionKey);
               if (userSubs) {
                 userSubs.forEach((room) => {
                   if (room.startsWith("grid_")) {
@@ -399,7 +399,7 @@ export function setupWebSocketServer(
 
             const roomKey = `restaurant_${restaurantId}`;
             socket.join(roomKey);
-            userSubscriptions.get(userKey)?.add(roomKey);
+            userSubscriptions.get(subscriptionKey)?.add(roomKey);
 
             socket.emit("subscribed", { restaurantId, room: roomKey });
             console.log(
@@ -438,7 +438,7 @@ export function setupWebSocketServer(
 
             const roomKey = `kitchen:${restaurantId}`;
             socket.join(roomKey);
-            userSubscriptions.get(userKey)?.add(roomKey);
+            userSubscriptions.get(subscriptionKey)?.add(roomKey);
 
             socket.emit("subscribed", { restaurantId, room: roomKey });
             console.log(
@@ -455,7 +455,7 @@ export function setupWebSocketServer(
         socket.on("unsubscribe_kitchen", (data) => {
           try {
             const roomKey = `kitchen:${data.restaurantId}`;
-            const userSubs = userSubscriptions.get(userKey);
+            const userSubs = userSubscriptions.get(subscriptionKey);
             if (userSubs?.has(roomKey)) {
               socket.leave(roomKey);
               userSubs.delete(roomKey);
@@ -472,7 +472,7 @@ export function setupWebSocketServer(
         // Handle unsubscribe
         socket.on("unsubscribe", (data) => {
           try {
-            const userSubs = userSubscriptions.get(userKey);
+            const userSubs = userSubscriptions.get(subscriptionKey);
             if (data.room && userSubs?.has(data.room)) {
               socket.leave(data.room);
               userSubs.delete(data.room);
@@ -501,8 +501,8 @@ export function setupWebSocketServer(
           incDisconnect();
           maybeWarnIfChurn((msg) => console.warn(msg));
 
-          // Clean up user subscriptions
-          userSubscriptions.delete(userKey);
+          // Remove only this connection's room intent; sibling sockets remain.
+          userSubscriptions.delete(subscriptionKey);
         });
   });
 

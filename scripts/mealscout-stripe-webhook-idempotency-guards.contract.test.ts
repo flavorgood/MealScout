@@ -26,6 +26,10 @@ const hostEarningsSource = readFileSync(
   "server/hostEarningsService.ts",
   "utf8",
 );
+const legacyPaymentBindingSource = readFileSync(
+  "server/services/legacyParkingPaymentBinding.ts",
+  "utf8",
+);
 
 function requireIncludes(snippet: string, label = snippet) {
   assert.ok(source.includes(snippet), `Missing idempotency guard: ${label}`);
@@ -79,9 +83,22 @@ requireIncludes(
   '// Idempotent',
   "single-event booking idempotency comment",
 );
+assert.match(
+  source,
+  /!isLegacyParkingPaymentBound\(\s*booking,\s*paymentIntent,\s*event\.account\s*\?\?\s*null\s*\)/,
+  "Single-event success must validate the shared payment binding in the signed account scope",
+);
+assert.ok(
+  legacyPaymentBindingSource.includes("intent.id !== booking.stripePaymentIntentId"),
+  "Shared legacy payment binding must reject a mismatched stored intent",
+);
 requireIncludes(
-  "bookingIntentId !== paymentIntent.id",
-  "single-event booking stored-intent mismatch guard",
+  "eq(eventBookings.stripePaymentIntentId, bookingIntentId)",
+  "single-event booking confirmation must retain the validated intent in its atomic update",
+);
+requireIncludes(
+  'eq(eventBookings.status, "pending")',
+  "single-event booking confirmation must retain its pending-state atomic guard",
 );
 requireIncludes(
   'if (booking.status === "confirmed") {',

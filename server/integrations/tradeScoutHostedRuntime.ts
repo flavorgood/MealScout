@@ -5,6 +5,13 @@ import { isIP, type Socket } from "node:net";
 import { createHash } from "node:crypto";
 import type { Duplex } from "node:stream";
 
+/** Verified existing Render service; transport identity is not profile or session authority. */
+export const MEALSCOUT_RENDER_PRIVATE_SERVICE = Object.freeze({
+  serviceId: "srv-d5escdh5pdvs73foo41g" as const,
+  repositoryId: 1111403137,
+  upstreamOrigin: "http://mealscout:10000",
+});
+
 type NativeUpgradeContext = Readonly<{
   signal: AbortSignal;
   accept(close: () => void): boolean;
@@ -28,6 +35,8 @@ export type MealScoutHostedRuntimeOptions = Readonly<{
   ownerUserId: string;
   /** Fixed existing native runtime, supplied only by the server owner. */
   upstreamOrigin: string;
+  /** Explicit owner assembly for this exact existing private service only. */
+  privateServiceBinding?: typeof MEALSCOUT_RENDER_PRIVATE_SERVICE.serviceId;
   responseIdleTimeoutMs?: number;
   /** Enable only after the fixed native runtime runs the reviewed pre101 repair. */
   nativeRealtimeAuthorization?: "mealscout-engine-session-v1";
@@ -46,7 +55,14 @@ function exactHost(value: unknown): string | null {
     ? host : null;
 }
 
-function fixedOrigin(value: string): URL {
+function fixedOrigin(value: string, privateServiceBinding?: string): URL {
+  if (privateServiceBinding !== undefined) {
+    if (privateServiceBinding !== MEALSCOUT_RENDER_PRIVATE_SERVICE.serviceId ||
+        value !== MEALSCOUT_RENDER_PRIVATE_SERVICE.upstreamOrigin) {
+      throw new Error("MealScout private transport requires its exact existing Render service binding and origin");
+    }
+    return new URL(MEALSCOUT_RENDER_PRIVATE_SERVICE.upstreamOrigin);
+  }
   const origin = new URL(value);
   const localHttp = origin.protocol === "http:" &&
     (origin.hostname === "127.0.0.1" || origin.hostname === "[::1]");
@@ -229,7 +245,7 @@ export function createMealScoutHostedRuntimeBinding(
       typeof options.ownerUserId !== "string" || !options.ownerUserId.trim()) {
     throw new Error("MealScout requires exact existing profile/domain/owner routing identities");
   }
-  const upstream = fixedOrigin(options.upstreamOrigin);
+  const upstream = fixedOrigin(options.upstreamOrigin, options.privateServiceBinding);
   if (upstream.hostname.toLowerCase() === host) {
     throw new Error("MealScout upstream must be separate from its hosted entry point");
   }
