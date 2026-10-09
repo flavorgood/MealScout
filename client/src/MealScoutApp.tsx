@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import { createContext, useContext } from "react";
 import type { MealScoutContext } from "./types";
 import App from "./App";
+import { apiUrl } from "@/lib/api";
 
 const MealScoutContextReact = createContext<MealScoutContext | null>(null);
 
@@ -50,7 +51,9 @@ export async function performMealScoutSSO(
   options?: { baseUrl?: string; timeoutMs?: number },
 ): Promise<MealScoutUser> {
   const baseUrl = options?.baseUrl?.replace(/\/$/, "") ?? "";
-  const url = `${baseUrl}/api/auth/tradescout/sso`;
+  const url = options?.baseUrl === undefined
+    ? apiUrl("/api/auth/tradescout/sso")
+    : `${baseUrl}/api/auth/tradescout/sso`;
 
   const controller = new AbortController();
   const timeout = options?.timeoutMs ?? 10000;
@@ -84,4 +87,3 @@ export async function performMealScoutSSO(
     clearTimeout(timeoutId);
   }
 }
-
