@@ -340,7 +340,16 @@ function PaymentForm({
   );
 }
 
-export function BookingPaymentModal({
+export function BookingPaymentModal(props: BookingPaymentModalProps) {
+  const { user } = useAuth();
+  const userId = user?.id || "";
+  // A closed checkout or a different actor/booking must not inherit a payment
+  // form, in-flight callbacks, or mutable request refs from an earlier session.
+  if (!props.open) return null;
+  return <BookingPaymentSession key={JSON.stringify([userId, props.passId, props.truckId])} {...props} userId={userId} />;
+}
+
+function BookingPaymentSession({
   open,
   onOpenChange,
   passId,
@@ -350,10 +359,9 @@ export function BookingPaymentModal({
   eventDetails,
   bookingContext,
   onSuccess,
-}: BookingPaymentModalProps) {
+  userId,
+}: BookingPaymentModalProps & { userId: string }) {
   const { toast } = useToast();
-  const { user } = useAuth();
-  const userId = user?.id || "";
   const requestScope = { userId, passId, truckId };
   const [savedRequest, setSavedRequest] = useState<ParkingBookingRequest | null>(null);
   const [requestMessage, setRequestMessage] = useState("");
@@ -390,7 +398,6 @@ export function BookingPaymentModal({
   const [isStripeConfigLoading, setIsStripeConfigLoading] = useState(false);
   // true = host has Stripe Connect ready; false = payment held on platform, host payout deferred
   const [hostPaymentsReady, setHostPaymentsReady] = useState<boolean | null>(null);
-  const cancelOnInitiateRef = useRef(false);
   const idempotencyKeyRef = useRef<string | null>(null);
   const stage: "review" | "pay" = clientSecret ? "pay" : "review";
   const stripePromise = getStripePromise(stripePublishableKey);
@@ -399,7 +406,6 @@ export function BookingPaymentModal({
   useEffect(() => {
     let cancelled = false;
     if (open) {
-      cancelOnInitiateRef.current = false;
       if (!stripePublishableKey) {
         setIsStripeConfigLoading(true);
         fetch(apiUrl("/api/payments/stripe-config"))
@@ -473,7 +479,8 @@ export function BookingPaymentModal({
         { method: "POST", credentials: "include" },
       );
     } catch {
-      // Best effort; pending holds will eventually expire.
+      // Keep the saved request: a lost response is not verified cancellation.
+      // Even HTTP 200 from the legacy route does not prove provider cancellation.
     }
   };
 
@@ -499,6 +506,14 @@ export function BookingPaymentModal({
     }
   };
 
+  const clearSaved = () => {
+    if (!idempotencyKeyRef.current) return;
+    try {
+      clearParkingBookingRequest(requestScope, idempotencyKeyRef.current);
+      setSavedRequest(null);
+    } catch { /* Retaining a receipt is safer than silently creating a new request. */ }
+  };
+
   const initiateBooking = async () => {
     if (initiatePendingRef.current || isLoading || clientSecret || recoveryBlocked) return;
     if (!userId) { setRequestMessage("Sign in before starting this booking."); return; }
@@ -515,13 +530,6 @@ export function BookingPaymentModal({
     setRequestMessage("");
     const activeScope = requestScopeRef.current;
     let requestTimer: ReturnType<typeof setTimeout> | undefined;
-    const clearSaved = () => {
-      if (!idempotencyKeyRef.current) return;
-      try {
-        clearParkingBookingRequest(requestScope, idempotencyKeyRef.current);
-        setSavedRequest(null);
-      } catch { /* Retaining a receipt is safer than silently creating a new request. */ }
-    };
     try {
 
       const creditCents = Math.max(
@@ -538,6 +546,7 @@ export function BookingPaymentModal({
             })
             .filter((value) => value.length > 0)
         : [];
+      const isReplay = loadParkingBookingRequest(requestScope) !== null;
       const request = prepareParkingBookingRequest(requestScope, {
         truckId, slotTypes, selectedDates: normalizedSelectedDates,
         applyCreditsCents: creditCents > 0 ? creditCents : undefined,
@@ -563,16 +572,15 @@ export function BookingPaymentModal({
       if (!res.ok) {
         const data = await res.json();
         if (requestScopeRef.current !== activeScope) return;
-        // These responses are emitted before a new hold/payment is created.
-        // Authentication loss, revoked access, conflicts, rate limits and server errors
-        // do not prove that an earlier booking was never created. Keep its identity.
-        if ([400, 404, 422].includes(res.status) && !data?.bookingId && typeof data?.message === "string") clearSaved();
+        // A first-attempt input refusal permits correction. A replay refusal
+        // cannot disprove work from an earlier accepted or interrupted attempt.
+        if (!isReplay && [400, 404, 422].includes(res.status) && !data?.bookingId && typeof data?.message === "string") clearSaved();
         if (
           res.status === 409 &&
           (data?.code === "truck_profile_required" ||
             data?.code === "truck_verification_required")
         ) {
-          clearSaved();
+          if (!isReplay) clearSaved();
           toast({
             title:
               data?.code === "truck_verification_required"
@@ -597,6 +605,19 @@ export function BookingPaymentModal({
       if (data?.bookingRecovery === true) {
         const intent = String(data.paymentIntentId || "").trim();
         if (!intent.startsWith("pi_")) throw new Error("Recovered booking reference is invalid.");
+        // Recovery identifies an existing payment; it is not itself settlement.
+        const statusResponse = await fetch(apiUrl(`/api/bookings/payment-intent/${encodeURIComponent(intent)}?truckId=${encodeURIComponent(truckId)}`), {
+          credentials: "include", signal: controller.signal,
+        });
+        if (requestScopeRef.current !== activeScope) return;
+        if (statusResponse.ok) {
+          const recovered = await statusResponse.json();
+          if (requestScopeRef.current !== activeScope) return;
+          if (recovered?.status === "confirmed" || recovered?.status === "credited") {
+            handleSuccess(recovered.status);
+            return;
+          }
+        }
         const params = new URLSearchParams({ booking: "success", payment_intent: intent, truckId });
         if (/^\d{4}-\d{2}-\d{2}$/.test(String(data.bookingStartDate || ""))) params.set("date", data.bookingStartDate);
         window.location.assign(`/parking-pass?${params.toString()}`);
@@ -613,7 +634,6 @@ export function BookingPaymentModal({
         return;
       }
       if (data?.bypassed) {
-        clearSaved();
         toast({
           title: "Parking Pass Confirmed!",
           description: "Your parking spot has been reserved.",
@@ -623,13 +643,6 @@ export function BookingPaymentModal({
         return;
       }
 
-      if (cancelOnInitiateRef.current) {
-        const intentId = String(data.paymentIntentId || "").trim();
-        if (intentId) {
-          await cancelCheckout(intentId);
-        }
-        return;
-      }
       const nextClientSecret = String(data.clientSecret || "").trim();
       const nextPaymentIntentId = String(data.paymentIntentId || "").trim();
       if (!nextClientSecret || !nextPaymentIntentId) {
@@ -639,7 +652,8 @@ export function BookingPaymentModal({
         await cancelCheckout(nextPaymentIntentId);
         throw new Error("Stripe is not configured for this environment.");
       }
-      clearSaved();
+      // Setup is not settlement. Keep the original request through payment,
+      // redirects, reloads, pending outcomes and unverified cancellation.
       setClientSecret(nextClientSecret);
       setPaymentIntentId(nextPaymentIntentId);
       setHostPaymentsReady(data.hostPaymentsReady !== false);
@@ -670,6 +684,7 @@ export function BookingPaymentModal({
   };
 
   const handleClose = () => {
+    requestScopeRef.current = "";
     resetState();
     onOpenChange(false);
   };
@@ -684,16 +699,18 @@ export function BookingPaymentModal({
       return;
     }
     const intentId = paymentIntentId;
-    cancelOnInitiateRef.current = initiatePendingRef.current;
-    resetState();
-    onOpenChange(false);
-
     if (intentId) {
       void cancelCheckout(intentId);
+      toast({ title: "Request saved", description: "Cancellation is not yet verified. Check My Schedule before paying again." });
     }
+    handleClose();
   };
 
   const handleSuccess = (outcome: "confirmed" | "pending" | "credited") => {
+    if (requestScopeRef.current !== JSON.stringify([userId, passId, truckId, open])) return;
+    // Only the server's settled outcomes retire this session's exact receipt.
+    // Pending, unknown and merely acknowledged cancellations keep it recoverable.
+    if (outcome === "confirmed" || outcome === "credited") clearSaved();
     handleClose();
     onSuccess({ outcome });
   };

@@ -21,6 +21,7 @@ import { registerEventCoordinatorRoutes } from "./routes/eventCoordinatorRoutes"
 import { registerAdminManagementRoutes } from "./routes/adminManagementRoutes";
 import { registerGeoAdRoutes } from "./routes/geoAdRoutes";
 import { registerBookingRoutes } from "./routes/bookingRoutes";
+import { registerParkingCheckoutRoutes } from "./routes/parkingCheckoutRoutes";
 import { registerSupplierMarketplaceRoutes } from "./routes/supplierMarketplaceRoutes";
 import { registerSupplyScoutRoutes } from "./routes/supplyScoutRoutes";
 import { registerScoutSurfaceRoutes } from "./routes/scoutSurfaceRoutes";
@@ -193,6 +194,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   registerEventCoordinatorRoutes(app, { hasCompleteProfileAccess });
 
   // Booking Management
+  registerParkingCheckoutRoutes(app, { stripe });
   registerBookingRoutes(app, { hasCompleteProfileAccess });
 
   // Supplier marketplace (suppliers + food truck pickup orders)

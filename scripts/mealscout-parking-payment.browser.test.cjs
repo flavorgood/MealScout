@@ -37,8 +37,8 @@ modules["@/hooks/useAuth"]={useAuth:()=>({user:window.__userId?{id:window.__user
 modules["@/lib/parking-booking-request"]={};new Function("exports",${JSON.stringify(requestCode)})(modules["@/lib/parking-booking-request"]);
 const mod={exports:{}};new Function('require','exports','module','React','Date','setTimeout',${JSON.stringify(code)})(id=>{if(!(id in modules))throw new Error('Unstubbed '+id);return modules[id];},mod.exports,mod,React,DateFixture,(fn,delay)=>window.setTimeout(fn,delay===1500?0:delay));
 const Modal=mod.exports.BookingPaymentModal;
-function App(){const [open,setOpen]=React.useState(true);const close=React.useCallback(value=>{window.__closes.push(value);setOpen(value);},[]);const success=React.useCallback(value=>window.__outcomes.push(value),[]);return React.createElement(Modal,{open,onOpenChange:close,onSuccess:success,passId:'pass-a',truckId:'truck-a',slotTypes:['lunch'],selectedDates:['2026-10-01'],eventDetails:{name:'Test pass',hostName:'Test host',date:'2026-10-01',startTime:'11:00',endTime:'14:00',slotSummary:'Lunch'}});}
-let testRoot;window.__start=()=>{sessionStorage.setItem('mealscout_route_booking_context',JSON.stringify({routeId:'test-route'}));testRoot=createRoot(document.getElementById('root'));testRoot.render(React.createElement(App));};window.__remount=()=>{testRoot.unmount();testRoot=createRoot(document.getElementById('root'));testRoot.render(React.createElement(App));};window.__ready=true;
+function App(){const [open,setOpen]=React.useState(true);window.__setOpen=setOpen;const close=React.useCallback(value=>{window.__closes.push(value);setOpen(value);},[]);const success=React.useCallback(value=>window.__outcomes.push(value),[]);return React.createElement(Modal,{open,onOpenChange:close,onSuccess:success,passId:window.__passId||'pass-a',truckId:window.__truckId||'truck-a',slotTypes:['lunch'],selectedDates:['2026-10-01'],eventDetails:{name:'Test pass',hostName:'Test host',date:'2026-10-01',startTime:'11:00',endTime:'14:00',slotSummary:'Lunch'}});}
+let testRoot;window.__start=()=>{sessionStorage.setItem('mealscout_route_booking_context',JSON.stringify({routeId:'test-route'}));testRoot=createRoot(document.getElementById('root'));testRoot.render(React.createElement(App));};window.__remount=()=>{testRoot.unmount();testRoot=createRoot(document.getElementById('root'));testRoot.render(React.createElement(App));};window.__rerender=()=>testRoot.render(React.createElement(App));window.__ready=true;
 `;
 const paymentSetup={paymentIntentId:'pi_test',clientSecret:'secret_test',totalCents:2100,breakdown:{hostPrice:1800,platformFee:300},hostPaymentsReady:false};
 (async()=>{
@@ -48,7 +48,7 @@ const paymentSetup={paymentIntentId:'pi_test',clientSecret:'secret_test',totalCe
  let handler=async(url)=>({body:url==='/api/payout/balance'?{balance:5}:url.includes('/bookings/payment-intent/')?{status:'confirmed'}:url.endsWith('/book')?paymentSetup:{}});
  try{await page.route('**/*',r=>r.abort());await page.exposeFunction('__api',async(url,options)=>{const c={url,method:options.method||'GET',headers:options.headers||{},body:options.body?JSON.parse(options.body):null};calls.push(c);return handler(url,c);});await page.setContent('<div id="root"></div>');await page.addScriptTag({type:'module',content:runtime});await page.waitForFunction(()=>!!window.ReactTestRuntime);await page.addScriptTag({type:'module',content:fixture});await page.waitForFunction(()=>window.__ready);reactVersion=await page.evaluate(()=>ReactTestRuntime.React.version);
  await run({page,calls,setHandler:h=>handler=h,start:()=>page.evaluate(()=>window.__start())});assert.deepEqual(errors,[]);results.push({name,status:'pass'});
- }catch(e){results.push({name,status:'fail',error:e.message});}finally{await context.close();}}
+ }catch(e){results.push({name,status:'fail',error:e.message});}finally{console.error(JSON.stringify(results.at(-1)));await context.close();}}
  const pay=async(page)=>{await page.getByRole('button',{name:'Continue',exact:true}).click();await page.getByTestId('card-field').waitFor();};
  try{
  await test('pending is never labeled or tracked as confirmed',async({page,calls,setHandler,start})=>{
@@ -67,6 +67,7 @@ const paymentSetup={paymentIntentId:'pi_test',clientSecret:'secret_test',totalCe
  await test('payout setup does not promise a reservation before confirmation',async({page,start})=>{await start();await pay(page);assert.ok(!(await page.getByRole('dialog').innerText()).includes('Your booking is guaranteed'));assert.ok((await page.getByRole('dialog').innerText()).includes('not reserved until'));});
  await test('terms and server prices remain visible before paying',async({page,start})=>{await start();await pay(page);await page.getByText('$18.00',{exact:true}).waitFor();await page.getByText('$3.00',{exact:true}).waitFor();await page.getByText('By confirming payment, you acknowledge bookings are non-refundable once confirmed.').waitFor();});
  await require('./qa/parking-request-browser-cases.cjs')({test,paymentSetup});
+ await require('./qa/parking-payment-receipt-cases.cjs')({test,paymentSetup});
  }finally{await browser.close();}
  console.log(JSON.stringify({scope:'React/Chromium checkout component with native UI and mocked storage/API/Stripe',reactVersion,runtimeOverride:!!process.env.UI_REACT_RUNTIME,results},null,2));if(results.some(r=>r.status!=='pass'))process.exitCode=1;
 })().catch(e=>{console.error(e);process.exitCode=1;});

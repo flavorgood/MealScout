@@ -53,17 +53,20 @@ export async function runParkingWebhookNativeProof() {
   assert.ok(casesStart>0&&casesEnd>casesStart);
   replace('new-webhook-cases-only',text.slice(casesStart,casesEnd),"  await runParkingWebhookCases({test,pool,workers,actor,event,request,rowsFor,effects,creates,webhookSecret,setCreateMode:mode=>{createMode=mode;}});\n");
   replace('precise-receipt-scope',"scope:'Actual registered POST /api/parking-pass/:passId/book, native PostgreSQL, four independent OS workers. Authentication and exact manageParkingPass grants are database-backed fixtures; external provider transport is a loopback fixture. Model-derived relevant tables, not complete production migration-chain or live Stripe acceptance.'","scope:'Actual registered booking and signed Stripe webhook routes across four independent OS workers; complete canonical native PostgreSQL schema and actual earnings/credit ledger code. Authentication, grants and provider transport are explicit loopback fixtures. Stripe SDK verifies raw-body signatures using an ephemeral local secret. No live Stripe delivery, charge, settlement or production mutation.'");
+  const cancellationProof=process.env.MEALSCOUT_PARKING_CANCEL_PROOF==='1';
+  if(cancellationProof){const {addParkingCancellationProof}=await import('./parking-cancellation-adapter.mjs');addParkingCancellationProof({replace,root,registry});}
   const derived=path.join(out,'signed-webhook-derived.mjs');fs.writeFileSync(derived,text);
   const tooling=prepareNativeExtensions({root,out});
   const result=spawnSync(process.execPath,[derived],{cwd:root,env:process.env,encoding:'utf8',timeout:180000,maxBuffer:32*1024*1024});
   fs.writeFileSync(path.join(out,'signed-webhook.log'),String(result.stdout||'')+String(result.stderr||''));
   const receiptPath=path.join(out,'receipt.json');
   const report=fs.existsSync(receiptPath)?JSON.parse(fs.readFileSync(receiptPath,'utf8')):{source,result:'fail',harnessFailure:result.error?.message||String(result.stderr||'No receipt')};
-  report.kind='signed-webhook-native-full-schema';report.source=source;
+  report.kind=cancellationProof?'signed-webhook-and-cancellation-native-full-schema':'signed-webhook-native-full-schema';report.source=source;
   report.adapter={canonicalCoreSha256:hash(canonical),derivedCoreSha256:hash(text),edits};
   report.nativeTooling=tooling;report.exitCode=result.status;
   report.files ||= {};
-  for(const file of ['server/routes.ts','scripts/qa/parking-webhook-native.mjs','scripts/qa/parking-webhook-cases.mjs','scripts/qa/parking-host-route-native.mjs'])report.files[file]=hash(fs.readFileSync(path.join(root,file)));
+  for(const file of ['server/routes.ts','scripts/qa/parking-webhook-native.mjs','scripts/qa/parking-webhook-cases.mjs','scripts/qa/parking-host-route-native.mjs',...(cancellationProof?['scripts/qa/parking-cancellation-adapter.mjs','scripts/qa/parking-cancellation-cases.mjs']:[])])report.files[file]=hash(fs.readFileSync(path.join(root,file)));
+  if(cancellationProof)report.scope+=' Also executes the actual registered checkout cancellation route before the webhook, in canonical registration order.';
   report.productionMutations=0;report.liveProviderAcceptance=false;
   if(result.status!==0)report.result='fail';
   fs.writeFileSync(receiptPath,JSON.stringify(report,null,2)+'\n');
