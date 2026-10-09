@@ -364,6 +364,9 @@ async function main() {
       try {
         if (worker.child.connected) worker.child.disconnect();
         await until(() => worker.child.exitCode !== null || worker.child.signalCode !== null || !worker.child.pid, 'owned worker stop', 10000);
+        assert.equal(worker.child.exitCode, 0, 'Owned worker must shut down successfully');
+        assert.equal(worker.child.signalCode, null, 'Owned worker must not require signal termination');
+        assert.equal(worker.errors.length, 0, 'Owned worker must have no captured process errors');
         if (worker.port) assert.equal(await closed(worker.port), true);
       } catch (error) {
         report.cleanup.workerFailure = String(error); report.result = 'fail';
