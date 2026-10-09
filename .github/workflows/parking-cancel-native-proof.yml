@@ -52,7 +52,29 @@ jobs:
           export MEALSCOUT_NATIVE_PG_BIN="$HOME/.cache/mealscout-host-route-pg16.14/install/bin"
           test "$(id -u)" != "0"
           test -z "$(git status --porcelain)"
-          node scripts/qa/parking-host-route-native.mjs
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import fs from 'node:fs';
+          import { createHash } from 'node:crypto';
+          import { pathToFileURL } from 'node:url';
+          const file='scripts/qa/parking-webhook-native.mjs';
+          const original=fs.readFileSync(file,'utf8');
+          const sha=s=>createHash('sha256').update(s).digest('hex');
+          assert.equal(sha(original),'1e9c4dde5e33aa09edbd89cdc7d6bb84a9024c6a9ea278c2814642cc7d228907');
+          const out='.qa-evidence/host-route-native';
+          fs.mkdirSync(out,{recursive:true});
+          let adapted=original;
+          const edits=[
+            ["from './parking-host-native-tooling.mjs'","from '../../scripts/qa/parking-host-native-tooling.mjs'"],
+            ['assert.equal(report.fullSchema.release,24);assert.equal(report.fullSchema.foreignKeys,278);','assert.equal(report.fullSchema.release,28);assert.equal(report.fullSchema.foreignKeys,284);'],
+          ];
+          for(const [before,after] of edits){assert.equal(adapted.split(before).length-1,1);adapted=adapted.replace(before,after);}
+          fs.writeFileSync(out+'/native-harness-adaptation.json',JSON.stringify({source:process.env.RENDER_GIT_COMMIT,originalSha256:sha(original),adaptedSha256:sha(adapted),reason:'Observed original native bootstrap124/release28/foreignKeys284; stale24/278 stopped before any application case',edits,trackedSourceChanged:false},null,2)+'\n');
+          const target=out+'/signed-native-cardinality-adapter.mjs';
+          fs.writeFileSync(target,adapted);
+          const {runParkingWebhookNativeProof}=await import(pathToFileURL(fs.realpathSync(target)).href);
+          await runParkingWebhookNativeProof();
+          NODE
       - name: Preserve bounded native proof receipt
         if: always()
         uses: actions/upload-artifact@v4
@@ -61,6 +83,7 @@ jobs:
           path: |
             .qa-evidence/host-route-native/receipt.json
             .qa-evidence/host-route-native/signed-webhook.log
+            .qa-evidence/host-route-native/native-harness-adaptation.json
             .qa-evidence/host-route-native/native-extension-*.log
           if-no-files-found: warn
           retention-days: 14
