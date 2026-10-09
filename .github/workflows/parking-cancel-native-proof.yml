@@ -57,6 +57,7 @@ jobs:
           import fs from 'node:fs';
           import { createHash } from 'node:crypto';
           import { pathToFileURL } from 'node:url';
+          import path from 'node:path';
           const file='scripts/qa/parking-webhook-native.mjs';
           const original=fs.readFileSync(file,'utf8');
           const sha=s=>createHash('sha256').update(s).digest('hex');
@@ -66,11 +67,15 @@ jobs:
           let adapted=original;
           const edits=[
             ["from './parking-host-native-tooling.mjs'","from '../../scripts/qa/parking-host-native-tooling.mjs'"],
+            ["import('./parking-cancellation-adapter.mjs')","import('../../scripts/qa/parking-cancellation-adapter.mjs')"],
             ['assert.equal(report.fullSchema.release,24);assert.equal(report.fullSchema.foreignKeys,278);','assert.equal(report.fullSchema.release,28);assert.equal(report.fullSchema.foreignKeys,284);'],
           ];
           for(const [before,after] of edits){assert.equal(adapted.split(before).length-1,1);adapted=adapted.replace(before,after);}
           fs.writeFileSync(out+'/native-harness-adaptation.json',JSON.stringify({source:process.env.RENDER_GIT_COMMIT,originalSha256:sha(original),adaptedSha256:sha(adapted),reason:'Observed original native bootstrap124/release28/foreignKeys284; stale24/278 stopped before any application case',edits,trackedSourceChanged:false},null,2)+'\n');
           const target=out+'/signed-native-cardinality-adapter.mjs';
+          for(const match of adapted.matchAll(/(?:from\\s*|import\\(\\s*)['"]([^'"]+)['"]/g)) {
+            if(match[1].startsWith('.')) assert.ok(fs.existsSync(path.resolve(path.dirname(target),match[1])),'Unresolved copied harness import: '+match[1]);
+          }
           fs.writeFileSync(target,adapted);
           const {runParkingWebhookNativeProof}=await import(pathToFileURL(fs.realpathSync(target)).href);
           await runParkingWebhookNativeProof();
