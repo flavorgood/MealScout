@@ -1332,18 +1332,18 @@ assert.equal(admissionCallback.parameters.length, 1);
 assert.ok(ts.isIdentifier(admissionCallback.parameters[0].name));
 const transactionClient = admissionCallback.parameters[0].name.text;
 assert.ok(ts.isBlock(admissionCallback.body));
-const bindsClient = (name: ts.BindingName): boolean => ts.isIdentifier(name)
-  ? name.text === transactionClient
-  : name.elements.some((element) => ts.isBindingElement(element) && bindsClient(element.name));
-const writesClient = (expression: ts.Expression): boolean => {
-  if (ts.isIdentifier(expression)) return expression.text === transactionClient;
-  if (ts.isParenthesizedExpression(expression)) return writesClient(expression.expression);
+const bindsClient = (name: ts.BindingName, binding = transactionClient): boolean => ts.isIdentifier(name)
+  ? name.text === binding
+  : name.elements.some((element) => ts.isBindingElement(element) && bindsClient(element.name, binding));
+const writesClient = (expression: ts.Expression, binding = transactionClient): boolean => {
+  if (ts.isIdentifier(expression)) return expression.text === binding;
+  if (ts.isParenthesizedExpression(expression)) return writesClient(expression.expression, binding);
   if (ts.isArrayLiteralExpression(expression)) return expression.elements.some((element) =>
-    ts.isSpreadElement(element) ? writesClient(element.expression) : writesClient(element));
+    ts.isSpreadElement(element) ? writesClient(element.expression, binding) : writesClient(element, binding));
   if (ts.isObjectLiteralExpression(expression)) return expression.properties.some((property) =>
-    ts.isShorthandPropertyAssignment(property) ? property.name.text === transactionClient :
-    ts.isPropertyAssignment(property) ? writesClient(property.initializer) :
-    ts.isSpreadAssignment(property) && writesClient(property.expression));
+    ts.isShorthandPropertyAssignment(property) ? property.name.text === binding :
+    ts.isPropertyAssignment(property) ? writesClient(property.initializer, binding) :
+    ts.isSpreadAssignment(property) && writesClient(property.expression, binding));
   return false;
 };
 const assertTransactionClientBinding = (node: ts.Node) => {
@@ -1357,6 +1357,19 @@ const assertTransactionClientBinding = (node: ts.Node) => {
   ts.forEachChild(node, assertTransactionClientBinding);
 };
 assertTransactionClientBinding(admissionCallback.body);
+const assertAssessmentBinding = (node: ts.Node) => {
+  const assessor = "assessParkingPassTruckEligibility";
+  if (ts.isVariableDeclaration(node) || ts.isParameter(node)) {
+    assert.ok(!bindsClient(node.name, assessor), "the current eligibility assessor must not be locally shadowed");
+  }
+  if (ts.isFunctionDeclaration(node) && node.name) assert.notEqual(node.name.text, assessor);
+  if (ts.isBinaryExpression(node) && node.operatorToken.kind >= ts.SyntaxKind.FirstAssignment &&
+      node.operatorToken.kind <= ts.SyntaxKind.LastAssignment) {
+    assert.ok(!writesClient(node.left, assessor), "the current eligibility assessor must not be reassigned");
+  }
+  ts.forEachChild(node, assertAssessmentBinding);
+};
+assertAssessmentBinding(canonicalParkingBooking.handler.body);
 const admissionLoops = admissionCallback.body.statements.filter(ts.isForStatement);
 assert.equal(admissionLoops.length, 1, "admission must bind the per-date loop inside its owning transaction");
 const admissionLoop = admissionLoops[0];
@@ -1394,6 +1407,30 @@ const admissionDeclaration = (name: string) => {
 const currentTruckRead = admissionDeclaration("currentTruck");
 const currentUserRead = admissionDeclaration("currentUser");
 const currentEligibilityRead = admissionDeclaration("currentEligibility");
+const currentEligibilityInitializer = currentEligibilityRead.declaration.initializer!;
+assert.ok(ts.isConditionalExpression(currentEligibilityInitializer),
+  "current eligibility must be assessed from the locked truck and user reads");
+const currentEligibilityCondition = currentEligibilityInitializer.condition;
+assert.ok(ts.isBinaryExpression(currentEligibilityCondition) &&
+  currentEligibilityCondition.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken &&
+  ts.isIdentifier(currentEligibilityCondition.left) && currentEligibilityCondition.left.text === "currentTruck" &&
+  ts.isIdentifier(currentEligibilityCondition.right) && currentEligibilityCondition.right.text === "currentUser");
+const currentAssessment = currentEligibilityInitializer.whenTrue;
+assert.ok(ts.isCallExpression(currentAssessment) && ts.isIdentifier(currentAssessment.expression) &&
+  currentAssessment.expression.text === "assessParkingPassTruckEligibility",
+  "current eligibility must call the assessment directly, without a preflight fallback");
+assert.equal(currentAssessment.arguments.length, 1);
+const currentAssessmentInput = currentAssessment.arguments[0];
+assert.ok(ts.isObjectLiteralExpression(currentAssessmentInput));
+assert.equal(currentAssessmentInput.properties.length, 2);
+for (const [field, binding] of [["user", "currentUser"], ["truck", "currentTruck"]]) {
+  assert.equal(currentAssessmentInput.properties.filter((property) => ts.isPropertyAssignment(property) &&
+    ts.isIdentifier(property.name) && property.name.text === field &&
+    ts.isIdentifier(property.initializer) && property.initializer.text === binding).length, 1,
+    `current eligibility ${field} must use its locked transaction read`);
+}
+assert.equal(currentEligibilityInitializer.whenFalse.kind, ts.SyntaxKind.NullKeyword,
+  "missing locked eligibility reads must fail closed");
 const holdInsert = admissionDeclaration("created");
 const awaitedClientMethod = (initializer: ts.Expression, method: string) => {
   assert.ok(ts.isAwaitExpression(initializer), "the admission operation must be awaited");
@@ -1405,9 +1442,25 @@ const awaitedClientMethod = (initializer: ts.Expression, method: string) => {
   }
   assert.fail(`admission ${method} must use the owning transaction receiver chain`);
 };
-for (const currentRead of [currentTruckRead, currentUserRead]) {
-  awaitedClientMethod(currentRead.declaration.initializer!, "select");
+const compactAdmissionExpression = (expression: ts.Expression) => admissionPrinter.printNode(
+  ts.EmitHint.Unspecified, expression, expression.getSourceFile(),
+).replace(/\s+/g, "").replace(/,\}/g, "}");
+const lockedEligibilityReads = [
+  { read: currentTruckRead, name: "currentTruck", query: `await ${transactionClient}.select({businessType:restaurants.businessType,isFoodTruck:restaurants.isFoodTruck,insuranceVerified:restaurants.insuranceVerified,insuranceExpiresAt:restaurants.insuranceExpiresAt}).from(restaurants).where(eq(restaurants.id,truckId)).for("share")` },
+  { read: currentUserRead, name: "currentUser", query: `await ${transactionClient}.select({userType:users.userType,emailVerified:users.emailVerified}).from(users).where(eq(users.id,userId)).for("share")` },
+];
+for (const { read, name, query } of lockedEligibilityReads) {
+  assert.ok(read.declaration.parent.flags & ts.NodeFlags.Const, "locked eligibility reads must remain const");
+  assert.ok(ts.isArrayBindingPattern(read.declaration.name) && read.declaration.name.elements.length === 1);
+  const binding = read.declaration.name.elements[0];
+  assert.ok(ts.isBindingElement(binding) && ts.isIdentifier(binding.name) && binding.name.text === name &&
+    !binding.initializer && !binding.dotDotDotToken, "locked eligibility reads must not fall back to preflight values");
+  awaitedClientMethod(read.declaration.initializer!, "select");
+  assert.equal(compactAdmissionExpression(read.declaration.initializer!), query.replace(/\s+/g, ""),
+    `locked ${name} must select current verification fields for its exact ID under a share lock`);
 }
+assert.ok(currentEligibilityRead.declaration.parent.flags & ts.NodeFlags.Const);
+assert.ok(ts.isIdentifier(currentEligibilityRead.declaration.name), "current eligibility must retain its direct const binding");
 const holdInsertCall = awaitedClientMethod(holdInsert.declaration.initializer!, "insert");
 assert.ok(ts.isIdentifier(holdInsertCall.arguments[0]) && holdInsertCall.arguments[0].text === "eventBookings",
   "the owning admission transaction must insert the booking hold");
@@ -1416,8 +1469,10 @@ assert.ok(eventLock.index < currentTruckRead.index && currentTruckRead.index < c
   "admission must acquire its lock before reading and rechecking current eligibility, before inserting holds");
 const eligibilityDenials = admissionStatements.flatMap((statement, index) => {
   if (!ts.isIfStatement(statement) || !ts.isBlock(statement.thenStatement)) return [];
+  if (statement.thenStatement.statements.length !== 1) return [];
   const condition = admissionPrinter.printNode(ts.EmitHint.Unspecified, statement.expression, statement.getSourceFile());
-  if (!/!currentEligibility\.isTruckProfile[\s\S]*!currentEligibility\.roleAllowed[\s\S]*!currentEligibility\.emailVerified[\s\S]*!currentEligibility\.storedInsuranceValid/.test(condition)) return [];
+  const requiredCondition = "!currentEligibility || !currentEligibility.isTruckProfile || !currentEligibility.roleAllowed || (!currentEligibility.shouldBypassVerificationGate && (!currentEligibility.emailVerified || !currentEligibility.storedInsuranceValid))";
+  if (condition.replace(/\s+/g, "") !== requiredCondition.replace(/\s+/g, "")) return [];
   const throws = statement.thenStatement.statements.filter(ts.isThrowStatement);
   if (throws.length !== 1 || !throws[0].expression || !ts.isCallExpression(throws[0].expression)) return [];
   const error = throws[0].expression;
@@ -1430,6 +1485,10 @@ const eligibilityDenials = admissionStatements.flatMap((statement, index) => {
   return [index];
 });
 assert.equal(eligibilityDenials.length, 1, "current eligibility must have one fail-closed transaction denial");
+assert.ok(currentTruckRead.index + 1 === currentUserRead.index &&
+  currentUserRead.index + 1 === currentEligibilityRead.index &&
+  currentEligibilityRead.index + 1 === eligibilityDenials[0],
+  "locked eligibility reads, assessment and denial must remain consecutive without intervening field mutations");
 assert.ok(currentEligibilityRead.index < eligibilityDenials[0] && eligibilityDenials[0] < holdInsert.index,
   "current qualification denial must execute after the locked recheck and before hold insertion");
 assert.match(
