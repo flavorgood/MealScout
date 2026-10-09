@@ -9,8 +9,8 @@ const __dirname = path.dirname(__filename);
 const repoRoot = __dirname;
 const clientRoot = path.resolve(repoRoot, "client");
 
-export default defineConfig({
-  base: PUBLIC_PROFILE_APP_ASSET_BASE,
+export default defineConfig(({ command, isPreview }) => ({
+  base: command === "serve" && !isPreview ? "/" : PUBLIC_PROFILE_APP_ASSET_BASE,
   define: {
     __BUILD_ID__: JSON.stringify(Date.now().toString(36)),
   },
@@ -45,4 +45,4 @@ export default defineConfig({
       deny: ["**/.*"],
     },
   },
-});
+}));
