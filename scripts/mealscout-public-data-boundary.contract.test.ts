@@ -1474,6 +1474,9 @@ const assertExecutedAdmission = (
   assert.ok(ts.isArrowFunction(callback) || ts.isFunctionExpression(callback));
   assert.ok(ts.isBlock(callback.body) && callback.body.statements.length === 5,
     "admission callback must execute its prelude, loop, checkpoint and return without alternate exits");
+  assert.ok(callback.parameters.length === 1 && ts.isIdentifier(callback.parameters[0].name),
+    "admission callback must retain one direct owning transaction client");
+  const owningAdmissionClient = callback.parameters[0].name.text;
   const executionPrinter = ts.createPrinter({ removeComments: true });
   const expectedPrelude = ts.createSourceFile("admission-prelude.ts",
     "const now = new Date(); const inserted: any[] = [];", ts.ScriptTarget.Latest, true);
@@ -1542,28 +1545,40 @@ const assertExecutedAdmission = (
       executionPrinter.printNode(ts.EmitHint.Unspecified, expectedCollectionTail.statements[index], expectedCollectionTail),
       "admission loop must reject an absent result and unconditionally append each created hold");
   }
+
+  const directLockStatement = loop.statement.statements[3];
+  assert.ok(ts.isExpressionStatement(directLockStatement) && ts.isAwaitExpression(directLockStatement.expression) &&
+    ts.isCallExpression(directLockStatement.expression.expression),
+    "admission loop must acquire its row lock immediately after the canonical row prelude");
+  const directLockCall = directLockStatement.expression.expression;
+  assert.ok(ts.isPropertyAccessExpression(directLockCall.expression) &&
+    ts.isIdentifier(directLockCall.expression.expression) &&
+    directLockCall.expression.expression.text === owningAdmissionClient &&
+    directLockCall.expression.name.text === "execute",
+    "admission loop must acquire its direct lock through the owning transaction");
+
   const appendStatement = loop.statement.statements.at(-1)!;
   const allowedCollectionDeclarations = new Map<string, ts.Node>([
     ["inserted", collectionDeclaration], ["created", producedHold],
   ]);
   const assertCollectionBindings = (node: ts.Node) => {
-    for (const binding of ["inserted", "created"]) {
+    for (const binding of ["inserted", "created", owningAdmissionClient]) {
       if ((ts.isVariableDeclaration(node) || ts.isParameter(node)) && ownsBinding(node.name, binding)) {
         assert.ok(allowedCollectionDeclarations.get(binding) === node,
-          "admission loop must not shadow the owning collection or inserted result");
+          "admission loop must not shadow the owning transaction, hold collection or inserted result");
       }
       if ((ts.isFunctionDeclaration(node) || ts.isClassDeclaration(node)) && node.name) {
-        assert.ok(node.name.text !== binding, "admission loop must not shadow the owning collection or inserted result");
+        assert.ok(node.name.text !== binding, "admission loop must not shadow the owning transaction, hold collection or inserted result");
       }
       if (ts.isBinaryExpression(node) && node.operatorToken.kind >= ts.SyntaxKind.FirstAssignment &&
           node.operatorToken.kind <= ts.SyntaxKind.LastAssignment) {
         assert.ok(!writesOwnershipBinding(node.left, binding),
-          "admission loop must not reassign or clear the owning collection or inserted result");
+          "admission loop must not reassign or clear the owning transaction, hold collection or inserted result");
       }
       if ((ts.isPrefixUnaryExpression(node) || ts.isPostfixUnaryExpression(node)) &&
           (node.operator === ts.SyntaxKind.PlusPlusToken || node.operator === ts.SyntaxKind.MinusMinusToken)) {
         assert.ok(!writesOwnershipBinding(node.operand, binding),
-          "admission loop must not reassign or clear the owning collection or inserted result");
+          "admission loop must not reassign or clear the owning transaction, hold collection or inserted result");
       }
     }
     if (ts.isCallExpression(node) &&
@@ -1701,6 +1716,13 @@ const collectionMutations: [string, RegExp, (source: string) => string][] = [
     (prelude) => prelude + " inserted.splice(0);"],
   ["indirectly cleared callback hold collection", collectionPreludePattern,
     (prelude) => prelude + " inserted.splice.call(inserted, 0);"],
+  ["overwritten transaction lock method", collectionPreludePattern,
+    (prelude) => prelude + " tx.execute = (...args: any[]) => db.execute(...args);"],
+  ["overwritten indexed transaction lock method", collectionPreludePattern,
+    (prelude) => prelude + ' tx["execute"] = (...args: any[]) => db.execute(...args);'],
+  ["replaced transaction client", collectionPreludePattern,
+    (prelude) => prelude + " tx = db;"],
+
 ];
 for (const [name, original, replacement] of collectionMutations) {
   assert.equal(canonicalParkingBookingRoute.split(original).length, 2,
@@ -1721,6 +1743,9 @@ const bindsClient = (name: ts.BindingName, binding = transactionClient): boolean
   : name.elements.some((element) => ts.isBindingElement(element) && bindsClient(element.name, binding));
 const writesClient = (expression: ts.Expression, binding = transactionClient): boolean => {
   if (ts.isIdentifier(expression)) return expression.text === binding;
+  if (ts.isPropertyAccessExpression(expression) || ts.isElementAccessExpression(expression)) {
+    return writesClient(expression.expression, binding);
+  }
   if (ts.isParenthesizedExpression(expression)) return writesClient(expression.expression, binding);
   if (ts.isArrayLiteralExpression(expression)) return expression.elements.some((element) =>
     ts.isSpreadElement(element) ? writesClient(element.expression, binding) : writesClient(element, binding));
