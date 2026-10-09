@@ -42,7 +42,6 @@ export function useFoodTruckSocket({
   type ClientToServerEvents = {
     subscribe_nearby: (data: { latitude: number; longitude: number; radiusKm?: number }) => void;
     subscribe_restaurant: (data: { restaurantId: string }) => void;
-    auth: (data: { userId: string }) => void;
   };
 
   type ServerToClientEvents = {
@@ -57,18 +56,22 @@ export function useFoodTruckSocket({
   };
 
   const socketRef = useRef<Socket<ServerToClientEvents, ClientToServerEvents> | null>(null);
-  const reconnectTimeoutRef = useRef<NodeJS.Timeout>();
-  const subscriptionQueueRef = useRef<string[]>([]);
+  const reconnectCleanupRef = useRef<(() => void) | null>(null);
+  const nearbySubscriptionRef = useRef<{ latitude: number; longitude: number; radiusKm: number } | null>(null);
+  const restaurantSubscriptionsRef = useRef(new Set<string>());
+  const callbacksRef = useRef({ onLocationUpdate, onStatusUpdate });
+  callbacksRef.current = { onLocationUpdate, onStatusUpdate };
+  const nativeUserRef = useRef(user?.id);
   
-  const maxReconnectAttempts = 10; // Increased for free tier wake-up
-  const baseReconnectDelay = 3000; // 3 seconds to allow backend spin-up
-
   const connect = useCallback(() => {
     if (!ENABLE_SOCKETS) {
       return;
     }
 
-    if (socketRef.current?.connected) return;
+    if (socketRef.current) {
+      if (!socketRef.current.connected && !socketRef.current.active) socketRef.current.connect();
+      return;
+    }
 
     try {
       // Create Socket.IO connection via same-origin proxy (no explicit URL)
@@ -89,38 +92,25 @@ export function useFoodTruckSocket({
       socketRef.current = socket;
 
       socket.on('connect', () => {
+        if (socketRef.current !== socket) return;
         console.log('Food truck Socket.IO connected');
         setIsConnected(true);
         setConnectionError(null);
         setReconnectAttempts(0);
 
-        // Send authentication if user is logged in - Socket.IO style
-        if (user && user.id) {
-          socket.emit('auth', { userId: user.id });
-        }
-
-        // Process queued subscriptions now that connection is established
-        if (subscriptionQueueRef.current.length > 0) {
-          console.log('Processing queued subscriptions:', subscriptionQueueRef.current.length);
-          subscriptionQueueRef.current.forEach(channel => {
-            // Parse the channel to extract subscription data
-            if (channel.startsWith('nearby:')) {
-              const parts = channel.split(':');
-              const latitude = parseFloat(parts[1]);
-              const longitude = parseFloat(parts[2]);
-              const radiusKm = parseInt(parts[3]) / 1000; // Convert meters to km
-              socket.emit('subscribe_nearby', { latitude, longitude, radiusKm });
-            } else if (channel.startsWith('restaurant:')) {
-              const restaurantId = channel.split(':')[1];
-              socket.emit('subscribe_restaurant', { restaurantId });
-            }
-          });
-          subscriptionQueueRef.current = []; // Clear the queue
-        }
+        // Native cookies establish authority. Restore current subscription
+        // intents on every fresh engine connection, including lease expiry.
+        if (nearbySubscriptionRef.current) socket.emit('subscribe_nearby', nearbySubscriptionRef.current);
+        restaurantSubscriptionsRef.current.forEach(restaurantId => {
+          socket.emit('subscribe_restaurant', { restaurantId });
+        });
       });
 
       // Handle location updates
-      socket.on('location_update', (data) => {
+      const handleLocationUpdate = (data:
+        Parameters<ServerToClientEvents['location_update']>[0] |
+        Parameters<ServerToClientEvents['truck_location_update']>[0]
+      ) => {
         const locData = data.location || {};
         const toNumber = (v: unknown): number | undefined => {
           if (typeof v === 'number') return v;
@@ -142,8 +132,10 @@ export function useFoodTruckSocket({
           sessionId: (locData as any).sessionId ?? ''
         };
 
-        onLocationUpdate?.(mapped);
-      });
+        callbacksRef.current.onLocationUpdate?.(mapped);
+      };
+      socket.on('location_update', handleLocationUpdate);
+      socket.on('truck_location_update', handleLocationUpdate);
 
       // Handle status updates
       socket.on('status_update', (data) => {
@@ -153,7 +145,7 @@ export function useFoodTruckSocket({
           lastSeen: new Date().toISOString(),
           sessionId: undefined,
         };
-        onStatusUpdate?.(mapped);
+        callbacksRef.current.onStatusUpdate?.(mapped);
       });
 
       // Handle nearby trucks data
@@ -169,9 +161,9 @@ export function useFoodTruckSocket({
       });
 
       socket.on('disconnect', (reason: Socket.DisconnectReason) => {
+        if (socketRef.current !== socket) return;
         console.log('Food truck Socket.IO disconnected:', reason);
         setIsConnected(false);
-        socketRef.current = null;
 
         // Socket.IO handles reconnection automatically, but we track attempts
         if (reason === 'io server disconnect' || reason === 'io client disconnect') {
@@ -179,15 +171,22 @@ export function useFoodTruckSocket({
           return;
         }
 
-        // For other disconnects, Socket.IO will auto-reconnect, so we just track state
-        if (reconnectAttempts < maxReconnectAttempts && autoConnect) {
-          setReconnectAttempts(prev => prev + 1);
-          console.log(`Socket.IO will attempt auto-reconnect (attempt ${reconnectAttempts + 1}/${maxReconnectAttempts})`);
-        } else if (reconnectAttempts >= maxReconnectAttempts) {
-          console.log('Max reconnection attempts reached. Food truck updates disabled.');
-          setConnectionError('Connection failed after multiple attempts');
-        }
+        // Keep this same socket while its manager reconnects. A new socket here
+        // would duplicate transports and lose the desired native subscriptions.
       });
+
+      const onReconnectAttempt = (attempt: number) => {
+        if (socketRef.current === socket) setReconnectAttempts(attempt);
+      };
+      const onReconnectFailed = () => {
+        if (socketRef.current === socket) setConnectionError('Connection failed after multiple attempts');
+      };
+      socket.io.on('reconnect_attempt', onReconnectAttempt);
+      socket.io.on('reconnect_failed', onReconnectFailed);
+      reconnectCleanupRef.current = () => {
+        socket.io.off('reconnect_attempt', onReconnectAttempt);
+        socket.io.off('reconnect_failed', onReconnectFailed);
+      };
 
       socket.on('connect_error', (error) => {
         console.error('Socket.IO connection error:', error);
@@ -198,17 +197,15 @@ export function useFoodTruckSocket({
       console.error('Failed to create Socket.IO connection:', error);
       setConnectionError('Failed to establish connection');
     }
-  }, [user, onLocationUpdate, onStatusUpdate, autoConnect, reconnectAttempts]);
+  }, []);
 
   const disconnect = useCallback(() => {
-    if (socketRef.current) {
-      socketRef.current.disconnect();
-      socketRef.current = null;
-    }
-    
-    if (reconnectTimeoutRef.current) {
-      clearTimeout(reconnectTimeoutRef.current);
-    }
+    reconnectCleanupRef.current?.();
+    reconnectCleanupRef.current = null;
+    const socket = socketRef.current;
+    socketRef.current = null;
+    socket?.removeAllListeners();
+    socket?.disconnect();
     
     setIsConnected(false);
     setConnectionError(null);
@@ -216,33 +213,32 @@ export function useFoodTruckSocket({
   }, []);
 
   const subscribeToNearby = useCallback((latitude: number, longitude: number, radiusKm: number = 5000) => {
+    nearbySubscriptionRef.current = { latitude, longitude, radiusKm: radiusKm / 1000 };
     if (socketRef.current?.connected) {
       console.log('Subscribing to nearby trucks:', { latitude, longitude, radiusKm: radiusKm / 1000 });
       socketRef.current.emit('subscribe_nearby', { latitude, longitude, radiusKm: radiusKm / 1000 });
-    } else {
-      // Queue subscription for when connection is established  
-      const channel = `nearby:${latitude.toFixed(4)}:${longitude.toFixed(4)}:${radiusKm}`;
-      console.log('Queueing subscription for nearby trucks:', channel);
-      subscriptionQueueRef.current = [channel];
     }
   }, []);
 
   const subscribeToRestaurant = useCallback((restaurantId: string) => {
+    restaurantSubscriptionsRef.current.add(restaurantId);
     if (socketRef.current?.connected) {
       console.log('Subscribing to restaurant updates:', restaurantId);
       socketRef.current.emit('subscribe_restaurant', { restaurantId });
-    } else {
-      // Queue subscription for when connection is established
-      subscriptionQueueRef.current.push(`restaurant:${restaurantId}`);
     }
   }, []);
 
   // Auto-connect on mount if enabled
   useEffect(() => {
+    if (nativeUserRef.current !== user?.id) {
+      nativeUserRef.current = user?.id;
+      restaurantSubscriptionsRef.current.clear();
+      disconnect();
+    }
     if (autoConnect && ENABLE_SOCKETS) {
       connect();
     }
-  }, [connect, autoConnect]);
+  }, [connect, disconnect, autoConnect, user?.id]);
 
   // Cleanup on unmount
   useEffect(() => {
