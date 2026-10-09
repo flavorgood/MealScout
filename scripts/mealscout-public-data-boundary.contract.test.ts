@@ -1431,10 +1431,23 @@ const assertExecutedAdmission = (
       ownershipPrinter.printNode(ts.EmitHint.Unspecified, expectedOwnership.statements[index], expectedOwnership),
       "ownership must use the exact awaited verifier and effective terminal denial");
   }
-  const protectedOwnershipBindings = ["req", "storage", "truckId", "userId", "truck", "hasManageParkingPass"];
+
+  const bypassFlag = directOwnershipBinding("bypassStripe");
+  assert.ok(ts.isIdentifier(bypassFlag.declaration.name) &&
+    bypassFlag.declaration.name.text === "bypassStripe" && bypassFlag.index < checkoutBlock.statements.indexOf(admissionTry),
+    "ownership must retain the direct configured bypass flag before admission");
+  const expectedBypassFlag = ts.createSourceFile("checkout-bypass-flag.ts",
+    'const bypassStripe = String(process.env.MEALSCOUT_BYPASS_STRIPE || "").toLowerCase() === "true" || String(process.env.MEALSCOUT_TEST_MODE || "").toLowerCase() === "true";',
+    ts.ScriptTarget.Latest, true);
+  assert.equal(ownershipPrinter.printNode(ts.EmitHint.Unspecified, bypassFlag.statement, handler.getSourceFile()),
+    ownershipPrinter.printNode(ts.EmitHint.Unspecified, expectedBypassFlag.statements[0], expectedBypassFlag),
+    "ownership must permit payment bypass only through the actual configured environment flags");
+
+  const protectedOwnershipBindings = ["req", "storage", "db", "stripe", "String", "process", "recordParkingBookingHolds", "parkingBookingProviderKey", "bypassStripe", "truckId", "userId", "truck", "hasManageParkingPass"];
   const allowedOwnershipDeclarations = new Map<string, ts.Node>([
     ["truckId", truckInput], ["userId", ownershipUserId.declaration],
     ["truck", ownershipTruck.declaration], ["hasManageParkingPass", ownershipCapability.declaration],
+    ["bypassStripe", bypassFlag.declaration],
   ]);
   const writesOwnershipBinding = (expression: ts.Expression, binding: string): boolean => {
     if (ts.isIdentifier(expression)) return expression.text === binding;
@@ -1617,6 +1630,62 @@ const assertExecutedAdmission = (
   assert.equal(checkpointHolds.length, 1);
   assert.ok(ts.isPropertyAssignment(checkpointHolds[0]) && ts.isIdentifier(checkpointHolds[0].initializer) &&
     checkpointHolds[0].initializer.text === "inserted", "admission callback must checkpoint its actual hold collection");
+
+  const normalizedRequestKeySource = 'String(req.get("Idempotency-Key") || "").trim()';
+  const providerRequestKeySource = "parkingBookingProviderKey(userId, req.path, " + normalizedRequestKeySource + ")";
+  const requireDirectField = (object: ts.ObjectLiteralExpression, field: string): ts.Expression => {
+    const matches: ts.Expression[] = [];
+    for (const property of object.properties) {
+      assert.ok((ts.isPropertyAssignment(property) || ts.isShorthandPropertyAssignment(property)) &&
+        ts.isIdentifier(property.name), "canonical admission must use direct ordinary identity fields");
+      if (property.name.text === field) {
+        matches.push(ts.isPropertyAssignment(property) ? property.initializer : property.name);
+      }
+    }
+    assert.equal(matches.length, 1, "canonical admission must have one direct " + field + " field");
+    return matches[0];
+  };
+  const assertIdentityFields = (object: ts.ObjectLiteralExpression, fields: [string, string][]) => {
+    for (const [field, expectedValue] of fields) {
+      const value = requireDirectField(object, field);
+      const expected = ts.createSourceFile("checkout-identity-expression.ts",
+        "const expected = " + expectedValue + ";", ts.ScriptTarget.Latest, true);
+      const expectedStatement = expected.statements[0];
+      assert.ok(ts.isVariableStatement(expectedStatement));
+      const expectedExpression = expectedStatement.declarationList.declarations[0].initializer!;
+      assert.equal(executionPrinter.printNode(ts.EmitHint.Unspecified, value, value.getSourceFile()),
+        executionPrinter.printNode(ts.EmitHint.Unspecified, expectedExpression, expected),
+        "canonical admission must bind " + field + " to the actual checkpoint and payment identity");
+    }
+  };
+  const expectedRequestKey = ts.createSourceFile("checkout-request-key.ts",
+    "const expected = " + normalizedRequestKeySource + ";", ts.ScriptTarget.Latest, true);
+  const expectedRequestKeyStatement = expectedRequestKey.statements[0];
+  assert.ok(ts.isVariableStatement(expectedRequestKeyStatement));
+  assert.equal(executionPrinter.printNode(ts.EmitHint.Unspecified, checkpointCall.arguments[1], checkpointCall.getSourceFile()),
+    executionPrinter.printNode(ts.EmitHint.Unspecified, expectedRequestKeyStatement.declarationList.declarations[0].initializer!, expectedRequestKey),
+    "canonical admission must checkpoint the normalized actual request reference");
+  assertIdentityFields(checkpointInput, [
+    ["userId", "userId"], ["route", "req.path"], ["passId", "String(event.id)"],
+    ["truckId", "truckId"], ["hostId", "String(host.id)"],
+    ["bookingStartDate", "sortedDateKeys[0]"], ["slotTypes", 'selectedSlotTypes.join(",")'],
+    ["destination", "hostStripeAccountId || null"], ["holds", "inserted"],
+  ]);
+  const checkpointSetup = requireDirectField(checkpointInput, "setup");
+  assert.ok(ts.isObjectLiteralExpression(checkpointSetup),
+    "canonical admission must checkpoint its actual payment setup");
+  assertIdentityFields(checkpointSetup, [
+    ["totalCents", "totalCents"], ["hostPaymentsReady", "hostPaymentsEnabled"],
+  ]);
+  const checkpointBreakdown = requireDirectField(checkpointSetup, "breakdown");
+  assert.ok(ts.isObjectLiteralExpression(checkpointBreakdown),
+    "canonical admission must checkpoint its actual payment breakdown");
+  assertIdentityFields(checkpointBreakdown, [
+    ["hostPrice", "adjustedHostPriceCents"], ["platformFee", "adjustedPlatformFeeCents"],
+    ["creditsApplied", "creditAppliedCents"], ["promoDiscount", "promoDiscountCents"],
+    ["promoCode", "normalizedPromoCode || undefined"],
+  ]);
+
   const completedHolds = callback.body.statements[4];
   assert.ok(ts.isReturnStatement(completedHolds) && completedHolds.expression &&
     ts.isIdentifier(completedHolds.expression) && completedHolds.expression.text === "inserted",
@@ -1644,6 +1713,69 @@ const assertExecutedAdmission = (
     providerTry.parent === checkoutBlock &&
     checkoutBlock.statements.indexOf(admissionTry) < checkoutBlock.statements.indexOf(providerTry),
     "canonical admission must execute before the later sibling provider-creation path");
+  const admissionIndex = checkoutBlock.statements.indexOf(admissionTry);
+  const providerIndex = checkoutBlock.statements.indexOf(providerTry);
+  assert.equal(providerIndex, admissionIndex + 4,
+    "canonical admission must reach provider setup without an intervening terminal statement");
+  const bypassBranch = checkoutBlock.statements[admissionIndex + 1];
+  assert.ok(ts.isIfStatement(bypassBranch) && ts.isIdentifier(bypassBranch.expression) &&
+    bypassBranch.expression.text === "bypassStripe" && !bypassBranch.elseStatement &&
+    ts.isBlock(bypassBranch.thenStatement),
+    "canonical admission must retain only the explicit bypass branch before payment setup");
+  const stripeAvailability = checkoutBlock.statements[admissionIndex + 2];
+  const expectedStripeAvailability = ts.createSourceFile("stripe-availability.ts",
+    'if (!stripe) { return res.status(500).json({ message: "Stripe is not configured" }); }',
+    ts.ScriptTarget.Latest, true);
+  assert.equal(executionPrinter.printNode(ts.EmitHint.Unspecified, stripeAvailability, handler.getSourceFile()),
+    executionPrinter.printNode(ts.EmitHint.Unspecified, expectedStripeAvailability.statements[0], expectedStripeAvailability),
+    "canonical admission must return early only when its provider is unavailable");
+  const intentBindingStatement = checkoutBlock.statements[admissionIndex + 3];
+  assert.ok(ts.isVariableStatement(intentBindingStatement) &&
+    (intentBindingStatement.declarationList.flags & ts.NodeFlags.Let) &&
+    intentBindingStatement.declarationList.declarations.length === 1,
+    "canonical admission must retain its direct payment result binding");
+  const intentBinding = intentBindingStatement.declarationList.declarations[0];
+  assert.ok(ts.isIdentifier(intentBinding.name) && intentBinding.name.text === "paymentIntent" && !intentBinding.initializer,
+    "canonical admission must assign the actual provider result without a prior substitute");
+  assert.equal(providerTry.tryBlock.statements.length, 3,
+    "canonical admission must reach provider creation without an early setup return");
+  assert.ok(providerTry.tryBlock.statements[2] === providerStatement,
+    "canonical admission must execute provider creation as the terminal setup statement");
+  const paramsStatement = providerTry.tryBlock.statements[0];
+  assert.ok(ts.isVariableStatement(paramsStatement) &&
+    (paramsStatement.declarationList.flags & ts.NodeFlags.Const) &&
+    paramsStatement.declarationList.declarations.length === 1,
+    "canonical admission must construct its direct provider parameters");
+  const paramsDeclaration = paramsStatement.declarationList.declarations[0];
+  assert.ok(ts.isIdentifier(paramsDeclaration.name) && paramsDeclaration.name.text === "intentParams" &&
+    paramsDeclaration.initializer && ts.isObjectLiteralExpression(paramsDeclaration.initializer),
+    "canonical admission must create payment from its own direct parameter object");
+  const params = paramsDeclaration.initializer;
+  assertIdentityFields(params, [["amount", "totalCents"], ["currency", '"usd"']]);
+  const metadata = requireDirectField(params, "metadata");
+  assert.ok(ts.isObjectLiteralExpression(metadata),
+    "canonical admission must bind direct provider metadata to its checkpoint");
+  assertIdentityFields(metadata, [
+    ["bookingRequestKey", providerRequestKeySource], ["passId", "event.id"], ["hostId", "host.id"],
+    ["truckId", "truckId"], ["userId", "userId"], ["slotTypes", 'selectedSlotTypes.join(",")'],
+    ["bookingDays", "bookingDays.toString()"], ["bookingStartDate", "sortedDateKeys[0]"],
+    ["hostPriceCents", "adjustedHostPriceCents.toString()"],
+    ["platformFeeCents", "adjustedPlatformFeeCents.toString()"], ["totalCents", "totalCents.toString()"],
+    ["creditAppliedCents", "creditAppliedCents.toString()"],
+    ["bookingPromoCode", 'normalizedPromoCode || ""'],
+    ["bookingPromoDiscountCents", "promoDiscountCents.toString()"],
+  ]);
+  const expectedDestination = ts.createSourceFile("checkout-provider-destination.ts",
+    "if (hostStripeAccountId) { intentParams.application_fee_amount = adjustedPlatformFeeCents; intentParams.transfer_data = { destination: hostStripeAccountId }; }",
+    ts.ScriptTarget.Latest, true);
+  assert.equal(executionPrinter.printNode(ts.EmitHint.Unspecified, providerTry.tryBlock.statements[1], handler.getSourceFile()),
+    executionPrinter.printNode(ts.EmitHint.Unspecified, expectedDestination.statements[0], expectedDestination),
+    "canonical admission must preserve the actual provider fee and destination without a setup escape");
+  assert.ok(providerCall.arguments.length === 2 && ts.isIdentifier(providerCall.arguments[0]) &&
+    providerCall.arguments[0].text === "intentParams" && ts.isObjectLiteralExpression(providerCall.arguments[1]),
+    "canonical admission must create payment from its bound parameters and options");
+  assertIdentityFields(providerCall.arguments[1], [["idempotencyKey", providerRequestKeySource]]);
+
 };
 assertExecutedAdmission(admissionTransaction, canonicalParkingBooking.handler);
 const executionMutations: [string, string, string][] = [
@@ -1657,6 +1789,11 @@ const executionMutations: [string, string, string][] = [
   ["wrong hold collection", "inserted.push(created);", "insertedHolds.push(created);"],
   ["wrong appended hold", "inserted.push(created);", "inserted.push({});"],
   ["fallback created hold", "const [created] = await tx", "const [created = {}] = await tx"],
+  ["terminal return before provider setup", "let paymentIntent: Stripe.PaymentIntent;", 'return res.status(503).json({ message: "stopped" }); let paymentIntent: Stripe.PaymentIntent;'],
+  ["widened payment bypass", "if (bypassStripe) {", "if (bypassStripe || true) {"],
+  ["bypass else return", "if (!stripe) {", 'else { return res.status(503).json({ message: "stopped" }); } if (!stripe) {'],
+  ["terminal return inside provider setup", "const intentParams: Stripe.PaymentIntentCreateParams = {", 'return res.status(503).json({ message: "stopped" }); const intentParams: Stripe.PaymentIntentCreateParams = {'],
+
 
 ];
 const assertRejectedExecutionMutation = (name: string, mutatedSource: string) => {
@@ -1697,6 +1834,12 @@ const ownershipMutations: [string, RegExp, string][] = [
   ["shadowed admission principal", /db\.transaction\(async \(tx: any\) => \{/, "db.transaction(async (tx: any) => { const userId = req.body.userId;"],
   ["overwritten ownership verifier", /const userId = req\.user\.id;/, "const userId = req.user.id; storage.verifyRestaurantOwnership = async () => true;"],
   ["overwritten authenticated principal", /const userId = req\.user\.id;/, "req.user.id = req.body.userId; const userId = req.user.id;"],
+  ["overwritten owning transaction factory", /const userId = req\.user\.id;/, "const userId = req.user.id; db.transaction = (callback: any) => callback(db);"],
+  ["forced payment bypass flag", /const bypassStripe =[\s\S]*?;/, "const bypassStripe = true;"],
+  ["shadowed identity coercion", /const testModeEnabled =/, 'const String = (...args: any[]) => "wrong-pass"; const testModeEnabled ='],
+  ["shadowed bypass environment", /const testModeEnabled =/, 'const process: any = { env: { MEALSCOUT_BYPASS_STRIPE: "true" } }; const testModeEnabled ='],
+
+
 ];
 for (const [name, original, replacement] of ownershipMutations) {
   assert.equal(canonicalParkingBookingRoute.split(original).length, 2, "ownership regression fixture must replace one actual source fragment");
@@ -1729,7 +1872,32 @@ for (const [name, original, replacement] of collectionMutations) {
     "collection regression fixture must replace one actual source fragment");
   assertRejectedExecutionMutation(name, canonicalParkingBookingRoute.replace(original, replacement));
 }
-console.log("Canonical checkout execution, ownership and hold collection regressions: PASS");
+
+const checkpointIdentityPattern = /await recordParkingBookingHolds\([\s\S]*?\}\);/;
+const providerIdentityPattern = /const intentParams: Stripe\.PaymentIntentCreateParams = \{[\s\S]*?\n\s*\};/;
+const providerOptionsPattern = /paymentIntent = await stripe\.paymentIntents\.create\([\s\S]*?\}\);/;
+const identityMutations: [string, RegExp, (source: string) => string][] = [
+  ["checkpoint wrong pass", checkpointIdentityPattern, (source) => source.replace(/passId:\s*String\(event\.id\)/, 'passId: "wrong-pass"')],
+  ["checkpoint wrong request reference", checkpointIdentityPattern, (source) => source.replace(/String\(\s*req\.get\("Idempotency-Key"\)\s*\|\|\s*""\s*\)\.trim\(\)/, '"wrong-reference"')],
+  ["checkpoint wrong user", checkpointIdentityPattern, (source) => source.replace(/\buserId,/, "userId: req.body.userId,")],
+  ["checkpoint wrong truck", checkpointIdentityPattern, (source) => source.replace(/\btruckId,/, "truckId: req.body.otherTruckId,")],
+  ["checkpoint wrong host", checkpointIdentityPattern, (source) => source.replace(/hostId:\s*String\(host\.id\)/, 'hostId: "wrong-host"')],
+  ["checkpoint wrong start date", checkpointIdentityPattern, (source) => source.replace(/bookingStartDate:\s*sortedDateKeys\[0\]/, 'bookingStartDate: "wrong-date"')],
+  ["checkpoint wrong slots", checkpointIdentityPattern, (source) => source.replace(/slotTypes:\s*selectedSlotTypes\.join\(","\)/, 'slotTypes: "wrong-slots"')],
+  ["checkpoint wrong destination", checkpointIdentityPattern, (source) => source.replace(/destination:\s*hostStripeAccountId\s*\|\|\s*null/, 'destination: "wrong-destination"')],
+  ["checkpoint duplicate pass", checkpointIdentityPattern, (source) => source.replace(/passId:\s*String\(event\.id\),/, 'passId: "wrong-pass", passId: String(event.id),')],
+  ["provider metadata wrong pass", providerIdentityPattern, (source) => source.replace(/passId:\s*event\.id/, 'passId: "wrong-pass"')],
+  ["provider metadata wrong request key", providerIdentityPattern, (source) => source.replace(/bookingRequestKey:\s*parkingBookingProviderKey\([\s\S]*?\.trim\(\)\)/, 'bookingRequestKey: "wrong-reference"')],
+  ["provider wrong amount", providerIdentityPattern, (source) => source.replace(/amount:\s*totalCents/, "amount: 1")],
+  ["provider options wrong request key", providerOptionsPattern, (source) => source.replace(/idempotencyKey:\s*parkingBookingProviderKey\([\s\S]*?\.trim\(\)\)/, 'idempotencyKey: "wrong-reference"')],
+];
+for (const [name, original, replacement] of identityMutations) {
+  assert.equal(canonicalParkingBookingRoute.split(original).length, 2,
+    "identity regression fixture must replace one actual source fragment");
+  assertRejectedExecutionMutation(name, canonicalParkingBookingRoute.replace(original, replacement));
+}
+console.log("Canonical checkout execution, ownership, collection and identity regressions: PASS");
+
 
 
 const admissionCallback = admissionTransaction.arguments[0];
