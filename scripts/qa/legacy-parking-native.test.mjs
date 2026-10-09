@@ -178,7 +178,7 @@ async function main() {
     const resolvePackage = createRequire(path.join(root, 'package.json'));
     const existingPackages = { name: 'existing-fixture-packages', setup(builder) {
       builder.onResolve({ filter: /^[^./]/ }, args => {
-        if (args.path.startsWith('@shared')) return;
+        if (args.kind === 'entry-point' || path.isAbsolute(args.path) || args.path.startsWith('@shared')) return;
         return { path: resolvePackage.resolve(args.path), external: true };
       });
     } };
@@ -354,7 +354,13 @@ async function main() {
     if (pool) await pool.end();
     if (postgres) {
       postgres.stdin.end('stop\n');
-      try { await until(() => postgres.exitCode !== null, 'owned PostgreSQL helper stop'); assert.equal(databaseCleanup?.stopped, true); assert.equal(databaseCleanup?.ownedDirectoryRemoved, true); if (database) assert.equal(await closed(database.port), true); }
+      try {
+        await until(() => postgres.exitCode !== null, 'owned PostgreSQL helper stop');
+        assert.equal(postgres.exitCode, 0); assert.equal(databaseCleanup?.stopped, true); assert.equal(databaseCleanup?.postgresStatus, 3); assert.equal(databaseCleanup?.ownedDirectoryRemoved, true);
+        // WSL's Windows TCP relay may outlive the stopped Linux listener.
+        // Native pg_ctl status above is the ownership/stop assertion.
+        if (database) report.cleanup.windowsTcpRelayClosed = await closed(database.port);
+      }
       catch (error) { report.cleanup.postgresFailure = String(error); report.result = 'fail'; }
     }
     report.cleanup.postgres = databaseCleanup;

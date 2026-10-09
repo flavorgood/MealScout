@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import net from 'node:net';
 import readline from 'node:readline';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 
 assert.equal(process.env.MEALSCOUT_LEGACY_NATIVE_TEST, '1');
 assert.notEqual(process.getuid?.(), 0, 'PostgreSQL fixture must run as its ordinary owner');
@@ -23,20 +23,26 @@ for (const name of ['initdb', 'pg_ctl', 'createdb', 'postgres']) {
 const temporaryRoot = fs.realpathSync(os.tmpdir());
 const owned = fs.mkdtempSync(path.join(temporaryRoot, 'mealscout-legacy-native-'));
 const data = path.join(owned, 'data');
-let started = false, finished = false;
+let started = false, startAttempted = false, finished = false;
 const emit = value => console.log(JSON.stringify(value));
 function cleanup() {
   if (finished) return;
   finished = true;
-  const receipt = { type: 'postgres-cleanup', stopped: !started, ownedDirectoryRemoved: false };
+  const receipt = { type: 'postgres-cleanup', startAttempted, stopped: !startAttempted, ownedDirectoryRemoved: false };
   try {
-    if (started) {
-      execFileSync(path.join(bin, 'pg_ctl'), ['-D', data, '-m', 'immediate', '-w', 'stop'], { stdio: 'pipe', timeout: 15000 });
-      receipt.stopped = true;
-    }
     const resolved = fs.realpathSync(owned);
     assert.equal(path.dirname(resolved), temporaryRoot);
     assert.match(path.basename(resolved), /^mealscout-legacy-native-[A-Za-z0-9]+$/);
+    if (startAttempted) {
+      const status = () => spawnSync(path.join(bin, 'pg_ctl'), ['-D', data, 'status'], { encoding: 'utf8', timeout: 15000 });
+      const before = status();
+      assert.ok(before.status === 0 || before.status === 3, 'Owned PostgreSQL status must be known before cleanup');
+      if (before.status === 0) execFileSync(path.join(bin, 'pg_ctl'), ['-D', data, '-m', 'immediate', '-w', 'stop'], { stdio: 'pipe', timeout: 15000 });
+      const after = status();
+      assert.equal(after.status, 3, 'Owned postmaster must be stopped before removing its directory');
+      receipt.postgresStatus = after.status;
+      receipt.stopped = true;
+    }
     fs.rmSync(resolved, { recursive: true });
     receipt.ownedDirectoryRemoved = true;
   } catch (error) {
@@ -57,6 +63,7 @@ try {
   const port = probe.address().port;
   await new Promise(resolve => probe.close(resolve));
   execFileSync(path.join(bin, 'initdb'), ['-D', data, '-A', 'trust', '-U', 'qa_owner', '--no-locale', '-E', 'UTF8'], { stdio: 'pipe', timeout: 30000 });
+  startAttempted = true;
   execFileSync(path.join(bin, 'pg_ctl'), ['-D', data, '-l', path.join(owned, 'postgres.log'), '-o', `-h 127.0.0.1 -p ${port} -k ${owned} -c timezone=UTC -c max_connections=40`, '-w', 'start'], { stdio: 'pipe', timeout: 30000 });
   started = true;
   execFileSync(path.join(bin, 'createdb'), ['-h', '127.0.0.1', '-p', String(port), '-U', 'qa_owner', 'mealscout_legacy_binding_test'], { stdio: 'pipe', timeout: 15000 });
