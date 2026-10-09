@@ -1288,6 +1288,17 @@ const inspectRetiredHandler = (node: ts.Node) => {
   ts.forEachChild(node, inspectRetiredHandler);
 };
 inspectRetiredHandler(retiredHandler.body);
+assert.ok(ts.isBlock(retiredHandler.body));
+assert.deepEqual(retiredHandler.parameters.map((parameter) => parameter.name.getText()), ["req", "res"]);
+const expectedRetiredHandoff = ts.createSourceFile("retired-handoff-contract.ts", "const params = new URLSearchParams({ pass: String(req.params.eventId) });\nconst truckId = String(req.body?.truckId || \"\").trim();\nif (truckId) params.set(\"truckId\", truckId);\nreturn res.status(409).json({\n  code: \"canonical_checkout_required\",\n  message: \"Choose your Parking Pass date and slots before checking out.\",\n  checkoutPath: `/parking-pass?${params.toString()}`,\n});", ts.ScriptTarget.Latest, true);
+assert.equal(retiredHandler.body.statements.length, expectedRetiredHandoff.statements.length,
+  "retired checkout must have only its effective URL handoff statements and terminal response");
+const handoffPrinter = ts.createPrinter({ removeComments: true });
+for (let index = 0; index < expectedRetiredHandoff.statements.length; index += 1) {
+  assert.equal(handoffPrinter.printNode(ts.EmitHint.Unspecified, retiredHandler.body.statements[index], retiredHandler.body.getSourceFile()),
+    handoffPrinter.printNode(ts.EmitHint.Unspecified, expectedRetiredHandoff.statements[index], expectedRetiredHandoff),
+    "every retired checkout response path must produce the exact canonical handoff without overrides");
+}
 const canonicalParkingBooking = exactPostRoute(
   readSource("server/routes/hostRoutes.ts"), "/api/parking-pass/:passId/book",
 );
@@ -1358,14 +1369,16 @@ const assertTransactionClientBinding = (node: ts.Node) => {
 };
 assertTransactionClientBinding(admissionCallback.body);
 const assertAssessmentBinding = (node: ts.Node) => {
-  const assessor = "assessParkingPassTruckEligibility";
+  const protectedBindings = ["assessParkingPassTruckEligibility", "Number", "Boolean", "Math"];
+  for (const assessor of protectedBindings) {
   if (ts.isVariableDeclaration(node) || ts.isParameter(node)) {
     assert.ok(!bindsClient(node.name, assessor), "the current eligibility assessor must not be locally shadowed");
   }
-  if (ts.isFunctionDeclaration(node) && node.name) assert.notEqual(node.name.text, assessor);
+  if ((ts.isFunctionDeclaration(node) || ts.isClassDeclaration(node)) && node.name) assert.notEqual(node.name.text, assessor);
   if (ts.isBinaryExpression(node) && node.operatorToken.kind >= ts.SyntaxKind.FirstAssignment &&
       node.operatorToken.kind <= ts.SyntaxKind.LastAssignment) {
     assert.ok(!writesClient(node.left, assessor), "the current eligibility assessor must not be reassigned");
+  }
   }
   ts.forEachChild(node, assertAssessmentBinding);
 };
@@ -1442,9 +1455,13 @@ const awaitedClientMethod = (initializer: ts.Expression, method: string) => {
   }
   assert.fail(`admission ${method} must use the owning transaction receiver chain`);
 };
-const compactAdmissionExpression = (expression: ts.Expression) => admissionPrinter.printNode(
-  ts.EmitHint.Unspecified, expression, expression.getSourceFile(),
-).replace(/\s+/g, "").replace(/,\}/g, "}");
+const compactAdmissionExpression = (expression: ts.Expression) => {
+  const source = admissionPrinter.printNode(ts.EmitHint.Unspecified, expression, expression.getSourceFile());
+  const scanner = ts.createScanner(ts.ScriptTarget.Latest, true, ts.LanguageVariant.Standard, source);
+  let compact = "";
+  for (let token = scanner.scan(); token !== ts.SyntaxKind.EndOfFileToken; token = scanner.scan()) compact += scanner.getTokenText();
+  return compact.replace(/,\}/g, "}").replace(/,\)/g, ")");
+};
 const lockedEligibilityReads = [
   { read: currentTruckRead, name: "currentTruck", query: `await ${transactionClient}.select({businessType:restaurants.businessType,isFoodTruck:restaurants.isFoodTruck,insuranceVerified:restaurants.insuranceVerified,insuranceExpiresAt:restaurants.insuranceExpiresAt}).from(restaurants).where(eq(restaurants.id,truckId)).for("share")` },
   { read: currentUserRead, name: "currentUser", query: `await ${transactionClient}.select({userType:users.userType,emailVerified:users.emailVerified}).from(users).where(eq(users.id,userId)).for("share")` },
@@ -1491,6 +1508,80 @@ assert.ok(currentTruckRead.index + 1 === currentUserRead.index &&
   "locked eligibility reads, assessment and denial must remain consecutive without intervening field mutations");
 assert.ok(currentEligibilityRead.index < eligibilityDenials[0] && eligibilityDenials[0] < holdInsert.index,
   "current qualification denial must execute after the locked recheck and before hold insertion");
+const lockedEventRead = admissionDeclaration("lockedRow");
+const capacityCounts = admissionDeclaration("counts");
+const reservedCountRead = admissionDeclaration("reservedCount");
+const hardCapRead = admissionDeclaration("hardCapEnabled");
+const maxSpotsRead = admissionDeclaration("maxSpots");
+const hostCentsRead = admissionDeclaration("hostCents");
+const feeCentsRead = admissionDeclaration("feeCents");
+const canonicalCapacityExpressions = [
+  { read: lockedEventRead, expression: `await${transactionClient}.select().from(events).where(eq(events.id,row.id)).limit(1)` },
+  { read: capacityCounts, expression: `await${transactionClient}.select({count:sql<number>\`count(*)\`}).from(eventBookings).where(and(eq(eventBookings.eventId,row.id),inArray(eventBookings.status,["confirmed","pending"])))` },
+  { read: reservedCountRead, expression: "Number(counts[0]?.count||0)" },
+  { read: hardCapRead, expression: "Boolean(lockedRow.hardCapEnabled)" },
+  { read: maxSpotsRead, expression: "Math.max(1,Number(lockedRow.maxTrucks??1)||1)" },
+  { read: hostCentsRead, expression: "hostSplit[index]??0" },
+  { read: feeCentsRead, expression: "platformSplit[index]??0" },
+];
+for (const { read, expression } of canonicalCapacityExpressions) {
+  assert.ok(read.declaration.parent.flags & ts.NodeFlags.Const, "capacity producers must retain direct const bindings");
+  assert.equal(compactAdmissionExpression(read.declaration.initializer!), expression,
+    "capacity admission must use the exact locked event row and same-transaction active booking count");
+}
+assert.ok(ts.isArrayBindingPattern(lockedEventRead.declaration.name) && lockedEventRead.declaration.name.elements.length === 1);
+const lockedEventBinding = lockedEventRead.declaration.name.elements[0];
+assert.ok(ts.isBindingElement(lockedEventBinding) && ts.isIdentifier(lockedEventBinding.name) &&
+  lockedEventBinding.name.text === "lockedRow" && !lockedEventBinding.initializer && !lockedEventBinding.dotDotDotToken,
+  "the locked event read must not fall back to a preflight row");
+for (const read of [capacityCounts, reservedCountRead, hardCapRead, maxSpotsRead, hostCentsRead, feeCentsRead]) {
+  assert.ok(ts.isIdentifier(read.declaration.name), "capacity values must retain their direct bindings");
+}
+const capacityDenials = admissionStatements.flatMap((statement, index) => {
+  if (!ts.isIfStatement(statement) || !ts.isBlock(statement.thenStatement) ||
+      compactAdmissionExpression(statement.expression) !== "hardCapEnabled&&reservedCount>=maxSpots") return [];
+  return [{ statement, index }];
+});
+assert.equal(capacityDenials.length, 1, "capacity admission must have one effective hard-cap denial");
+const capacityDenial = capacityDenials[0];
+assert.ok(ts.isBlock(capacityDenial.statement.thenStatement));
+const expectedCapacityDenial = ts.createSourceFile("capacity-denial-contract.ts", "const err: any = new Error(\"This parking pass is fully booked.\");\nerr.code = \"FULLY_BOOKED\";\nthrow err;", ts.ScriptTarget.Latest, true);
+assert.deepEqual(capacityDenial.statement.thenStatement.statements.map((statement) =>
+  admissionPrinter.printNode(ts.EmitHint.Unspecified, statement, statement.getSourceFile())),
+  expectedCapacityDenial.statements.map((statement) => admissionPrinter.printNode(ts.EmitHint.Unspecified, statement, expectedCapacityDenial)),
+  "capacity denial must construct its FULLY_BOOKED error and throw it without unreachable or alternate exits");
+const rowAvailability = admissionStatements[lockedEventRead.index + 1];
+assert.ok(ts.isIfStatement(rowAvailability) && ts.isBlock(rowAvailability.thenStatement));
+const expectedRowAvailability = ts.createSourceFile("locked-row-policy-contract.ts", "if (!lockedRow || lockedRow.hostId !== row.hostId ||\n    lockedRow.status !== \"open\" || !lockedRow.requiresPayment ||\n    new Date(lockedRow.date).getTime() !== new Date(row.date).getTime() ||\n    selectedSlotTypes.some((slot) => !isSlotWithinHours(slot, lockedRow.startTime, lockedRow.endTime))) {\n  throw Object.assign(new Error(\"This parking pass changed while booking. Please refresh.\"), {\n    code: \"BOOKING_AVAILABILITY_CHANGED\",\n  });\n}", ts.ScriptTarget.Latest, true).statements[0];
+assert.equal(admissionPrinter.printNode(ts.EmitHint.Unspecified, rowAvailability, rowAvailability.getSourceFile()),
+  admissionPrinter.printNode(ts.EmitHint.Unspecified, expectedRowAvailability, expectedRowAvailability.getSourceFile()),
+  "the locked event policy must fail closed without mutating its capacity fields");
+assert.ok(eventLock.index + 1 === lockedEventRead.index && lockedEventRead.index + 2 === currentTruckRead.index &&
+  eligibilityDenials[0] + 1 === capacityCounts.index && capacityCounts.index + 1 === reservedCountRead.index &&
+  reservedCountRead.index + 1 === hardCapRead.index && hardCapRead.index + 1 === maxSpotsRead.index &&
+  maxSpotsRead.index + 1 === capacityDenial.index && capacityDenial.index + 1 === hostCentsRead.index &&
+  hostCentsRead.index + 1 === feeCentsRead.index && feeCentsRead.index + 1 === holdInsert.index,
+  "the locked policy, active counts, effective capacity denial and admitted hold must retain their uninterrupted pipeline");
+const holdValueCalls: ts.CallExpression[] = [];
+let holdChain = (holdInsert.declaration.initializer! as ts.AwaitExpression).expression;
+while (ts.isCallExpression(holdChain) && ts.isPropertyAccessExpression(holdChain.expression)) {
+  if (holdChain.expression.name.text === "values") holdValueCalls.push(holdChain);
+  holdChain = holdChain.expression.expression;
+}
+assert.equal(holdValueCalls.length, 1);
+assert.equal(holdValueCalls[0].arguments.length, 1);
+const holdValues = holdValueCalls[0].arguments[0];
+assert.ok(ts.isObjectLiteralExpression(holdValues));
+assert.ok(holdValues.properties.every((property) =>
+  (ts.isPropertyAssignment(property) || ts.isShorthandPropertyAssignment(property)) && ts.isIdentifier(property.name)),
+  "admitted holds must use direct identifier fields without spreads, computed keys, accessors or methods");
+for (const [field, value] of [["eventId", "row.id"], ["status", '"pending"']]) {
+  const fields = holdValues.properties.filter((property) => (ts.isPropertyAssignment(property) || ts.isShorthandPropertyAssignment(property)) && property.name.getText() === field);
+  assert.equal(fields.length, 1, `admitted hold must have exactly one ${field}`);
+  assert.ok(ts.isPropertyAssignment(fields[0]));
+  assert.equal(compactAdmissionExpression(fields[0].initializer), value, `admitted hold ${field} must match the counted row and pending state`);
+}
+
 assert.match(
   admissionLoopSource,
   /from \$\{events\} where \$\{events\.id\} = \$\{row\.id\} for update[\s\S]*Boolean\(lockedRow\.hardCapEnabled\)[\s\S]*hardCapEnabled && reservedCount >= maxSpots/,
