@@ -38,6 +38,7 @@ import {
 } from "../services/pickupOrderCancellationService";
 import { reconcileCompletedPickupOrderRefund } from "../services/pickupOrderCompletedRefundService";
 import { reconcilePickupOrderDispute } from "../services/pickupOrderDisputeService";
+import { isLegacyParkingPaymentBound } from "../services/legacyParkingPaymentBinding";
 import {
   pickupDisputePaymentIntentId,
   retrieveAuthoritativePickupOrderDispute,
@@ -1043,9 +1044,12 @@ export function registerStripeWebhookRoutes(
                 const bookingIntentId = String(
                   booking.stripePaymentIntentId || "",
                 ).trim();
-                if (bookingIntentId && bookingIntentId !== paymentIntent.id) {
+                if (
+                  !["pending", "confirmed"].includes(String(booking.status)) ||
+                  !isLegacyParkingPaymentBound(booking, paymentIntent, event.account ?? null)
+                ) {
                   throw new Error(
-                    `Booking ${bookingId} expected PaymentIntent ${bookingIntentId}, received ${paymentIntent.id}`,
+                    `Booking ${bookingId} requires reconciliation; payment or pending hold is no longer bound`,
                   );
                 }
 
@@ -1071,7 +1075,7 @@ export function registerStripeWebhookRoutes(
                 }
 
                 const now = new Date();
-                await db
+                const [confirmedBooking] = await db
                   .update(eventBookings)
                   .set({
                     status: "confirmed",
@@ -1080,7 +1084,29 @@ export function registerStripeWebhookRoutes(
                     bookingConfirmedAt: now,
                     updatedAt: now,
                   })
-                  .where(eq(eventBookings.id, bookingId));
+                  .where(
+                    and(
+                      eq(eventBookings.id, bookingId),
+                      eq(eventBookings.status, "pending"),
+                      eq(eventBookings.stripePaymentIntentId, bookingIntentId),
+                      eq(eventBookings.eventId, booking.eventId),
+                      eq(eventBookings.truckId, booking.truckId),
+                      eq(eventBookings.hostId, booking.hostId),
+                      eq(eventBookings.hostPriceCents, booking.hostPriceCents),
+                      eq(eventBookings.platformFeeCents, booking.platformFeeCents),
+                      eq(eventBookings.totalCents, booking.totalCents),
+                      booking.stripeApplicationFeeAmount === null
+                        ? isNull(eventBookings.stripeApplicationFeeAmount)
+                        : eq(eventBookings.stripeApplicationFeeAmount, booking.stripeApplicationFeeAmount),
+                      booking.stripeTransferDestination === null
+                        ? isNull(eventBookings.stripeTransferDestination)
+                        : eq(eventBookings.stripeTransferDestination, booking.stripeTransferDestination),
+                    ),
+                  )
+                  .returning({ id: eventBookings.id });
+                if (!confirmedBooking) {
+                  throw new Error(`Booking ${bookingId} changed during payment confirmation; reconciliation required`);
+                }
 
                 // Update event fill status
                 const [countRow] = await db
