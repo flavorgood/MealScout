@@ -13,25 +13,14 @@ import { apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { SEOHead } from "@/components/seo-head";
 import { CANONICAL_DASHBOARD_ENTRY_PATH } from "@/lib/dashboard-route";
-import { normalizeSafeInternalPath } from "@shared/safeInternalPath";
 import {
   getProgressiveAccountGate,
   preserveProgressiveAuthContext,
-  resolveProgressiveAuthDestination,
+  resolveProgressivePostVerificationDestination,
 } from "@shared/progressiveOnboarding";
 
 const REDIRECT_STORAGE_KEY = "mealscout:post-verification-redirect";
 const EMAIL_STORAGE_KEY = "mealscout:lastSignupEmail";
-
-function getSafePath(value: string | null): string | null {
-  const path = normalizeSafeInternalPath(value);
-  if (!path) return null;
-  if (path === "/account-setup" || path.startsWith("/account-setup?")) {
-    const params = new URLSearchParams(path.split("?")[1] || "");
-    if (!params.get("token")) return null;
-  }
-  return path;
-}
 
 function getStoredValue(key: string): string | null {
   try {
@@ -42,9 +31,12 @@ function getStoredValue(key: string): string | null {
 }
 
 function getBestRedirect(params: URLSearchParams): string {
-  const queryRedirect = getSafePath(params.get("redirect"));
-  const storedRedirect = getSafePath(getStoredValue(REDIRECT_STORAGE_KEY));
-  return resolveProgressiveAuthDestination(queryRedirect, storedRedirect || CANONICAL_DASHBOARD_ENTRY_PATH);
+  return resolveProgressivePostVerificationDestination(
+    params,
+    params.get("redirect"),
+    getStoredValue(REDIRECT_STORAGE_KEY),
+    CANONICAL_DASHBOARD_ENTRY_PATH,
+  );
 }
 
 function getLoginHref(redirectPath: string, verified: boolean, source: URLSearchParams) {

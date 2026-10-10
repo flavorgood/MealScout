@@ -18,6 +18,31 @@ export function resolveProgressiveAuthDestination(requested: unknown, fallback: 
   return normalizeSafeInternalPath(requested) || normalizeSafeInternalPath(fallback) || "/profile-setup";
 }
 
+function getSafePostVerificationPath(value: unknown): string | null {
+  const path = normalizeSafeInternalPath(value);
+  if (!path) return null;
+  const parsed = new URL(path, "https://mealscout.local");
+  if (/^\/account-setup\/?$/i.test(parsed.pathname) && !parsed.searchParams.get("token")?.trim()) return null;
+  return path;
+}
+
+export function resolveProgressivePostVerificationDestination(
+  params: URLSearchParams,
+  queryRedirect: unknown,
+  storedRedirect: unknown,
+  fallback: unknown = "/dashboard",
+): string {
+  const requested = getSafePostVerificationPath(queryRedirect);
+  const saved = getSafePostVerificationPath(storedRedirect);
+  // Legacy signup keeps its same-session intent until a fresh email redirect.
+  // Progressive actions carry their own explicit destination and take priority.
+  const preferRequested = params.get("verified") === "1" || Boolean(getProgressiveAccountAction(params));
+  return resolveProgressiveAuthDestination(
+    preferRequested ? requested : saved,
+    (preferRequested ? saved : requested) || getSafePostVerificationPath(fallback),
+  );
+}
+
 export function preserveProgressiveAuthContext(href: string, source: URLSearchParams): string {
   const target = new URL(normalizeSafeInternalPath(href) || "/login", "https://mealscout.local");
   const redirect = normalizeSafeInternalPath(target.searchParams.get("redirect")) || normalizeSafeInternalPath(source.get("redirect"));

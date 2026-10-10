@@ -125,12 +125,16 @@ test.describe("welcome and Scout routing law", () => {
     await expect(page.getByTestId("scout-map-container")).toHaveCount(0);
   });
 
-  // Business flows now hand off to restaurant-signup's account-creation
-  // gate, not directly to a business-details form (that form is behind
-  // account creation) — the title says "account creation" rather than
-  // "signup paths" so it doesn't overclaim reaching the business form.
-  test("welcome signup opens role-aware paths into account creation", async ({ page }) => {
+  test("welcome business signup allows a private draft before explicit account creation", async ({ page }) => {
     await mockGuest(page);
+    const writes: string[] = [];
+    page.on("request", (request) => {
+      const path = new URL(request.url()).pathname;
+      if (
+        ["POST", "PUT", "PATCH", "DELETE"].includes(request.method()) &&
+        /^\/api\/(?:auth|owner|restaurants)(?:\/|$)/.test(path)
+      ) writes.push(path);
+    });
 
     await page.goto(`${FRONTEND}/`, { waitUntil: "domcontentloaded" });
     await dismissBetaDialog(page);
@@ -142,13 +146,22 @@ test.describe("welcome and Scout routing law", () => {
     await expect(page.getByTestId("button-signup-flow-food_truck")).toBeVisible();
     await expect(page.getByTestId("button-signup-flow-private_chef")).toBeVisible();
     await page.getByTestId("button-signup-flow-private_chef").click();
-    // Business flows now hand off to the dedicated restaurant-signup form
-    // instead of staying on customer-signup with role/businessType params.
-    // That form gates its business-details fields (name, type) behind
-    // account creation, so as a guest the reachable, role-aware signal is
-    // the businessType carried in the URL plus the account-creation screen.
     await expect(page).toHaveURL(/\/restaurant-signup\?.*businessType=private_chef/);
+    await expect(page.getByTestId("guest-business-draft")).toBeVisible();
+    await expect(page.locator("#guest-draft-businessType")).toHaveValue("private_chef");
+    await expect(page.getByTestId("button-signup-toggle")).toHaveCount(0);
+    await page.locator("#guest-draft-name").fill("Private Chef Preview");
+    await expect(
+      page.getByTestId("private-draft-preview").getByRole("heading", { name: "Private Chef Preview" }),
+    ).toBeVisible();
+    expect(writes).toEqual([]);
+    await page.getByTestId("button-keep-guest-draft").click();
     await expect(page.getByTestId("button-signup-toggle")).toBeVisible();
+    const kept = await page.evaluate(() => JSON.parse(
+      window.localStorage.getItem("mealscout:restaurant-signup-draft") || "null",
+    ));
+    expect(kept).toMatchObject({ name: "Private Chef Preview", businessType: "private_chef" });
+    expect(writes).toEqual([]);
   });
 
   test("event organizer choice creates an account before event setup", async ({ page }) => {
