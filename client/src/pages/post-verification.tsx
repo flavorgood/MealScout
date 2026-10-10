@@ -408,7 +408,7 @@ export default function PostVerification() {
               Explore Scout
             </Link>
             <span aria-hidden="true">/</span>
-            <Link href="/login" className="hover:text-amber-200">
+            <Link href={loginHref} className="hover:text-amber-200">
               Login help
             </Link>
           </div>

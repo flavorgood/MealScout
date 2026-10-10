@@ -1858,7 +1858,7 @@ export default function CustomerSignup() {
             {/* Divider + Login Link (compressed) */}
             <div className="mt-3 flex items-center justify-between text-xs text-[color:var(--text-secondary)]">
               <span>Already have an account?</span>
-              <Link href="/login">
+              <Link href={preserveReferralHref("/login")}>
                 <button
                   type="button"
                   className="text-[color:var(--accent-text)] underline hover:text-[color:var(--accent-text)]"
