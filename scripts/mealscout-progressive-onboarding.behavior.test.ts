@@ -7,6 +7,7 @@ import {
   buildGuestBusinessSignupPath,
   buildProgressiveAccountPath,
   getProgressiveAccountGate,
+  getGuestBusinessDraftIntent,
   getGuestClaimPrefillValue,
   GUEST_BUSINESS_DRAFT_KEY,
   persistGuestBusinessDraft,
@@ -140,4 +141,20 @@ test("verification of an edited business type returns to a route that restores t
   const returned = new URL(verification.searchParams.get("redirect")!, "https://www.mealscout.us");
   assert.equal(shouldRestoreGuestBusinessDraft(parseBusinessSignupRouteIntent(returned.search), currentDraft), true);
   assert.equal(returned.searchParams.get("businessType"), "caterer");
+});
+
+test("a switched claim autosave cannot restore under the original target and continues to the selected target", () => {
+  const original = parseBusinessSignupRouteIntent("businessType=food_truck&intent=claim&claimListingId=truck-1&q=Tacos");
+  const selected = getGuestBusinessDraftIntent(original, "truck-2");
+  let raw = "";
+  persistGuestBusinessDraft({setItem(_key, value) {raw=value;}}, {businessType:"food_truck",name:"Truck two",address:"Second address"}, Date.now(), selected);
+  const draft = JSON.parse(raw);
+  assert.equal(draft.__guestClaim.listingId, "truck-2");
+  assert.equal(shouldRestoreGuestBusinessDraft(original, draft), false);
+  assert.equal(getGuestClaimPrefillValue(original, draft, "Truck two", "Truck one", "truck-1"), "Truck one");
+  const returned = new URL(buildGuestBusinessSignupPath(selected, "food_truck"), "https://www.mealscout.us");
+  const returnedIntent = parseBusinessSignupRouteIntent(returned.search);
+  assert.equal(returned.searchParams.get("claimListingId"), "truck-2");
+  assert.equal(shouldRestoreGuestBusinessDraft(returnedIntent, draft), true);
+  assert.equal(getGuestClaimPrefillValue(returnedIntent, draft, "Truck two", "Registry two", "truck-2"), "Truck two");
 });

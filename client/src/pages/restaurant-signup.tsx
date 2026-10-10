@@ -10,6 +10,7 @@ import {
   buildGuestBusinessSignupPath,
   buildProgressiveAccountPath,
   getProgressiveAccountGate,
+  getGuestBusinessDraftIntent,
   getGuestClaimPrefillValue,
   persistGuestBusinessDraft,
   shouldRestoreGuestBusinessDraft,
@@ -370,9 +371,9 @@ export default function RestaurantSignup() {
     () => parseBusinessSignupRouteIntent(window.location.search),
     [],
   );
-  const continuationPath = useMemo(
-    () => buildRestaurantSignupContinuationPath(signupRouteIntent),
-    [signupRouteIntent],
+  const currentClaimDraftListingIdRef = useRef(signupRouteIntent.passthrough.claimListingId || "");
+  const continuationPath = buildRestaurantSignupContinuationPath(
+    getGuestBusinessDraftIntent(signupRouteIntent, currentClaimDraftListingIdRef.current),
   );
   const isFoodTruckRoute = signupRouteIntent.businessType === "food_truck";
   const isMissingListingFlow =
@@ -762,7 +763,7 @@ export default function RestaurantSignup() {
   useEffect(() => {
     const subscription = form.watch((value) => {
       try {
-        persistGuestBusinessDraft(() => window.localStorage, value, Date.now(), signupRouteIntent);
+        persistGuestBusinessDraft(() => window.localStorage, value, Date.now(), getGuestBusinessDraftIntent(signupRouteIntent, currentClaimDraftListingIdRef.current));
       } catch {
         // ignore storage errors
       }
@@ -1082,13 +1083,7 @@ export default function RestaurantSignup() {
   const onSubmit = async (data: RestaurantFormData) => {
     const accountGate = getProgressiveAccountGate(user);
     if (accountGate !== "continue") {
-      const currentIntent = {
-        ...signupRouteIntent,
-        passthrough: {
-          ...signupRouteIntent.passthrough,
-          ...(claimSelection?.id ? { claimListingId: String(claimSelection.id) } : {}),
-        },
-      };
+      const currentIntent = getGuestBusinessDraftIntent(signupRouteIntent, currentClaimDraftListingIdRef.current);
       if (!persistGuestBusinessDraft(() => window.localStorage, form.getValues(), Date.now(), currentIntent)) {
         toast({ title: COPY.guestDraft.storageErrorTitle, description: COPY.guestDraft.storageErrorDescription, variant: "destructive" });
         return;
@@ -1316,6 +1311,7 @@ export default function RestaurantSignup() {
           setClaimError(COPY.forms.restaurant.claimUnavailable);
           return;
         }
+        currentClaimDraftListingIdRef.current = String(exactListing.id);
         setClaimSelection(exactListing);
         setClaimResults([]);
         setClaimQuery(exactListing.externalId || exactListing.name || query);
@@ -1369,6 +1365,8 @@ export default function RestaurantSignup() {
       );
       return;
     }
+    // Update before setValue emits synchronous autosave notifications.
+    currentClaimDraftListingIdRef.current = String(listing.id);
     setClaimSelection(listing);
     setClaimResults([]);
     setClaimQuery(listing.externalId || listing.name || "");
@@ -1521,13 +1519,14 @@ export default function RestaurantSignup() {
               onChange={(field, value) => form.setValue(field, value, { shouldDirty: true })}
               canChangeBusinessType={!signupRouteIntent.isClaim}
               onKeep={() => {
-                if (!persistGuestBusinessDraft(() => window.localStorage, form.getValues(), Date.now(), signupRouteIntent)) {
+                const currentIntent = getGuestBusinessDraftIntent(signupRouteIntent, currentClaimDraftListingIdRef.current);
+                if (!persistGuestBusinessDraft(() => window.localStorage, form.getValues(), Date.now(), currentIntent)) {
                   toast({ title: COPY.guestDraft.storageErrorTitle, description: COPY.guestDraft.storageErrorDescription, variant: "destructive" });
                   return;
                 }
                 const businessType = form.getValues("businessType");
-                if (businessType !== signupRouteIntent.businessType) {
-                  window.location.href = buildGuestBusinessSignupPath(signupRouteIntent, businessType);
+                if (businessType !== signupRouteIntent.businessType || currentIntent.passthrough.claimListingId !== signupRouteIntent.passthrough.claimListingId) {
+                  window.location.href = buildGuestBusinessSignupPath(currentIntent, businessType);
                   return;
                 }
                 setAccountRequested(true);

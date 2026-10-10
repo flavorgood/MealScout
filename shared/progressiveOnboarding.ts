@@ -50,6 +50,17 @@ export const GUEST_BUSINESS_DRAFT_KEY = "mealscout:restaurant-signup-draft";
 
 const GUEST_DRAFT_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 
+export function getGuestBusinessDraftIntent(
+  intent: BusinessSignupRouteIntent,
+  selectedClaimListingId?: string,
+): BusinessSignupRouteIntent {
+  if (!intent.isClaim || !selectedClaimListingId) return intent;
+  return {
+    ...intent,
+    passthrough: { ...intent.passthrough, claimListingId: selectedClaimListingId },
+  };
+}
+
 export function shouldRestoreGuestBusinessDraft(
   intent: BusinessSignupRouteIntent,
   draft: Record<string, unknown>,
