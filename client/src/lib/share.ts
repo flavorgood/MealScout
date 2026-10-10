@@ -7,16 +7,24 @@ const AFFILIATE_REF_STORAGE_KEY = "affiliate_ref";
 
 export function setAffiliateRef(ref: string | null) {
   if (typeof window === "undefined") return;
-  if (ref) {
-    window.localStorage.setItem(AFFILIATE_REF_STORAGE_KEY, ref);
-  } else {
-    window.localStorage.removeItem(AFFILIATE_REF_STORAGE_KEY);
+  try {
+    if (ref) {
+      window.localStorage.setItem(AFFILIATE_REF_STORAGE_KEY, ref);
+    } else {
+      window.localStorage.removeItem(AFFILIATE_REF_STORAGE_KEY);
+    }
+  } catch {
+    // Referral persistence is optional; it must not block signup or authentication.
   }
 }
 
 export function getStoredAffiliateRef(): string | null {
   if (typeof window === "undefined") return null;
-  return window.localStorage.getItem(AFFILIATE_REF_STORAGE_KEY);
+  try {
+    return window.localStorage.getItem(AFFILIATE_REF_STORAGE_KEY);
+  } catch {
+    return null;
+  }
 }
 
 function normalizeSharePath(input: string): string {

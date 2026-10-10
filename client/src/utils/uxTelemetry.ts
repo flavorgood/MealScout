@@ -16,9 +16,9 @@ export const trackUxEvent = async (
   if (!eventName) return;
 
   const throttleKey = `ux:${eventName}`;
-  if (shouldThrottle(throttleKey, 500)) return;
 
   try {
+    if (shouldThrottle(throttleKey, 500)) return;
     await fetch("/api/telemetry/track", {
       method: "POST",
       headers: { "Content-Type": "application/json" },

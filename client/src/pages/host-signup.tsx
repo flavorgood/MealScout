@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useLocation } from "wouter";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -30,9 +30,11 @@ async function geocodeAddress(address: string) {
 }
 
 function HostSignup() {
-  const { isAuthenticated } = useAuth();
+  const { isAuthenticated, authState, isError: authError, refetch } = useAuth();
   const [, setLocation] = useLocation();
   const [isLoading, setIsLoading] = useState(true);
+  const [retryingAuth, setRetryingAuth] = useState(false);
+  const draftLoaded = useRef(false);
 
   const HOST_SIGNUP_DRAFT_KEY = "mealscout:host-signup-draft";
 
@@ -51,14 +53,16 @@ function HostSignup() {
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   useEffect(() => {
-    if (!isAuthenticated) {
-      // No account yet - send prospective hosts into the real signup flow
-      // instead of stranding them on a login-only screen.
+    // Pending or failed session discovery is not evidence that the user is a guest.
+    if (authState === "loading") return;
+    if (authState === "guest") {
       setLocation("/customer-signup?role=host");
       return;
     }
+    if (!isAuthenticated || draftLoaded.current) return;
+    draftLoaded.current = true;
 
-    // Load any saved draft once we know we're staying on this page
+    // Restore once; a later authentication refresh must not overwrite typed fields.
     try {
       const stored = window.localStorage.getItem(HOST_SIGNUP_DRAFT_KEY);
       if (stored) {
@@ -87,11 +91,11 @@ function HostSignup() {
       // ignore parse/storage errors
     }
     setIsLoading(false);
-  }, [isAuthenticated, setLocation]);
+  }, [authState, isAuthenticated, setLocation]);
 
   // Persist host signup draft so hosts can resume later
   useEffect(() => {
-    if (isLoading) return;
+    if (isLoading || !isAuthenticated) return;
     try {
       const payload = {
         businessName,
@@ -113,6 +117,7 @@ function HostSignup() {
     }
   }, [
     isLoading,
+    isAuthenticated,
     businessName,
     address,
     city,
@@ -148,6 +153,7 @@ function HostSignup() {
 
   const handleSubmit = async (event: React.FormEvent) => {
     event.preventDefault();
+    if (!isAuthenticated || authState !== "authenticated") return;
     if (!validate()) return;
 
     setIsSubmitting(true);
@@ -194,9 +200,31 @@ function HostSignup() {
     }
   };
 
-  if (isLoading) {
+  if (authState === "loading" && authError) {
     return (
-      <div className="min-h-screen bg-[var(--bg-layered)] flex items-center justify-center">
+      <main className="min-h-screen bg-[var(--bg-layered)] flex items-center justify-center px-4">
+        <div role="alert" className="max-w-md rounded-xl border border-[color:var(--border-subtle)] bg-[var(--bg-card)] p-6 space-y-4">
+          <h1 className="text-xl font-bold">We could not confirm your session</h1>
+          <p>Your host setup has not been submitted. Retry the session check to continue.</p>
+          <Button
+            type="button"
+            disabled={retryingAuth}
+            onClick={async () => {
+              setRetryingAuth(true);
+              try { await refetch(); } catch { /* Keep the retry state visible. */ }
+              finally { setRetryingAuth(false); }
+            }}
+          >
+            {retryingAuth ? "Checking session..." : "Retry session check"}
+          </Button>
+        </div>
+      </main>
+    );
+  }
+
+  if (isLoading || authState === "loading") {
+    return (
+      <div role="status" className="min-h-screen bg-[var(--bg-layered)] flex items-center justify-center">
         <div className="inline-flex items-center gap-3 rounded-xl border border-[color:var(--border-subtle)] bg-[var(--bg-card)] px-4 py-3 shadow-clean">
           <Loader2 className="h-5 w-5 animate-spin text-[color:var(--action-primary)]" />
           <span className="text-sm font-medium text-[color:var(--text-secondary)]">Loading host signup</span>
@@ -206,7 +234,7 @@ function HostSignup() {
   }
 
   if (!isAuthenticated) {
-    // Redirect effect above sends this case to /customer-signup?role=host.
+    // Redirect only after the authentication owner confirms a guest session.
     return null;
   }
 
@@ -423,7 +451,3 @@ function HostSignup() {
 }
 
 export default HostSignup;
-
-
-
-
