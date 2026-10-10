@@ -7,8 +7,10 @@ import {
   buildGuestBusinessSignupPath,
   buildProgressiveAccountPath,
   getProgressiveAccountGate,
+  getGuestClaimPrefillValue,
   GUEST_BUSINESS_DRAFT_KEY,
   persistGuestBusinessDraft,
+  shouldRestoreGuestBusinessDraft,
 } from "../shared/progressiveOnboarding";
 import { parseBusinessSignupRouteIntent } from "../shared/businessSignupIntent";
 
@@ -104,4 +106,38 @@ test("claim design retains its selected business type before the server ownershi
   }));
   assert.match(html, /id="guest-draft-businessType"[^>]*disabled/);
   assert.match(html, /value="food_truck" selected/);
+});
+
+test("the exact new claim draft survives the actual restore guard after authentication", () => {
+  const intent = parseBusinessSignupRouteIntent("businessType=food_truck&intent=claim&claimListingId=truck-1&q=Tacos");
+  let raw = "";
+  persistGuestBusinessDraft({setItem(_key, value) {raw=value;}}, {businessType:"food_truck",name:"My Tacos",cuisineType:"Mexican",description:"My design"}, Date.now(), intent);
+  const draft = JSON.parse(raw);
+  assert.equal(shouldRestoreGuestBusinessDraft(intent, draft), true);
+  assert.equal(draft.cuisineType, "Mexican");
+  assert.equal(getGuestClaimPrefillValue(intent, draft, "My Tacos", "Registry name", "truck-1"), "My Tacos");
+  assert.equal(getGuestClaimPrefillValue(intent, draft, "My address", "Route prefill"), "My address");
+  assert.equal(getGuestClaimPrefillValue(intent, draft, "", "Registry name", "truck-1"), "Registry name");
+  assert.equal(getGuestClaimPrefillValue(intent, draft, "My Tacos", "Other truck", "truck-2"), "Other truck");
+});
+
+test("claim restore rejects old, stale, different-target and different-query drafts", () => {
+  const intent = parseBusinessSignupRouteIntent("businessType=food_truck&intent=claim&claimListingId=truck-1&q=Tacos");
+  let raw = "";
+  persistGuestBusinessDraft({setItem(_key, value) {raw=value;}}, {businessType:"food_truck",name:"My Tacos"}, Date.now(), intent);
+  const draft = JSON.parse(raw);
+  assert.equal(shouldRestoreGuestBusinessDraft(intent, {...draft,__guestClaim:undefined}), false);
+  assert.equal(shouldRestoreGuestBusinessDraft(intent, {...draft,__savedAt:0}), false);
+  assert.equal(shouldRestoreGuestBusinessDraft(parseBusinessSignupRouteIntent("businessType=food_truck&intent=claim&claimListingId=truck-2&q=Tacos"), draft), false);
+  assert.equal(shouldRestoreGuestBusinessDraft(parseBusinessSignupRouteIntent("businessType=food_truck&intent=claim&claimListingId=truck-1&q=Other"), draft), false);
+});
+
+test("verification of an edited business type returns to a route that restores that draft", () => {
+  const original = parseBusinessSignupRouteIntent("businessType=restaurant&source=profile-setup");
+  const currentDraft = {businessType:"caterer",name:"Guest catering",__savedAt:Date.now()};
+  const intended = buildGuestBusinessSignupPath(original, "caterer");
+  const verification = new URL(buildProgressiveAccountPath("verify_email", "keep_draft", intended), "https://www.mealscout.us");
+  const returned = new URL(verification.searchParams.get("redirect")!, "https://www.mealscout.us");
+  assert.equal(shouldRestoreGuestBusinessDraft(parseBusinessSignupRouteIntent(returned.search), currentDraft), true);
+  assert.equal(returned.searchParams.get("businessType"), "caterer");
 });

@@ -10,7 +10,9 @@ import {
   buildGuestBusinessSignupPath,
   buildProgressiveAccountPath,
   getProgressiveAccountGate,
+  getGuestClaimPrefillValue,
   persistGuestBusinessDraft,
+  shouldRestoreGuestBusinessDraft,
 } from "@shared/progressiveOnboarding";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
@@ -60,7 +62,6 @@ import {
   buildRestaurantSignupPath,
   buildRestaurantSignupContinuationPath,
   parseBusinessSignupRouteIntent,
-  shouldRestoreBusinessSignupDraft,
 } from "@shared/businessSignupIntent";
 
 /**
@@ -485,10 +486,7 @@ export default function RestaurantSignup() {
         businessType?: string;
       };
       if (
-        !shouldRestoreBusinessSignupDraft(
-          signupRouteIntent,
-          parsed.businessType,
-        )
+        !shouldRestoreGuestBusinessDraft(signupRouteIntent, parsed)
       ) {
         return "";
       }
@@ -519,6 +517,7 @@ export default function RestaurantSignup() {
     }
   };
 
+  const restoredGuestDraftRef = useRef<Record<string, unknown> | null>(null);
   const restaurantDefaultValues = useMemo<RestaurantFormData>(() => {
     const base: RestaurantFormData = {
       ...BLANK_RESTAURANT_FORM_VALUES,
@@ -532,6 +531,7 @@ export default function RestaurantSignup() {
       if (!stored) return base;
       const parsed = JSON.parse(stored) as Partial<RestaurantFormData> & {
         __savedAt?: number;
+        __guestClaim?: unknown;
       };
       const savedAt = parsed.__savedAt;
       if (
@@ -543,15 +543,13 @@ export default function RestaurantSignup() {
         window.localStorage.removeItem(RESTAURANT_DRAFT_KEY);
         return base;
       }
-      const { __savedAt, ...draftFields } = parsed;
+      const { __savedAt, __guestClaim, ...draftFields } = parsed;
       if (
-        !shouldRestoreBusinessSignupDraft(
-          signupRouteIntent,
-          draftFields.businessType,
-        )
+        !shouldRestoreGuestBusinessDraft(signupRouteIntent, parsed)
       ) {
         return base;
       }
+      if (signupRouteIntent.isClaim) restoredGuestDraftRef.current = parsed;
       return {
         ...base,
         ...draftFields,
@@ -679,10 +677,9 @@ export default function RestaurantSignup() {
           ? Number(prefillLongitudeRaw)
           : null;
 
-        if (prefillName) form.setValue("name", prefillName);
-        if (prefillAddress) form.setValue("address", prefillAddress);
-        if (prefillCity) form.setValue("city", prefillCity);
-        if (prefillState) form.setValue("state", prefillState);
+        for (const [field, value] of [["name", prefillName], ["address", prefillAddress], ["city", prefillCity], ["state", prefillState]] as const) {
+          if (value) form.setValue(field, getGuestClaimPrefillValue(signupRouteIntent, restoredGuestDraftRef.current, form.getValues(field), value));
+        }
         if (
           prefillPlaceId ||
           prefillAddress ||
@@ -765,16 +762,13 @@ export default function RestaurantSignup() {
   useEffect(() => {
     const subscription = form.watch((value) => {
       try {
-        window.localStorage.setItem(
-          RESTAURANT_DRAFT_KEY,
-          JSON.stringify({ ...value, __savedAt: Date.now() }),
-        );
+        persistGuestBusinessDraft(() => window.localStorage, value, Date.now(), signupRouteIntent);
       } catch {
         // ignore storage errors
       }
     });
     return () => subscription.unsubscribe();
-  }, [form]);
+  }, [form, signupRouteIntent]);
 
   useEffect(() => {
     const subscription = signupForm.watch((value, info) => {
@@ -1088,11 +1082,18 @@ export default function RestaurantSignup() {
   const onSubmit = async (data: RestaurantFormData) => {
     const accountGate = getProgressiveAccountGate(user);
     if (accountGate !== "continue") {
-      if (!persistGuestBusinessDraft(() => window.localStorage, form.getValues())) {
+      const currentIntent = {
+        ...signupRouteIntent,
+        passthrough: {
+          ...signupRouteIntent.passthrough,
+          ...(claimSelection?.id ? { claimListingId: String(claimSelection.id) } : {}),
+        },
+      };
+      if (!persistGuestBusinessDraft(() => window.localStorage, form.getValues(), Date.now(), currentIntent)) {
         toast({ title: COPY.guestDraft.storageErrorTitle, description: COPY.guestDraft.storageErrorDescription, variant: "destructive" });
         return;
       }
-      window.location.href = buildProgressiveAccountPath(accountGate, "keep_draft", continuationPath);
+      window.location.href = buildProgressiveAccountPath(accountGate, "keep_draft", buildGuestBusinessSignupPath(currentIntent, data.businessType));
       return;
     }
     const { confirmNotFoodTruck, ...restaurantData } = data;
@@ -1318,11 +1319,9 @@ export default function RestaurantSignup() {
         setClaimSelection(exactListing);
         setClaimResults([]);
         setClaimQuery(exactListing.externalId || exactListing.name || query);
-        form.setValue("name", exactListing.name || "");
-        form.setValue("address", exactListing.address || "");
-        form.setValue("city", exactListing.city || "");
-        form.setValue("state", exactListing.state || "");
-        form.setValue("phone", exactListing.phone || "");
+        for (const field of ["name", "address", "city", "state", "phone"] as const) {
+          form.setValue(field, getGuestClaimPrefillValue(signupRouteIntent, restoredGuestDraftRef.current, form.getValues(field), String(exactListing[field] || ""), String(exactListing.id)));
+        }
         return;
       }
 
@@ -1373,11 +1372,9 @@ export default function RestaurantSignup() {
     setClaimSelection(listing);
     setClaimResults([]);
     setClaimQuery(listing.externalId || listing.name || "");
-    form.setValue("name", listing.name || "");
-    form.setValue("address", listing.address || "");
-    form.setValue("city", listing.city || "");
-    form.setValue("state", listing.state || "");
-    form.setValue("phone", listing.phone || "");
+    for (const field of ["name", "address", "city", "state", "phone"] as const) {
+      form.setValue(field, getGuestClaimPrefillValue(signupRouteIntent, restoredGuestDraftRef.current, form.getValues(field), String(listing[field] || ""), String(listing.id)));
+    }
   };
 
   const handleWebsiteImport = async () => {
@@ -1524,7 +1521,7 @@ export default function RestaurantSignup() {
               onChange={(field, value) => form.setValue(field, value, { shouldDirty: true })}
               canChangeBusinessType={!signupRouteIntent.isClaim}
               onKeep={() => {
-                if (!persistGuestBusinessDraft(() => window.localStorage, form.getValues())) {
+                if (!persistGuestBusinessDraft(() => window.localStorage, form.getValues(), Date.now(), signupRouteIntent)) {
                   toast({ title: COPY.guestDraft.storageErrorTitle, description: COPY.guestDraft.storageErrorDescription, variant: "destructive" });
                   return;
                 }

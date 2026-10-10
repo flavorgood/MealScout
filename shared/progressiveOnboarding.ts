@@ -1,6 +1,7 @@
 import { normalizeSafeInternalPath } from "./safeInternalPath";
 import {
   buildRestaurantSignupPath,
+  shouldRestoreBusinessSignupDraft,
   type BusinessSignupRouteIntent,
   type SignupBusinessType,
 } from "./businessSignupIntent";
@@ -47,10 +48,45 @@ const ACCOUNT_ONLY_FIELDS = new Set([
 
 export const GUEST_BUSINESS_DRAFT_KEY = "mealscout:restaurant-signup-draft";
 
+const GUEST_DRAFT_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+
+export function shouldRestoreGuestBusinessDraft(
+  intent: BusinessSignupRouteIntent,
+  draft: Record<string, unknown>,
+  now = Date.now(),
+): boolean {
+  if (!intent.isClaim) return shouldRestoreBusinessSignupDraft(intent, draft.businessType);
+  const context = draft.__guestClaim as Record<string, unknown> | undefined;
+  const savedAt = draft.__savedAt;
+  return Boolean(
+    context?.version === 1 && context.businessType === "food_truck" &&
+    draft.businessType === "food_truck" &&
+    typeof savedAt === "number" && Number.isFinite(savedAt) &&
+    savedAt <= now && now - savedAt <= GUEST_DRAFT_MAX_AGE_MS &&
+    context.listingId === (intent.passthrough.claimListingId || "") &&
+    context.query === (intent.passthrough.q || ""),
+  );
+}
+
+export function getGuestClaimPrefillValue(
+  intent: BusinessSignupRouteIntent,
+  savedDraft: Record<string, unknown> | null,
+  currentValue: string,
+  prefillValue: string,
+  listingId?: string,
+): string {
+  const context = savedDraft?.__guestClaim as Record<string, unknown> | undefined;
+  const sameTarget = listingId === undefined || context?.listingId === listingId;
+  return savedDraft && sameTarget && shouldRestoreGuestBusinessDraft(intent, savedDraft) && currentValue.trim()
+    ? currentValue
+    : prefillValue;
+}
+
 export function persistGuestBusinessDraft(
   storage: Pick<Storage, "setItem"> | (() => Pick<Storage, "setItem">),
   draft: Record<string, unknown>,
   now = Date.now(),
+  intent?: BusinessSignupRouteIntent,
 ): boolean {
   try {
     const fields = Object.fromEntries(
@@ -59,7 +95,16 @@ export function persistGuestBusinessDraft(
     const target = typeof storage === "function" ? storage() : storage;
     target.setItem(
       GUEST_BUSINESS_DRAFT_KEY,
-      JSON.stringify({ ...fields, __savedAt: now }),
+      JSON.stringify({
+        ...fields,
+        __savedAt: now,
+        __guestClaim: intent?.isClaim ? {
+          version: 1,
+          businessType: intent.businessType,
+          listingId: intent.passthrough.claimListingId || "",
+          query: intent.passthrough.q || "",
+        } : undefined,
+      }),
     );
     return true;
   } catch {
