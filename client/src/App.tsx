@@ -4,6 +4,9 @@ import { QueryClientProvider } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { useAuth } from "@/hooks/useAuth";
+import { VerifiedAccountBoundary } from "@/components/verified-account-boundary";
+import { getProgressiveAccountGate } from "@shared/progressiveOnboarding";
+import { isProgressiveRestrictedPath, PROGRESSIVE_RESTRICTED_ROUTES } from "@shared/progressiveAccountRoutes";
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import Navigation, {
   GlobalNavigationOwnerProvider,
@@ -180,19 +183,14 @@ const RedirectToScout = () => {
 };
 
 const RedirectToLogin = () => {
-  const [location, setLocation] = useLocation();
+  const [location] = useLocation();
+  const { user } = useAuth();
+  return <VerifiedAccountBoundary user={user} destination={`${location || "/dashboard"}${window.location.search}${window.location.hash}`} />;
+};
 
-  useEffect(() => {
-    const redirectTarget = `${location || "/dashboard"}${window.location.search || ""}`;
-    const redirect = encodeURIComponent(redirectTarget);
-    setLocation(`/login?redirect=${redirect}`);
-  }, [location, setLocation]);
-
-  return (
-    <main className="flex min-h-screen items-center justify-center px-4 text-center">
-      <p className="text-sm text-muted-foreground">Opening sign in...</p>
-    </main>
-  );
+const VerifiedDashboardRouter = () => {
+  const { user } = useAuth();
+  return <VerifiedAccountBoundary user={user} destination={`/dashboard${window.location.search}${window.location.hash}`}><DashboardRouter /></VerifiedAccountBoundary>;
 };
 
 const RedirectToSettingsNotifications = () => {
@@ -350,33 +348,8 @@ function DashboardSwitcherPage() {
 function GuestProtectedRoutes() {
   return (
     <>
-      <Route path="/favorites" component={RedirectToLogin} />
-      <Route path="/owner/ecosystem-sharing/:sourceId" component={RedirectToLogin} />
-      <Route path="/restaurant-owner-dashboard" component={RedirectToLogin} />
-      <Route path="/restaurant/dashboard" component={RedirectToLogin} />
-      <Route path="/deal-edit/:dealId" component={RedirectToLogin} />
-      <Route path="/subscribe" component={RedirectToLogin} />
-      <Route path="/host/dashboard" component={RedirectToLogin} />
-      <Route path="/event-coordinator/dashboard" component={RedirectToLogin} />
-      <Route path="/truck-discovery" component={RedirectToLogin} />
-      <Route path="/supply/orders" component={RedirectToLogin} />
-      <Route path="/orders" component={RedirectToLogin} />
-      <Route path="/merchant-promotions" component={RedirectToLogin} />
-      <Route path="/profile" component={RedirectToLogin} />
-      <Route path="/profile/notifications" component={RedirectToLogin} />
-      <Route path="/settings" component={RedirectToLogin} />
-      <Route path="/profile/addresses" component={RedirectToLogin} />
-      <Route path="/profile/payment" component={RedirectToLogin} />
-      <Route path="/profile/help" component={RedirectToLogin} />
-      <Route path="/profile/reporter-reputation" component={RedirectToLogin} />
-      <Route path="/supplier/dashboard" component={RedirectToLogin} />
-      <Route path="/affiliate/earnings" component={RedirectToLogin} />
-      <Route path="/parking-pass-manage" component={RedirectToLogin} />
-      <Route path="/business-team" component={RedirectToLogin} />
-      <Route path="/menu-builder" component={RedirectToLogin} />
-      <Route path="/owner-ai" component={RedirectToLogin} />
-      <Route path="/owner-ai/authorize" component={RedirectToLogin} />
-      <Route path="/kitchen" component={RedirectToLogin} />
+      {PROGRESSIVE_RESTRICTED_ROUTES.map(path => <Route key={path} path={path} component={RedirectToLogin} />)}
+      <Route path="/menu-builder" component={MenuBuilderPage} />
     </>
   );
 }
@@ -479,7 +452,7 @@ function SharedPublicRoutes() {
       <Route path="/events" component={EventsRouter} />
       <Route path="/events/public" component={EventsPage} />
       <Route path="/event/:slug" component={EventDetailPage} />
-      <Route path="/dashboard" component={DashboardRouter} />
+      <Route path="/dashboard" component={VerifiedDashboardRouter} />
       <Route path="/user-dashboard" component={UserDashboard} />
       <Route path="/food-trucks" component={RedirectToScout} />
       <Route
@@ -524,6 +497,7 @@ function Router() {
   const shownAnnouncementRef = useRef<string>("");
   const [location] = useLocation();
   const isLikelyPublicRoute = isPublicPath(location);
+  const isRestrictedRoute = isProgressiveRestrictedPath(location);
   const shouldUseGuestRoutes =
     !isAuthenticated || (authState === "loading" && isLikelyPublicRoute);
 
@@ -539,14 +513,18 @@ function Router() {
   }, [user, toast]);
 
   // Canonical guard: never redirect until authState resolves
-  if (authState === "loading" && !isLikelyPublicRoute) {
+  if (authState === "loading" && (!isLikelyPublicRoute || isRestrictedRoute)) {
     return <PageLoader />;
+  }
+
+  if (getProgressiveAccountGate(user) !== "continue" && isRestrictedRoute) {
+    return <VerifiedAccountBoundary user={user} destination={`${location}${window.location.search}${window.location.hash}`} />;
   }
 
   return (
     <Suspense fallback={<PageLoader />}>
       <Switch>
-        {shouldUseGuestRoutes ? (
+        {[shouldUseGuestRoutes ? (
           <>
             <Route path="/" component={Welcome} />
             <Route path="/scout" component={ScoutPageV2} />
@@ -700,7 +678,7 @@ function Router() {
             />
             <Route path="/:businessSlug" component={CleanPublicProfileRoute} />
           </>
-        )}
+        )]}
       </Switch>
     </Suspense>
   );

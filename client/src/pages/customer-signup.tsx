@@ -48,6 +48,14 @@ import {
   trackFunnelEventOncePerSession,
 } from "@/utils/funnelTelemetry";
 import { getStoredAffiliateRef, setAffiliateRef } from "@/lib/share";
+import { normalizeSafeInternalPath } from "@shared/safeInternalPath";
+import {
+  buildProgressiveAccountPath,
+  getProgressiveAccountAction,
+  getProgressiveAccountGate,
+  preserveProgressiveAuthContext,
+  resolveProgressiveAuthDestination,
+} from "@shared/progressiveOnboarding";
 import {
   buildRestaurantSignupPath,
   parseBusinessSignupRouteIntent,
@@ -262,6 +270,7 @@ export default function CustomerSignup() {
     () => parseBusinessSignupRouteIntent(searchParams),
     [searchParams],
   );
+  const inboundAuthDestination = normalizeSafeInternalPath(searchParams.get("redirect"));
   const normalizedRole = normalizeSignupRole(searchParams.get("role"));
   const urlReferralTag = String(
     searchParams.get("ref") || extractCustomerSignupPathRef() || "",
@@ -297,16 +306,21 @@ export default function CustomerSignup() {
     }
   }, [urlReferralTag]);
 
-  const getCustomerRedirectPath = () =>
+  const getCustomerRedirectPath = () => resolveProgressiveAuthDestination(
+    inboundAuthDestination,
     accountType === "host"
       ? "/host-signup"
       : accountType === "event_organizer"
         ? "/event-coordinator/dashboard?setup=onboarding"
         : accountType === "business"
           ? getBusinessRedirectPath()
-          : "/scout";
+          : accountType === "supplier" ? "/supplier/dashboard" : "/scout",
+  );
 
   const getBusinessRedirectPath = () => {
+    if (inboundAuthDestination && new URL(inboundAuthDestination, window.location.origin).pathname === "/restaurant-signup") {
+      return inboundAuthDestination;
+    }
     const intent: BusinessSignupIntent =
       businessSubType === "food_truck" && inboundBusinessIntent.isClaim
         ? "claim"
@@ -331,8 +345,9 @@ export default function CustomerSignup() {
 
   const preserveReferralHref = (href: string) => {
     const ref = getReferralId();
-    if (!ref) return href;
-    const url = new URL(href, window.location.origin);
+    const continuedHref = preserveProgressiveAuthContext(href, searchParams);
+    if (!ref) return continuedHref;
+    const url = new URL(continuedHref, window.location.origin);
     if (!url.searchParams.has("ref")) {
       url.searchParams.set("ref", ref);
     }
@@ -349,16 +364,7 @@ export default function CustomerSignup() {
   useEffect(() => {
     if (accountType !== "business") return;
     setLocation(
-      preserveReferralHref(
-        buildRestaurantSignupHref(
-          businessSubType,
-          inboundBusinessIntent.source || "customer-signup-redirect",
-          businessSubType === "food_truck" && inboundBusinessIntent.isClaim
-            ? "claim"
-            : "create",
-          inboundBusinessIntent.passthrough,
-        ),
-      ),
+      preserveReferralHref(getBusinessRedirectPath()),
     );
   }, [
     accountType,
@@ -366,6 +372,7 @@ export default function CustomerSignup() {
     inboundBusinessIntent.isClaim,
     inboundBusinessIntent.passthrough,
     inboundBusinessIntent.source,
+    inboundAuthDestination,
     setLocation,
     urlReferralTag,
   ]);
@@ -377,9 +384,7 @@ export default function CustomerSignup() {
         redirectPath,
       );
     } catch {}
-    window.location.href = `/post-verification?status=check-email&redirect=${encodeURIComponent(
-      redirectPath,
-    )}`;
+    window.location.href = preserveProgressiveAuthContext(`/post-verification?status=check-email&redirect=${encodeURIComponent(redirectPath)}`, searchParams);
   };
 
   const redirectExistingAccountToLogin = () => {
@@ -394,7 +399,7 @@ export default function CustomerSignup() {
         form.getValues("email") || "",
       );
     } catch {}
-    setLocation(`/login?redirect=${encodeURIComponent(redirectPath)}`);
+    setLocation(preserveProgressiveAuthContext(`/login?redirect=${encodeURIComponent(redirectPath)}`, searchParams));
   };
 
   const handleSignupError = (error: any, fallbackTitle = "Signup failed") => {
@@ -657,7 +662,7 @@ export default function CustomerSignup() {
       const res = await apiRequest("POST", "/api/auth/supplier/register", {
         ...signupData,
         referralId: getReferralId(),
-        intendedNextPath: "/supplier/dashboard",
+        intendedNextPath: getCustomerRedirectPath(),
       });
       return await res.json();
     },
@@ -685,10 +690,10 @@ export default function CustomerSignup() {
       trackFunnelEvent(FUNNEL_EVENTS.activationStarted, {
         page: "customer-signup",
         stage: "redirect_to_email_handoff",
-        redirectPath: toSafeFunnelDestinationPath("/supplier/dashboard"),
+        redirectPath: toSafeFunnelDestinationPath(getCustomerRedirectPath()),
         accountType: "supplier",
       });
-      goToVerificationHandoff("/supplier/dashboard");
+      goToVerificationHandoff(getCustomerRedirectPath());
     },
     onError: (error) => handleSignupError(error, "Supplier signup failed"),
   });
@@ -728,6 +733,7 @@ export default function CustomerSignup() {
     String(phone || "").replace(/\D/g, "").length >= 10;
 
   const getExistingAccountContinuationPath = () => {
+    if (inboundAuthDestination) return inboundAuthDestination;
     if (accountType === "host") {
       return "/host-signup";
     }
@@ -748,6 +754,11 @@ export default function CustomerSignup() {
 
   const continueWithExistingAccount = () => {
     const continuationPath = getExistingAccountContinuationPath();
+    const gate = getProgressiveAccountGate(user);
+    if (gate !== "continue") {
+      window.location.href = buildProgressiveAccountPath(gate, getProgressiveAccountAction(searchParams) || "restricted", continuationPath);
+      return;
+    }
     if (!hasRequiredPhone((user as any)?.phone)) {
       setLocation(
         `/account-setup?phoneRequired=1&redirect=${encodeURIComponent(
@@ -757,7 +768,7 @@ export default function CustomerSignup() {
       return;
     }
 
-    if (accountType === "supplier") {
+    if (accountType === "supplier" && !inboundAuthDestination) {
       activateSupplierProfileMutation.mutate();
       return;
     }
@@ -1847,7 +1858,7 @@ export default function CustomerSignup() {
             {/* Divider + Login Link (compressed) */}
             <div className="mt-3 flex items-center justify-between text-xs text-[color:var(--text-secondary)]">
               <span>Already have an account?</span>
-              <Link href="/login">
+              <Link href={preserveReferralHref("/login")}>
                 <button
                   type="button"
                   className="text-[color:var(--accent-text)] underline hover:text-[color:var(--accent-text)]"

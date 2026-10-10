@@ -1,6 +1,7 @@
 import { SEOHead } from "@/components/seo-head";
 import { BackHeader } from "@/components/back-header";
 import { Button } from "@/components/ui/button";
+import { ProgressiveContactLink } from "@/components/progressive-contact-link";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { 
   Mail, 
@@ -120,13 +121,13 @@ export default function Contact() {
                     </div>
                   </div>
                   <Button
+                    asChild
                     className="w-full bg-gradient-to-r from-purple-500 to-pink-500 hover:from-purple-600 hover:to-pink-600 text-white"
-                    onClick={() => {
-                      window.location.href = `mailto:${supportEmail}?subject=${encodeURIComponent(method.title)}`;
-                    }}
                   >
-                    <Mail className="w-4 h-4 mr-2" />
-                    Send Email
+                    <ProgressiveContactLink href={`mailto:${supportEmail}?subject=${encodeURIComponent(method.title)}`}>
+                      <Mail className="w-4 h-4 mr-2" />
+                      Send Email
+                    </ProgressiveContactLink>
                   </Button>
                 </CardContent>
               </Card>

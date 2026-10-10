@@ -1,3 +1,4 @@
+import { ProgressiveContactLink } from "@/components/progressive-contact-link";
 /**
  * PlanYourVisitPanel
  *
@@ -101,7 +102,7 @@ export function PlanYourVisitPanel({ profile }: PlanYourVisitPanelProps) {
           );
 
           return row.href ? (
-            <a
+            <ProgressiveContactLink
               key={i}
               href={row.href}
               target={row.external ? "_blank" : undefined}
@@ -111,7 +112,7 @@ export function PlanYourVisitPanel({ profile }: PlanYourVisitPanelProps) {
               className="block transition-colors hover:bg-orange-50"
             >
               {inner}
-            </a>
+            </ProgressiveContactLink>
           ) : (
             <div key={i}>{inner}</div>
           );
@@ -120,7 +121,7 @@ export function PlanYourVisitPanel({ profile }: PlanYourVisitPanelProps) {
         {socialLinks.length > 0 ? (
           <div className="flex flex-wrap gap-2 px-4 py-3">
             {socialLinks.map((s) => (
-              <a
+              <ProgressiveContactLink
                 key={s.href}
                 href={s.href}
                 target="_blank"
@@ -130,7 +131,7 @@ export function PlanYourVisitPanel({ profile }: PlanYourVisitPanelProps) {
                 className="rounded-full border border-[color:var(--profile-border)] bg-white px-3 py-1 text-xs font-semibold text-[color:var(--profile-ink-soft)] hover:border-orange-200 hover:bg-orange-50 hover:text-orange-800"
               >
                 {s.label}
-              </a>
+              </ProgressiveContactLink>
             ))}
           </div>
         ) : null}

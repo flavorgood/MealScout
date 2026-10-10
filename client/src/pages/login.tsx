@@ -18,6 +18,7 @@ import {
 } from "@/utils/funnelTelemetry";
 import { getStoredAffiliateRef, setAffiliateRef } from "@/lib/share";
 import { normalizeSafeInternalPath } from "@shared/safeInternalPath";
+import { preserveProgressiveAuthContext } from "@shared/progressiveOnboarding";
 
 const getSafeRedirectPath = (): string | null => {
   try {
@@ -44,13 +45,17 @@ export default function Login() {
   const buildAuthPath = (basePath: string) => {
     const params = new URLSearchParams(window.location.search);
     const urlReferralTag = String(params.get("ref") || "").trim();
-    if (urlReferralTag) setAffiliateRef(urlReferralTag);
     const storedRef = String(urlReferralTag || getStoredAffiliateRef() || "").trim();
     const url = new URL(basePath, window.location.origin);
     if (redirectPath) url.searchParams.set("redirect", redirectPath);
     if (storedRef && !url.searchParams.has("ref")) url.searchParams.set("ref", storedRef);
-    return `${url.pathname}${url.search}${url.hash}`;
+    return preserveProgressiveAuthContext(`${url.pathname}${url.search}${url.hash}`, params);
   };
+
+  useEffect(() => {
+    const ref = new URLSearchParams(window.location.search).get("ref")?.trim();
+    if (ref) setAffiliateRef(ref);
+  }, []);
 
   const attemptLoginWithRetry = async () =>
     fetchJsonWithRetry<Record<string, any>>("/api/auth/login", {
@@ -365,7 +370,7 @@ export default function Login() {
                 Sign In with Email
               </button>
 
-              <Link href="/customer-signup">
+              <Link href={buildAuthPath("/customer-signup")}>
                 <button
                   data-testid="button-customer-signup"
                   className="w-full py-3 px-4 font-medium text-sm rounded-lg border border-[color:var(--action-primary)] text-[color:var(--action-primary)] hover:bg-[var(--bg-surface-muted)] transition-all duration-200 flex items-center justify-center"
@@ -556,7 +561,7 @@ export default function Login() {
           <p className="text-[color:var(--text-secondary)] text-sm mb-3">
             Looking to promote your business?
           </p>
-          <Link href="/customer-signup?role=business">
+          <Link href={buildAuthPath("/customer-signup?role=business")}>
             <button
               className="py-2 px-4 font-medium text-[color:var(--action-primary)] border border-[color:var(--action-primary)] hover:bg-[var(--bg-surface-muted)] rounded-lg transition-all duration-200"
               data-testid="link-business-signup"

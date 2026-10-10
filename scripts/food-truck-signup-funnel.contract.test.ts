@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { runInNewContext } from "node:vm";
+import ts from "typescript";
+import { resolveProgressivePostVerificationDestination } from "../shared/progressiveOnboarding";
 
 import {
   buildFoodTruckClaimContinuationPath,
@@ -615,11 +618,76 @@ assert(
       accountSetupCompletion.indexOf(".delete(accountSetupTokens)"),
   "Setup delivery must preserve old tokens, delete only a failed new token, and atomically let one user-row-locked completion invalidate all tokens.",
 );
+// Run the actual page selector so sanitizer relocation cannot weaken this contract.
+const postVerificationAst = ts.createSourceFile(
+  "post-verification.tsx", postVerification, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX,
+);
+const redirectPickers = postVerificationAst.statements
+  .filter(ts.isFunctionDeclaration)
+  .filter((statement) => statement.name?.text === "getBestRedirect");
+assert.equal(redirectPickers.length, 1, "Post-verification must have one actual destination selector.");
+let importedPolicyName: string | undefined;
+for (const statement of postVerificationAst.statements) {
+  if (!ts.isImportDeclaration(statement) || !ts.isStringLiteral(statement.moduleSpecifier) ||
+      statement.moduleSpecifier.text !== "@shared/progressiveOnboarding") continue;
+  const bindings = statement.importClause?.namedBindings;
+  if (!bindings || !ts.isNamedImports(bindings)) continue;
+  for (const binding of bindings.elements) {
+    if ((binding.propertyName || binding.name).text === "resolveProgressivePostVerificationDestination") {
+      importedPolicyName = binding.name.text;
+    }
+  }
+}
+assert(importedPolicyName, "The actual page must bind the shared post-verification policy.");
+const policySymbol = importedPolicyName;
+const redirectPickerCode = ts.transpileModule(redirectPickers[0].getText(postVerificationAst), {
+  compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
+}).outputText;
+function selectActualPostVerificationRedirect(params: URLSearchParams, stored: string | null): string {
+  return runInNewContext(redirectPickerCode + "\ngetBestRedirect(params);", {
+    [policySymbol]: resolveProgressivePostVerificationDestination,
+    params,
+    REDIRECT_STORAGE_KEY: "mealscout:post-verification-redirect",
+    CANONICAL_DASHBOARD_ENTRY_PATH: "/dashboard",
+    getStoredValue: (key: string) => {
+      assert.equal(key, "mealscout:post-verification-redirect");
+      return stored;
+    },
+  }, { timeout: 1000 });
+}
+assert.equal(selectActualPostVerificationRedirect(
+  new URLSearchParams({ status: "check-email", redirect: "/scout" }), exactClaimContinuation,
+), exactClaimContinuation, "Same-session check-email must preserve the exact saved claim.");
+assert.equal(selectActualPostVerificationRedirect(
+  new URLSearchParams({ verified: "1", redirect: exactClaimContinuation }), "/scout",
+), exactClaimContinuation, "A fresh email must preserve its exact explicit claim.");
+for (const reason of ["keep_draft", "contact", "restricted"]) {
+  assert.equal(selectActualPostVerificationRedirect(
+    new URLSearchParams({ status: "check-email", reason, redirect: exactClaimContinuation }), "/scout",
+  ), exactClaimContinuation, "An explicit progressive return must preserve its exact claim.");
+}
+for (const context of ["status=check-email", "verified=1", "reason=keep_draft"]) {
+  for (const unsafe of [
+    "https://evil.example/steal", "//evil.example/steal",
+    "/account-setup#kept", "/account-setup?token=#kept", "/account-setup?token=%20#kept",
+  ]) {
+    const params = new URLSearchParams(context);
+    params.set("redirect", unsafe);
+    assert.equal(selectActualPostVerificationRedirect(params, unsafe), "/dashboard",
+      "The actual page must reject external or tokenless setup returns in either position.");
+  }
+}
+const tokenizedSetupReturn = "/account-setup?token=opaque-server-token#kept";
+assert.equal(selectActualPostVerificationRedirect(
+  new URLSearchParams({ verified: "1", redirect: tokenizedSetupReturn }), "/scout",
+), tokenizedSetupReturn, "A token-bearing internal return must retain its query and fragment.");
+console.log("[PASS] Actual post-verification selector preserves exact claims and rejects unsafe/tokenless returns.");
+
+
 assert(
   accountSetup.includes("buildSafeAccountSetupPath") &&
     accountSetup.includes("continuationPath") &&
     accountSetupPage.includes("normalizeSafeInternalPath(payload?.redirect)") &&
-    postVerification.includes("normalizeSafeInternalPath(value)") &&
     postVerification.includes('params.set("redirect", redirectPath)') &&
     login.includes("normalizeSafeInternalPath(params.get(\"redirect\"))") &&
     unifiedAuth.includes("getSafeRedirectPath(req.body?.redirect)") &&

@@ -7,6 +7,9 @@ import { useQuery, useMutation } from "@tanstack/react-query";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { prepareMenuCreationAttempt, confirmMenuCreationAttempt, assertMenuCreationReceipt, type MenuCreationAttempt } from "@/lib/menu-creation-request";
 import { useAuth } from "@/hooks/useAuth";
+import { MenuDraftPreview, PrivateMenuDraftPage } from "@/components/private-menu-draft";
+import { guestMenuDraftToCsv, readGuestMenuDraft, GUEST_MENU_CATEGORY_NOTICE } from "@shared/guestMenuDraft";
+import { getProgressiveAccountGate } from "@shared/progressiveOnboarding";
 import { useToast } from "@/hooks/use-toast";
 import BusinessWorkspaceShell from "@/components/business-workspace-shell";
 import {
@@ -211,6 +214,15 @@ function normalizeFullMenu(menu: unknown): FullMenu | null {
 
 // ──────────────────────────────── main page ───────────────────────────────────
 export default function MenuBuilderPage() {
+  const { user, isLoading } = useAuth();
+  if (isLoading) return <div className="flex min-h-screen items-center justify-center"><Loader2 className="h-8 w-8 animate-spin" /></div>;
+  if (getProgressiveAccountGate(user) !== "continue" || new URLSearchParams(window.location.search).get("design") === "1") {
+    return <PrivateMenuDraftPage user={user} />;
+  }
+  return <OwnerMenuBuilderPage />;
+}
+
+function OwnerMenuBuilderPage() {
   const restaurantId = useRestaurantId();
   const { user } = useAuth();
   const [, setLocation] = useLocation();
@@ -231,6 +243,7 @@ export default function MenuBuilderPage() {
   const [posNotes, setPosNotes] = useState("");
   const [externalJson, setExternalJson] = useState("");
   const [isRequestingPosSync, setIsRequestingPosSync] = useState(false);
+  const [guestDraft] = useState(() => readGuestMenuDraft(() => window.localStorage));
 
   const { data: businesses = [], isLoading: loadingBusinesses } = useQuery<
     Restaurant[]
@@ -553,15 +566,7 @@ export default function MenuBuilderPage() {
   };
 
   if (!restaurantId) {
-    return (
-      <div className="min-h-screen">
-        <div className="flex items-center justify-center h-64">
-          <p className="text-muted-foreground">
-            No restaurant linked to your account.
-          </p>
-        </div>
-      </div>
-    );
+    return <PrivateMenuDraftPage user={user} />;
   }
 
   if (loadingBusinesses) {
@@ -637,6 +642,25 @@ export default function MenuBuilderPage() {
         className="mx-auto min-h-screen max-w-6xl space-y-4 px-4 py-5 pb-28 lg:px-6 lg:py-8"
         data-testid="owner-menu-workspace"
       >
+        {guestDraft && <section className="space-y-3 rounded-2xl border bg-card p-4" aria-label="Kept private menu draft">
+          <h2 className="text-xl font-bold">Your kept menu draft</h2>
+          <p className="text-sm text-muted-foreground">Review this draft for {currentBusiness.name}. Creating a menu and importing items each require your confirmation.</p>
+          <MenuDraftPreview draft={guestDraft} />
+          <div className="flex flex-wrap gap-3">
+            <Button variant="outline" onClick={() => { setNewMenuName(guestDraft.name); setNewMenuServiceType(guestDraft.serviceType); setShowNewMenuDialog(true); }}>Review new menu</Button>
+            <Button variant="outline" disabled={!selectedMenuId} onClick={() => {
+              try {
+                const csv = guestMenuDraftToCsv(guestDraft);
+                setImportFile(new File([csv], "kept-menu-draft.csv", { type: "text/csv" }));
+                setImportType("csv");
+                setShowImportDialog(true);
+              } catch (error) {
+                toast({ title: "Draft needs review", description: error instanceof Error ? error.message : "Review the items before importing.", variant: "destructive" });
+              }
+            }}>Review items for selected menu</Button>
+            <Button asChild variant="outline"><Link href="/menu-builder?design=1">Edit private draft</Link></Button>
+          </div>
+        </section>}
         <section className="rounded-2xl border border-orange-200/80 bg-gradient-to-br from-orange-50 via-background to-amber-50/70 p-4 shadow-sm sm:p-5">
           <div>
             <div>
@@ -983,7 +1007,7 @@ export default function MenuBuilderPage() {
               </div>
               <p className="text-xs text-muted-foreground mt-2">
                 {importType === "csv"
-                  ? "CSV with columns: Name, Description, Price, Category, Calories, etc."
+                  ? "CSV with columns: Name, Description, Price, Calories, etc."
                   : importType === "pdf"
                     ? "Upload a PDF menu — AI will extract items automatically."
                     : importType === "photo"
@@ -991,6 +1015,7 @@ export default function MenuBuilderPage() {
                       : "Paste exported item JSON from Toast, Square, Clover, DoorDash, Uber Eats, or Google."}
               </p>
             </div>
+            {importType === "csv" && <p role="note" className="text-sm text-muted-foreground">{GUEST_MENU_CATEGORY_NOTICE}</p>}
             {importType === "photo" ? (
               <div>
                 <Label htmlFor="import-photos">Photos</Label>
@@ -1054,6 +1079,7 @@ export default function MenuBuilderPage() {
                   accept={importType === "csv" ? ".csv,.tsv,.xlsx,.xls" : ".pdf"}
                   onChange={(e) => setImportFile(e.target.files?.[0] ?? null)}
                 />
+                {importFile && <p className="mt-2 text-sm text-muted-foreground">Ready to review: {importFile.name}</p>}
               </div>
             )}
           </div>

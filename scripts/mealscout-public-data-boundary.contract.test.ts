@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { runInNewContext } from "node:vm";
+import ts from "typescript";
 import { sql } from "drizzle-orm";
 import { PgDialect } from "drizzle-orm/pg-core";
 import {
@@ -1234,46 +1236,91 @@ assert.match(
   /hostPriceCents: row\.hostPriceCents \?\? null/,
   "eligible event detail must retain the consumer booking price",
 );
-const paidEventBookingRoute = sliceAfter(
+// The legacy writer is retired. Parse its exact registration so a neighboring
+// confirm/cancel route cannot accidentally satisfy this boundary contract.
+const eventRoutesAst = ts.createSourceFile(
+  "eventRoutes.ts",
   eventRoutesSource,
-  '"/api/events/:eventId/book"',
-  15000,
+  ts.ScriptTarget.Latest,
+  true,
+  ts.ScriptKind.TS,
 );
-assert.match(
-  paidEventBookingRoute,
-  /,\s*isAuthenticated,/,
-  "paid event booking must accept authenticated food-truck accounts",
-);
-assert.match(
-  paidEventBookingRoute,
-  /verifyRestaurantOwnership\([\s\S]*"manageParkingPass"[\s\S]*res\.status\(403\)/,
-  "paid event booking must still require exact truck ownership",
-);
-assert.match(
-  paidEventBookingRoute,
-  /assessParkingPassTruckEligibility\([\s\S]*!truckEligibility\.isTruckProfile[\s\S]*truck_verification_required[\s\S]*!truckEligibility\.roleAllowed/,
-  "the legacy event checkout must enforce the canonical Parking Pass truck, verification, and role gates",
-);
-assert.match(
-  paidEventBookingRoute,
-  /ensureParkingPassEventRow\(\{[\s\S]*passId: eventId[\s\S]*requireFuture: true[\s\S]*now: bookingRequestNow/,
-  "eligible booking must materialize a genuine series-only Parking Pass occurrence",
-);
-assert.match(
-  paidEventBookingRoute,
-  /from \$\{events\} where \$\{events\.id\} = \$\{eventId\} for update[\s\S]*hardCapEnabled: events\.hardCapEnabled[\s\S]*lockedEvent\.hardCapEnabled && reservedCount >= maxSpots/,
-  "legacy and canonical Parking Pass checkout must share the event-row lock and hard-cap policy",
-);
+const legacyCheckoutRegistrations: ts.CallExpression[] = [];
+const findLegacyCheckout = (node: ts.Node) => {
+  if (
+    ts.isCallExpression(node) &&
+    ts.isPropertyAccessExpression(node.expression) &&
+    node.expression.expression.getText(eventRoutesAst) === "app" &&
+    node.expression.name.text === "post" &&
+    node.arguments[0] &&
+    ts.isStringLiteral(node.arguments[0]) &&
+    node.arguments[0].text === "/api/events/:eventId/book"
+  ) {
+    legacyCheckoutRegistrations.push(node);
+  }
+  ts.forEachChild(node, findLegacyCheckout);
+};
+findLegacyCheckout(eventRoutesAst);
+assert.equal(legacyCheckoutRegistrations.length, 1);
+const legacyCheckoutSource = legacyCheckoutRegistrations[0].getText(eventRoutesAst);
 assert.doesNotMatch(
-  paidEventBookingRoute,
-  /pg_advisory_xact_lock/,
-  "legacy checkout must not use a private advisory lock that canonical checkout cannot observe",
+  legacyCheckoutSource,
+  /\b(?:db|storage|stripe)\b|ensureParkingPassEventRow|pg_advisory_xact_lock/,
+  "the retired legacy checkout must not read/write booking state or call providers",
 );
-assert.match(
-  paidEventBookingRoute,
-  /buildSlotDateTimes\([\s\S]*bookingInterval\.startUtc\.getTime\(\) < bookingRequestNow\.getTime\(\)/,
-  "the legacy event checkout must evaluate the zoned slot start rather than rejecting all same-day slots",
+const authenticatedMiddleware = Symbol("isAuthenticated");
+let legacyCheckoutHandler: ((req: unknown, res: unknown) => unknown) | undefined;
+runInNewContext(
+  ts.transpileModule(legacyCheckoutSource, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022 },
+  }).outputText,
+  {
+    app: {
+      post(path: string, ...handlers: unknown[]) {
+        assert.equal(path, "/api/events/:eventId/book");
+        assert.equal(handlers.length, 2);
+        assert.equal(handlers[0], authenticatedMiddleware);
+        assert.equal(typeof handlers[1], "function");
+        legacyCheckoutHandler = handlers[1] as typeof legacyCheckoutHandler;
+      },
+    },
+    isAuthenticated: authenticatedMiddleware,
+    URLSearchParams,
+  },
+  { timeout: 1000 },
 );
+assert.ok(legacyCheckoutHandler);
+for (const truckId of [undefined, "", "  ", " truck-1 ", "truck&next=/outside"]) {
+  let status: number | undefined;
+  let response: { code: string; checkoutPath: string } | undefined;
+  const res = {
+    status(value: number) {
+      status = value;
+      return this;
+    },
+    json(value: typeof response) {
+      response = value;
+      return value;
+    },
+  };
+  const result = legacyCheckoutHandler(
+    { params: { eventId: "pp:series:2026-10-10&next=/outside" }, body: { truckId } },
+    res,
+  );
+  assert.equal(result, response, "legacy checkout must return its rejection");
+  assert.equal(status, 409);
+  assert.ok(response);
+  assert.equal(response.code, "canonical_checkout_required");
+  const destination = new URL(response.checkoutPath, "https://mealscout.test");
+  assert.equal(destination.origin, "https://mealscout.test");
+  assert.equal(destination.pathname, "/parking-pass");
+  assert.equal(destination.searchParams.get("pass"), "pp:series:2026-10-10&next=/outside");
+  assert.equal(destination.searchParams.get("truckId"), truckId?.trim() || null);
+  assert.deepEqual(
+    [...destination.searchParams.keys()].sort(),
+    truckId?.trim() ? ["pass", "truckId"] : ["pass"],
+  );
+}
 const eventDetailClientSource = readSource("client/src/pages/event-detail.tsx");
 assert.match(
   eventDetailClientSource,

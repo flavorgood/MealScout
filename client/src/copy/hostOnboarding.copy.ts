@@ -7,6 +7,30 @@
  */
 
 export const HOST_ONBOARDING_COPY = {
+  guestDraft: {
+    title: "Design your food profile",
+    description: "Start with your business details and see a private preview. You can edit before creating an account.",
+    businessType: "Business type",
+    businessTypes: { restaurant: "Restaurant", bar: "Bar", food_truck: "Food truck", caterer: "Caterer", private_chef: "Private chef" },
+    name: "Business name",
+    cuisine: "Food or cuisine",
+    address: "Address",
+    city: "City",
+    state: "State",
+    website: "Website or menu link",
+    about: "About your business",
+    previewTitle: "Private draft preview",
+    namePlaceholder: "Your business name",
+    aboutPlaceholder: "Describe your food, menu and what makes your business yours.",
+    privacy: "This preview stays in this browser. It has not been published or sent to anyone.",
+    keep: "Keep this draft",
+    accountExplanation: "Create an account or sign in and verify your email to keep going. Your details will be here when you return.",
+    accountTitle: "Keep your draft with an account",
+    accountDescription: "Your design is saved in this browser. Verify your email, then review and submit your business details. Signing in does not publish your profile.",
+    edit: "Back to my draft",
+    storageErrorTitle: "Your draft could not be saved",
+    storageErrorDescription: "Keep this page open and allow browser storage before continuing to an account.",
+  },
   meta: {
     title: "Restaurant Sign Up - MealScout | Grow Your Business",
     description:
