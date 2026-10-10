@@ -1,6 +1,7 @@
 import { SEOHead } from "@/components/seo-head";
 import { BackHeader } from "@/components/back-header";
 import { Button } from "@/components/ui/button";
+import { ProgressiveContactLink } from "@/components/progressive-contact-link";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Link } from "wouter";
 import {
@@ -200,14 +201,13 @@ export default function ProfileSetupPage() {
                     Create Free Profile
                   </Button>
                 </Link>
-                <a href="mailto:support@mealscout.us?subject=MealScout%20Profile%20Setup%20Help">
                   <Button
+                    asChild
                     variant="outline"
                     className="h-12 rounded-full border-orange-300 bg-white px-6 text-base font-black text-orange-800 hover:bg-orange-50"
                   >
-                    Get Setup Help
+                    <ProgressiveContactLink href="mailto:support@mealscout.us?subject=MealScout%20Profile%20Setup%20Help">Get Setup Help</ProgressiveContactLink>
                   </Button>
-                </a>
               </div>
             </div>
 
@@ -340,11 +340,9 @@ export default function ProfileSetupPage() {
                 </CardHeader>
                 <CardContent className="space-y-6">
                   <CheckList items={doneForYouIncludes} />
-                  <a href="mailto:support@mealscout.us?subject=MealScout%20Done-For-You%20Profile%20Setup">
-                    <Button className="w-full rounded-full bg-orange-600 font-black text-white hover:bg-orange-700">
-                      Get Setup Help
+                    <Button asChild className="w-full rounded-full bg-orange-600 font-black text-white hover:bg-orange-700">
+                      <ProgressiveContactLink href="mailto:support@mealscout.us?subject=MealScout%20Done-For-You%20Profile%20Setup">Get Setup Help</ProgressiveContactLink>
                     </Button>
-                  </a>
                 </CardContent>
               </Card>
 
@@ -365,14 +363,13 @@ export default function ProfileSetupPage() {
                 </CardHeader>
                 <CardContent className="space-y-6">
                   <CheckList items={customBuildExamples} />
-                  <a href="mailto:support@mealscout.us?subject=MealScout%20Custom%20Profile%20Quote">
                     <Button
+                      asChild
                       variant="outline"
                       className="w-full rounded-full border-stone-300 bg-white font-black text-stone-800 hover:bg-stone-50"
                     >
-                      Request a Quote
+                      <ProgressiveContactLink href="mailto:support@mealscout.us?subject=MealScout%20Custom%20Profile%20Quote">Request a Quote</ProgressiveContactLink>
                     </Button>
-                  </a>
                 </CardContent>
               </Card>
             </div>
