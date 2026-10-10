@@ -19,7 +19,7 @@ export function isProgressiveRestrictedPath(location: unknown): boolean {
   const actual = path.split("/");
   return PROGRESSIVE_RESTRICTED_ROUTES.some(pattern => {
     const expected = pattern.split("/");
-    return actual.length === expected.length && expected.every((part, index) => part.startsWith(":") ? Boolean(actual[index]) : part === actual[index]);
+    return actual.length === expected.length && expected.every((part, index) => part.startsWith(":") ? Boolean(actual[index]) : part.toLowerCase() === actual[index].toLowerCase());
   });
 }
 

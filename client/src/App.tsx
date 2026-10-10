@@ -497,6 +497,7 @@ function Router() {
   const shownAnnouncementRef = useRef<string>("");
   const [location] = useLocation();
   const isLikelyPublicRoute = isPublicPath(location);
+  const isRestrictedRoute = isProgressiveRestrictedPath(location);
   const shouldUseGuestRoutes =
     !isAuthenticated || (authState === "loading" && isLikelyPublicRoute);
 
@@ -512,11 +513,11 @@ function Router() {
   }, [user, toast]);
 
   // Canonical guard: never redirect until authState resolves
-  if (authState === "loading" && !isLikelyPublicRoute) {
+  if (authState === "loading" && (!isLikelyPublicRoute || isRestrictedRoute)) {
     return <PageLoader />;
   }
 
-  if (isAuthenticated && getProgressiveAccountGate(user) !== "continue" && isProgressiveRestrictedPath(location)) {
+  if (getProgressiveAccountGate(user) !== "continue" && isRestrictedRoute) {
     return <VerifiedAccountBoundary user={user} destination={`${location}${window.location.search}${window.location.hash}`} />;
   }
 

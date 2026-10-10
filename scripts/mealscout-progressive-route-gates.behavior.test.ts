@@ -2,13 +2,30 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { Router } from "wouter";
+import { Router, Route, Switch } from "wouter";
 import { VerifiedAccountBoundary } from "../client/src/components/verified-account-boundary";
 import { getProgressiveContactGatePath, isProgressiveContactHref, isProgressiveRestrictedPath } from "../shared/progressiveAccountRoutes";
 
 test("existing private account/owner/subscription destinations stay gated while public and guest-design routes stay open", () => {
-  for (const path of ["/dashboard", "/profile?tab=member", "/subscribe", "/orders", "/profile/payment", "/owner/ecosystem-sharing/source-1", "/deal-edit/deal-1"]) assert.equal(isProgressiveRestrictedPath(path), true, path);
+  for (const path of ["/dashboard", "/profile?tab=member", "/subscribe", "/orders", "/profile/payment", "/owner/ecosystem-sharing/source-1", "/deal-edit/deal-1", "/PROFILE", "/OWNER-AI", "/Restaurant/Dashboard", "/supplier/dashboard"]) assert.equal(isProgressiveRestrictedPath(path), true, path);
   for (const path of ["/menu-builder?design=1", "/restaurant-signup", "/restaurant/business-1", "/scout", "/contact", "/menu/business-1", "https://outside.example/profile"]) assert.equal(isProgressiveRestrictedPath(path), false, path);
+});
+
+test("classification aligns with installed Wouter case matching and catches public-profile shadowing", () => {
+  for (const [pattern, location] of [["/profile", "/PROFILE"], ["/owner-ai", "/OWNER-AI"]]) {
+    const html = renderToStaticMarkup(createElement(Router, { ssrPath: location }, createElement(Route, { path: pattern }, createElement("p", null, "Private route matched"))));
+    assert.match(html, /Private route matched/);
+    assert.equal(isProgressiveRestrictedPath(location), true);
+  }
+  for (const [publicPattern, location] of [["/restaurant/:id", "/restaurant/dashboard"], ["/supplier/:slug", "/supplier/dashboard"]]) {
+    const html = renderToStaticMarkup(createElement(Router, { ssrPath: location }, createElement(Switch, null,
+      createElement(Route, { path: publicPattern }, createElement("p", null, "Public profile matches first")),
+      createElement(Route, { path: location }, createElement("p", null, "Private dashboard")),
+    )));
+    assert.match(html, /Public profile matches first/);
+    assert.doesNotMatch(html, /Private dashboard/);
+    assert.equal(isProgressiveRestrictedPath(location), true);
+  }
 });
 
 test("an unverified or guest account cannot mount restricted content that could run page actions", () => {
