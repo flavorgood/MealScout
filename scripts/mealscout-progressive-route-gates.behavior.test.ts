@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createElement } from "react";
+import { createElement, Fragment } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { Router, Route, Switch } from "wouter";
 import { VerifiedAccountBoundary } from "../client/src/components/verified-account-boundary";
@@ -25,6 +25,20 @@ test("classification aligns with installed Wouter case matching and catches publ
     assert.match(html, /Public profile matches first/);
     assert.doesNotMatch(html, /Private dashboard/);
     assert.equal(isProgressiveRestrictedPath(location), true);
+  }
+});
+
+test("a single route fragment must be supplied in an array for installed Wouter Switch precedence", () => {
+  for (const path of ["/profile-setup", "/menu-builder"]) {
+    const routes = createElement(Fragment, null,
+      createElement(Route, { path }, createElement("p", null, "Explicit product route")),
+      createElement(Route, { path: "/:businessSlug" }, createElement("p", null, "Clean business fallback")),
+    );
+    const before = renderToStaticMarkup(createElement(Router, { ssrPath: path }, createElement(Switch, null, routes)));
+    assert.match(before, /Explicit product route/);
+    assert.match(before, /Clean business fallback/);
+    const after = renderToStaticMarkup(createElement(Router, { ssrPath: path }, createElement(Switch, null, [routes])));
+    assert.equal(after, "<p>Explicit product route</p>");
   }
 });
 

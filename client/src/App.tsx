@@ -524,7 +524,7 @@ function Router() {
   return (
     <Suspense fallback={<PageLoader />}>
       <Switch>
-        {shouldUseGuestRoutes ? (
+        {[shouldUseGuestRoutes ? (
           <>
             <Route path="/" component={Welcome} />
             <Route path="/scout" component={ScoutPageV2} />
@@ -678,7 +678,7 @@ function Router() {
             />
             <Route path="/:businessSlug" component={CleanPublicProfileRoute} />
           </>
-        )}
+        )]}
       </Switch>
     </Suspense>
   );
