@@ -12,6 +12,7 @@ import {
   boolean,
   unique,
   uniqueIndex,
+  check,
 } from "drizzle-orm/pg-core";
 import { relations } from "drizzle-orm";
 import { createInsertSchema } from "drizzle-zod";
@@ -5398,12 +5399,38 @@ export const hostPartnerLeadSequenceSends = pgTable(
   ],
 );
 
+export const hostPartnerEmailClaims = pgTable(
+  "host_partner_email_claims",
+  {
+    emailNormalized: text("email_normalized").notNull(),
+    sequence: varchar("sequence").notNull(),
+    step: integer("step").notNull(),
+    leadId: varchar("lead_id").references(() => hostPartnerLeads.id, {
+      onDelete: "set null",
+    }),
+    status: varchar("status").notNull().default("pending"),
+    claimedAt: timestamp("claimed_at").notNull().defaultNow(),
+    acceptedAt: timestamp("accepted_at"),
+  },
+  (table) => [
+    primaryKey({
+      name: "pk_host_partner_email_claims",
+      columns: [table.emailNormalized, table.sequence, table.step],
+    }),
+    check(
+      "host_partner_email_claims_status_check",
+      sql`${table.status} in ('pending', 'accepted')`,
+    ),
+  ],
+);
+
 export type HostPartnerLead = typeof hostPartnerLeads.$inferSelect;
 export type InsertHostPartnerLeadRow = typeof hostPartnerLeads.$inferInsert;
 export type HostPartnerLeadSequenceSend =
   typeof hostPartnerLeadSequenceSends.$inferSelect;
 export type InsertHostPartnerLeadSequenceSend =
   typeof hostPartnerLeadSequenceSends.$inferInsert;
+export type HostPartnerEmailClaim = typeof hostPartnerEmailClaims.$inferSelect;
 
 export const insertHostPartnerLeadSchema = createInsertSchema(
   hostPartnerLeads,
