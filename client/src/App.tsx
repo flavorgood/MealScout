@@ -373,7 +373,7 @@ function GuestProtectedRoutes() {
       <Route path="/affiliate/earnings" component={RedirectToLogin} />
       <Route path="/parking-pass-manage" component={RedirectToLogin} />
       <Route path="/business-team" component={RedirectToLogin} />
-      <Route path="/menu-builder" component={RedirectToLogin} />
+      <Route path="/menu-builder" component={MenuBuilderPage} />
       <Route path="/owner-ai" component={RedirectToLogin} />
       <Route path="/owner-ai/authorize" component={RedirectToLogin} />
       <Route path="/kitchen" component={RedirectToLogin} />
