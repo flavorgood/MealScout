@@ -14,6 +14,8 @@ import {
   getGuestClaimPrefillValue,
   persistGuestBusinessDraft,
   shouldRestoreGuestBusinessDraft,
+  preserveProgressiveAuthContext,
+  resolveProgressiveBusinessSetupDestination,
 } from "@shared/progressiveOnboarding";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
@@ -372,8 +374,10 @@ export default function RestaurantSignup() {
     [],
   );
   const currentClaimDraftListingIdRef = useRef(signupRouteIntent.passthrough.claimListingId || "");
-  const continuationPath = buildRestaurantSignupContinuationPath(
-    getGuestBusinessDraftIntent(signupRouteIntent, currentClaimDraftListingIdRef.current),
+  const signupAuthContext = useMemo(() => new URLSearchParams(window.location.search), []);
+  const continuationPath = preserveProgressiveAuthContext(
+    buildRestaurantSignupContinuationPath(getGuestBusinessDraftIntent(signupRouteIntent, currentClaimDraftListingIdRef.current)),
+    signupAuthContext,
   );
   const isFoodTruckRoute = signupRouteIntent.businessType === "food_truck";
   const isMissingListingFlow =
@@ -1068,7 +1072,7 @@ export default function RestaurantSignup() {
         title: COPY.notifications.verification.successTitle,
         description: COPY.notifications.verification.successDescription,
       });
-      setLocation(ownerAiSetupHref);
+      setLocation(resolveProgressiveBusinessSetupDestination(signupAuthContext, ownerAiSetupHref, createdRestaurant?.id));
     },
     onError: (error) => {
       toast({
@@ -1088,7 +1092,7 @@ export default function RestaurantSignup() {
         toast({ title: COPY.guestDraft.storageErrorTitle, description: COPY.guestDraft.storageErrorDescription, variant: "destructive" });
         return;
       }
-      window.location.href = buildProgressiveAccountPath(accountGate, "keep_draft", buildGuestBusinessSignupPath(currentIntent, data.businessType));
+      window.location.href = buildProgressiveAccountPath(accountGate, "keep_draft", buildGuestBusinessSignupPath(currentIntent, data.businessType, signupAuthContext));
       return;
     }
     const { confirmNotFoodTruck, ...restaurantData } = data;
@@ -1199,7 +1203,7 @@ export default function RestaurantSignup() {
       title: COPY.notifications.verification.skippedTitle,
       description: COPY.notifications.verification.skippedDescription,
     });
-    setLocation(ownerAiSetupHref);
+    setLocation(resolveProgressiveBusinessSetupDestination(signupAuthContext, ownerAiSetupHref, createdRestaurant?.id));
   };
 
   const isAutoBusinessVerified = Boolean(
@@ -1526,7 +1530,7 @@ export default function RestaurantSignup() {
                 }
                 const businessType = form.getValues("businessType");
                 if (businessType !== signupRouteIntent.businessType || currentIntent.passthrough.claimListingId !== signupRouteIntent.passthrough.claimListingId) {
-                  window.location.href = buildGuestBusinessSignupPath(currentIntent, businessType);
+                  window.location.href = buildGuestBusinessSignupPath(currentIntent, businessType, signupAuthContext);
                   return;
                 }
                 setAccountRequested(true);

@@ -5,7 +5,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/hooks/use-toast";
-import { buildProgressiveAccountPath, getProgressiveAccountGate } from "@shared/progressiveOnboarding";
+import { buildProgressiveAccountPath, getProgressiveAccountGate, preserveProgressiveAuthContext } from "@shared/progressiveOnboarding";
 import {
   emptyGuestMenuDraft, emptyGuestMenuItem, GUEST_MENU_MAX_ITEMS, GUEST_MENU_CATEGORY_NOTICE,
   persistGuestMenuDraft, readGuestMenuDraft,
@@ -90,7 +90,7 @@ export function PrivateMenuDraftPage({ user }: { user: { emailVerified?: unknown
     {getProgressiveAccountGate(user) === "continue" && <div className="mx-auto max-w-5xl px-4 pb-8">
       {kept && <p role="status" className="mb-3">Your menu draft is saved on this device.</p>}
       <p className="text-sm text-muted-foreground">Choose or set up a business to review this draft in its menu workspace.</p>
-      <div className="mt-3 flex flex-wrap gap-3"><Button asChild variant="outline"><Link href="/restaurant/dashboard">Choose a business</Link></Button><Button asChild variant="outline"><Link href="/restaurant-signup?businessType=restaurant&intent=create&source=guest-menu">Set up a business</Link></Button></div>
+      <div className="mt-3 flex flex-wrap gap-3"><Button asChild variant="outline"><Link href="/restaurant/dashboard">Choose a business</Link></Button><Button asChild variant="outline"><Link href={preserveProgressiveAuthContext("/restaurant-signup?businessType=restaurant&intent=create&source=guest-menu", new URLSearchParams({ redirect: "/menu-builder?reviewDraft=1", reason: "keep_draft" }))}>Set up a business</Link></Button></div>
     </div>}
   </main>;
 }

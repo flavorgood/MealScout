@@ -51,13 +51,30 @@ export function buildProgressiveAccountPath(
 export function buildGuestBusinessSignupPath(
   intent: BusinessSignupRouteIntent,
   businessType: SignupBusinessType,
+  authContext?: URLSearchParams,
 ): string {
-  return `${buildRestaurantSignupPath({
+  const path = `${buildRestaurantSignupPath({
     businessType,
     intent: intent.intent,
     source: intent.source || "guest-design",
     passthrough: intent.passthrough,
   })}&keepDraft=1`;
+  return authContext ? preserveProgressiveAuthContext(path, authContext) : path;
+}
+
+export function resolveProgressiveBusinessSetupDestination(
+  authContext: URLSearchParams,
+  fallback: string,
+  restaurantId?: string | null,
+): string {
+  const pending = normalizeSafeInternalPath(authContext.get("redirect"));
+  if (!getProgressiveAccountAction(authContext) || !pending) return resolveProgressiveAuthDestination(null, fallback);
+  const destination = new URL(pending, "https://mealscout.local");
+  // A destination identifies the server-created business; it grants no access.
+  if (destination.pathname === "/menu-builder" && restaurantId) {
+    destination.searchParams.set("restaurantId", restaurantId);
+  }
+  return `${destination.pathname}${destination.search}${destination.hash}`;
 }
 
 const ACCOUNT_ONLY_FIELDS = new Set([
