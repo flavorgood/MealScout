@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createElement } from "react";
+import React, { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { Router } from "wouter";
 import { PrivateMenuDraftPage } from "../client/src/components/private-menu-draft";
@@ -9,6 +9,9 @@ import { buildGuestBusinessSignupPath, buildProgressiveAccountPath, getGuestBusi
 
 const menuDestination = "/menu-builder?reviewDraft=1#preview";
 const context = new URLSearchParams({ redirect: menuDestination, reason: "keep_draft", password: "discard", ownerId: "discard", send: "1", charge: "1" });
+
+// The default Node/tsx path lowers imported TSX through React.createElement.
+(globalThis as typeof globalThis & { React: typeof React }).React = React;
 
 test("business register, login and OAuth share a safe menu continuation with the selected claim", () => {
   const route = parseBusinessSignupRouteIntent("?businessType=food_truck&intent=claim&claimListingId=old&q=Lunch");

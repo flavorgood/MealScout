@@ -1,12 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createElement } from "react";
+import React, { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { ProgressiveContactAnchor } from "../client/src/components/progressive-contact-anchor";
 
 const destination = "/restaurant/taco-truck?ref=scout#visit";
 const render = (user: { emailVerified?: unknown } | null, href: string, extra: object = {}) => renderToStaticMarkup(createElement(ProgressiveContactAnchor, { user, href, destination, ...extra }, "Contact"));
 const hrefFrom = (html: string) => html.match(/href="([^"]+)"/)![1].replace(/&amp;/g, "&");
+
+// The default Node/tsx path lowers imported TSX through React.createElement.
+(globalThis as typeof globalThis & { React: typeof React }).React = React;
 
 test("guest contact anchors expose the auth href even for new-tab and keyboard navigation", () => {
   for (const href of ["mailto:owner@example.test?subject=Menu", "tel:+12025550123", "sms:+12025550123", "https://wa.me/12025550123", "https://m.me/example"]) {

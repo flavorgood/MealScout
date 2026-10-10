@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createElement, Fragment } from "react";
+import React, { createElement, Fragment } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { Router, Route, Switch } from "wouter";
 import { VerifiedAccountBoundary } from "../client/src/components/verified-account-boundary";
 import { getProgressiveContactGatePath, isProgressiveContactHref, isProgressiveRestrictedPath } from "../shared/progressiveAccountRoutes";
+
+// The default Node/tsx path lowers imported TSX through React.createElement.
+(globalThis as typeof globalThis & { React: typeof React }).React = React;
 
 test("existing private account/owner/subscription destinations stay gated while public and guest-design routes stay open", () => {
   for (const path of ["/dashboard", "/profile?tab=member", "/subscribe", "/orders", "/profile/payment", "/owner/ecosystem-sharing/source-1", "/deal-edit/deal-1", "/PROFILE", "/OWNER-AI", "/Restaurant/Dashboard", "/supplier/dashboard"]) assert.equal(isProgressiveRestrictedPath(path), true, path);

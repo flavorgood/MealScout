@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createElement } from "react";
+import React, { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { PrivateMenuDraftEditor } from "../client/src/components/private-menu-draft";
 import { emptyGuestMenuDraft, guestMenuDraftToCsv, parseGuestMenuDraft, persistGuestMenuDraft, readGuestMenuDraft, GUEST_MENU_DRAFT_KEY, type GuestMenuDraft } from "../shared/guestMenuDraft";
@@ -8,6 +8,9 @@ import { buildProgressiveAccountPath } from "../shared/progressiveOnboarding";
 import { parseMenuCsv } from "../server/utils/menuCsvParser";
 
 const sample: GuestMenuDraft = { name: 'Dinner "Menu"', serviceType: "dinner", items: [{ name: "Tacos, two", description: "Fresh\nmade", price: "12.50", category: "Mains" }] };
+
+// The default Node/tsx path lowers imported TSX through React.createElement.
+(globalThis as typeof globalThis & { React: typeof React }).React = React;
 
 test("a guest's edited items survive keep, safe authentication and a remount without account authority", () => {
   const values = new Map<string, string>();

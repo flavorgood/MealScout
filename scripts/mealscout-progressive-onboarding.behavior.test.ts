@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createElement } from "react";
+import React, { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { GuestBusinessDraft } from "../client/src/components/guest-business-draft";
 import {
@@ -17,6 +17,9 @@ import {
   shouldRestoreGuestBusinessDraft,
 } from "../shared/progressiveOnboarding";
 import { parseBusinessSignupRouteIntent } from "../shared/businessSignupIntent";
+
+// The default Node/tsx path lowers imported TSX through React.createElement.
+(globalThis as typeof globalThis & { React: typeof React }).React = React;
 
 test("a guest and an unverified account stay distinct from a verified account", () => {
   assert.equal(getProgressiveAccountGate(null), "sign_in");
