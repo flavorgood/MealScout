@@ -9,6 +9,26 @@ import {
 export type ProgressiveAccountAction = "keep_draft" | "contact" | "restricted";
 export type ProgressiveAccountGate = "sign_in" | "verify_email" | "continue";
 
+export function getProgressiveAccountAction(params: URLSearchParams): ProgressiveAccountAction | null {
+  const reason = params.get("reason");
+  return reason === "keep_draft" || reason === "contact" || reason === "restricted" ? reason : null;
+}
+
+export function resolveProgressiveAuthDestination(requested: unknown, fallback: unknown = "/profile-setup"): string {
+  return normalizeSafeInternalPath(requested) || normalizeSafeInternalPath(fallback) || "/profile-setup";
+}
+
+export function preserveProgressiveAuthContext(href: string, source: URLSearchParams): string {
+  const target = new URL(normalizeSafeInternalPath(href) || "/login", "https://mealscout.local");
+  const redirect = normalizeSafeInternalPath(target.searchParams.get("redirect")) || normalizeSafeInternalPath(source.get("redirect"));
+  if (redirect) target.searchParams.set("redirect", redirect);
+  else target.searchParams.delete("redirect");
+  const reason = getProgressiveAccountAction(target.searchParams) || getProgressiveAccountAction(source);
+  if (reason) target.searchParams.set("reason", reason);
+  else target.searchParams.delete("reason");
+  return `${target.pathname}${target.search}${target.hash}`;
+}
+
 // This is a UI gate. Membership, ownership and transaction authority stay on the server.
 export function getProgressiveAccountGate(
   user: { emailVerified?: unknown } | null | undefined,
@@ -22,7 +42,7 @@ export function buildProgressiveAccountPath(
   action: ProgressiveAccountAction,
   destination: unknown,
 ): string {
-  const redirect = normalizeSafeInternalPath(destination) || "/profile-setup";
+  const redirect = resolveProgressiveAuthDestination(destination);
   const params = new URLSearchParams({ redirect, reason: action });
   if (gate === "verify_email") params.set("status", "check-email");
   return `${gate === "verify_email" ? "/post-verification" : "/login"}?${params}`;

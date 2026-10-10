@@ -6,11 +6,14 @@ import { GuestBusinessDraft } from "../client/src/components/guest-business-draf
 import {
   buildGuestBusinessSignupPath,
   buildProgressiveAccountPath,
+  getProgressiveAccountAction,
   getProgressiveAccountGate,
   getGuestBusinessDraftIntent,
   getGuestClaimPrefillValue,
   GUEST_BUSINESS_DRAFT_KEY,
   persistGuestBusinessDraft,
+  preserveProgressiveAuthContext,
+  resolveProgressiveAuthDestination,
   shouldRestoreGuestBusinessDraft,
 } from "../shared/progressiveOnboarding";
 import { parseBusinessSignupRouteIntent } from "../shared/businessSignupIntent";
@@ -157,4 +160,39 @@ test("a switched claim autosave cannot restore under the original target and con
   assert.equal(returned.searchParams.get("claimListingId"), "truck-2");
   assert.equal(shouldRestoreGuestBusinessDraft(returnedIntent, draft), true);
   assert.equal(getGuestClaimPrefillValue(returnedIntent, draft, "Truck two", "Registry two", "truck-2"), "Truck two");
+});
+
+test("login, signup choice and verification preserve the kept draft destination and reason", () => {
+  const destination = "/restaurant-signup?businessType=caterer&intent=create&keepDraft=1#details";
+  const login = new URL(buildProgressiveAccountPath("sign_in", "keep_draft", destination), "https://www.mealscout.us");
+  const signup = new URL(preserveProgressiveAuthContext("/customer-signup?ref=existing-ref", login.searchParams), login.origin);
+  const chosen = new URL(preserveProgressiveAuthContext("/customer-signup?role=diner", signup.searchParams), login.origin);
+  const intended = resolveProgressiveAuthDestination(chosen.searchParams.get("redirect"), "/scout");
+  const verification = new URL(preserveProgressiveAuthContext(`/post-verification?status=check-email&redirect=${encodeURIComponent(intended)}`, chosen.searchParams), login.origin);
+  const returningLogin = new URL(preserveProgressiveAuthContext("/login?verified=1", verification.searchParams), login.origin);
+  for (const stage of [signup, chosen, verification, returningLogin]) {
+    assert.equal(stage.searchParams.get("redirect"), destination);
+    assert.equal(getProgressiveAccountAction(stage.searchParams), "keep_draft");
+    assert.equal(stage.searchParams.has("send"), false);
+    assert.equal(stage.searchParams.has("payment"), false);
+  }
+  assert.equal(signup.searchParams.get("ref"), "existing-ref");
+});
+
+test("the current verification destination wins over an older saved account destination", () => {
+  assert.equal(resolveProgressiveAuthDestination("/restaurant-signup?businessType=bar&keepDraft=1", "/supplier/dashboard"), "/restaurant-signup?businessType=bar&keepDraft=1");
+  assert.equal(resolveProgressiveAuthDestination(null, "/scout"), "/scout");
+});
+
+test("auth continuity discards unsafe destinations, unknown reasons and authority or action parameters", () => {
+  const source = new URLSearchParams({redirect:"//outside.example",reason:"owner",userType:"admin",emailVerified:"true",subscription:"paid",send:"1",payment:"1"});
+  const continued = new URL(preserveProgressiveAuthContext("/customer-signup", source), "https://www.mealscout.us");
+  assert.equal(continued.search, "");
+  assert.equal(resolveProgressiveAuthDestination(source.get("redirect"), "https://outside.example"), "/profile-setup");
+});
+
+test("an explicitly constructed safe verification destination stays ahead of inherited context", () => {
+  const current = "/restaurant-signup?businessType=food_truck&intent=claim&claimListingId=truck-2&keepDraft=1";
+  const carried = new URL(preserveProgressiveAuthContext(`/post-verification?redirect=${encodeURIComponent(current)}`, new URLSearchParams({redirect:"/scout",reason:"keep_draft"})), "https://www.mealscout.us");
+  assert.equal(carried.searchParams.get("redirect"), current);
 });
