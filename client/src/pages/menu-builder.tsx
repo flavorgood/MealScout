@@ -8,7 +8,7 @@ import { apiRequest, queryClient } from "@/lib/queryClient";
 import { prepareMenuCreationAttempt, confirmMenuCreationAttempt, assertMenuCreationReceipt, type MenuCreationAttempt } from "@/lib/menu-creation-request";
 import { useAuth } from "@/hooks/useAuth";
 import { MenuDraftPreview, PrivateMenuDraftPage } from "@/components/private-menu-draft";
-import { guestMenuDraftToCsv, readGuestMenuDraft } from "@shared/guestMenuDraft";
+import { guestMenuDraftToCsv, readGuestMenuDraft, GUEST_MENU_CATEGORY_NOTICE } from "@shared/guestMenuDraft";
 import { getProgressiveAccountGate } from "@shared/progressiveOnboarding";
 import { useToast } from "@/hooks/use-toast";
 import BusinessWorkspaceShell from "@/components/business-workspace-shell";
@@ -1007,7 +1007,7 @@ function OwnerMenuBuilderPage() {
               </div>
               <p className="text-xs text-muted-foreground mt-2">
                 {importType === "csv"
-                  ? "CSV with columns: Name, Description, Price, Category, Calories, etc."
+                  ? "CSV with columns: Name, Description, Price, Calories, etc."
                   : importType === "pdf"
                     ? "Upload a PDF menu — AI will extract items automatically."
                     : importType === "photo"
@@ -1015,6 +1015,7 @@ function OwnerMenuBuilderPage() {
                       : "Paste exported item JSON from Toast, Square, Clover, DoorDash, Uber Eats, or Google."}
               </p>
             </div>
+            {importType === "csv" && <p role="note" className="text-sm text-muted-foreground">{GUEST_MENU_CATEGORY_NOTICE}</p>}
             {importType === "photo" ? (
               <div>
                 <Label htmlFor="import-photos">Photos</Label>

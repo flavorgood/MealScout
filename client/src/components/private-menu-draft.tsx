@@ -7,7 +7,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/hooks/use-toast";
 import { buildProgressiveAccountPath, getProgressiveAccountGate } from "@shared/progressiveOnboarding";
 import {
-  emptyGuestMenuDraft, emptyGuestMenuItem, GUEST_MENU_MAX_ITEMS,
+  emptyGuestMenuDraft, emptyGuestMenuItem, GUEST_MENU_MAX_ITEMS, GUEST_MENU_CATEGORY_NOTICE,
   persistGuestMenuDraft, readGuestMenuDraft,
   type GuestMenuDraft, type GuestMenuItemDraft,
 } from "@shared/guestMenuDraft";
@@ -38,7 +38,7 @@ export function PrivateMenuDraftEditor({ draft, onChange, onKeep }: {
               <div><Label htmlFor={`private-item-description-${index}`}>Description</Label><Textarea id={`private-item-description-${index}`} maxLength={500} value={item.description} onChange={event => changeItem(index, "description", event.target.value)} /></div>
               <div className="grid grid-cols-2 gap-3">
                 <div><Label htmlFor={`private-item-price-${index}`}>Price ($)</Label><Input id={`private-item-price-${index}`} inputMode="decimal" maxLength={16} value={item.price} onChange={event => changeItem(index, "price", event.target.value)} /></div>
-                <div><Label htmlFor={`private-item-category-${index}`}>Category</Label><Input id={`private-item-category-${index}`} maxLength={80} value={item.category} onChange={event => changeItem(index, "category", event.target.value)} /></div>
+                <div><Label htmlFor={`private-item-category-${index}`}>Category (private preview)</Label><Input id={`private-item-category-${index}`} maxLength={80} value={item.category} onChange={event => changeItem(index, "category", event.target.value)} /></div>
               </div>
               <Button type="button" variant="outline" onClick={() => onChange({ ...draft, items: draft.items.filter((_item, position) => position !== index) })}>Remove item {index + 1}</Button>
             </fieldset>
@@ -56,6 +56,7 @@ export function MenuDraftPreview({ draft }: { draft: GuestMenuDraft }) {
   return <aside className="h-fit rounded-2xl border bg-card p-6" aria-label="Private menu preview">
     <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Private preview</p>
     <h2 className="mt-2 text-2xl font-bold">{draft.name || "Your menu"}</h2>
+    <p className="mt-2 text-sm text-muted-foreground">{GUEST_MENU_CATEGORY_NOTICE}</p>
     {draft.items.map((item, index) => <article key={index} className="mt-4 border-t pt-4">
       {item.category && <p className="text-sm text-muted-foreground">{item.category}</p>}
       <div className="flex justify-between gap-4"><h3 className="font-medium">{item.name || `Item ${index + 1}`}</h3><span>{item.price ? `$${item.price}` : "Price"}</span></div>

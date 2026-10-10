@@ -1,5 +1,6 @@
 export const GUEST_MENU_DRAFT_KEY = "mealscout:guest-menu-draft:v1";
 export const GUEST_MENU_MAX_ITEMS = 100;
+export const GUEST_MENU_CATEGORY_NOTICE = "Categories stay in your private preview. After importing, assign categories in the business menu workspace.";
 const MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 
 export type GuestMenuItemDraft = { name: string; description: string; price: string; category: string };
@@ -52,7 +53,10 @@ export function guestMenuDraftToCsv(draft: GuestMenuDraft): string {
     throw new Error("Add a name and a valid price to every item before importing. Your private draft is saved.");
   }
   const cell = (value: string) => `"${value.replace(/"/g, '""')}"`;
-  return ["Name,Description,Price,Category", ...draft.items.map(item =>
-    [item.name.trim(), item.description, item.price.trim(), item.category].map(cell).join(","),
-  )].join("\r\n");
+  return ["Name,Description,Price", ...draft.items.map(item => {
+    // The existing importer treats large integers as cents. Explicit decimals
+    // preserve the dollars shown in the private preview without changing it.
+    const [dollars, cents = ""] = item.price.trim().split(".");
+    return [item.name.trim(), item.description, `${dollars}.${cents.padEnd(2, "0")}`].map(cell).join(",");
+  })].join("\r\n");
 }
