@@ -5,6 +5,13 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { z } from "zod";
 import { Link, useLocation } from "wouter";
 import { useAuth } from "@/hooks/useAuth";
+import { GuestBusinessDraft } from "@/components/guest-business-draft";
+import {
+  buildGuestBusinessSignupPath,
+  buildProgressiveAccountPath,
+  getProgressiveAccountGate,
+  persistGuestBusinessDraft,
+} from "@shared/progressiveOnboarding";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { isUnauthorizedError } from "@/lib/authUtils";
@@ -355,6 +362,9 @@ export default function RestaurantSignup() {
   const { user, isAuthenticated, isLoading } = useAuth();
   const queryClient = useQueryClient();
   const [authMode, setAuthMode] = useState<"signup" | "login">("signup");
+  const [accountRequested, setAccountRequested] = useState(
+    () => new URLSearchParams(window.location.search).get("keepDraft") === "1",
+  );
   const signupRouteIntent = useMemo(
     () => parseBusinessSignupRouteIntent(window.location.search),
     [],
@@ -1076,6 +1086,15 @@ export default function RestaurantSignup() {
   });
 
   const onSubmit = async (data: RestaurantFormData) => {
+    const accountGate = getProgressiveAccountGate(user);
+    if (accountGate !== "continue") {
+      if (!persistGuestBusinessDraft(() => window.localStorage, form.getValues())) {
+        toast({ title: COPY.guestDraft.storageErrorTitle, description: COPY.guestDraft.storageErrorDescription, variant: "destructive" });
+        return;
+      }
+      window.location.href = buildProgressiveAccountPath(accountGate, "keep_draft", continuationPath);
+      return;
+    }
     const { confirmNotFoodTruck, ...restaurantData } = data;
 
     if (signupRouteIntent.isClaim && !claimSelection) {
@@ -1494,6 +1513,33 @@ export default function RestaurantSignup() {
   }
 
   if (!isAuthenticated) {
+    if (!accountRequested) {
+      return (
+        <div className="min-h-screen bg-[var(--bg-layered)]">
+          <SEOHead title={routePresentation.metaTitle} description={routePresentation.metaDescription} canonicalUrl={COPY.meta.canonicalUrl} />
+          <BackHeader title={routePresentation.headerTitle} fallbackHref="/" icon={isFoodTruckRoute ? Truck : Store} />
+          <div className="mx-auto max-w-5xl px-4 py-8 sm:px-6">
+            <GuestBusinessDraft
+              draft={form.watch()}
+              onChange={(field, value) => form.setValue(field, value, { shouldDirty: true })}
+              canChangeBusinessType={!signupRouteIntent.isClaim}
+              onKeep={() => {
+                if (!persistGuestBusinessDraft(() => window.localStorage, form.getValues())) {
+                  toast({ title: COPY.guestDraft.storageErrorTitle, description: COPY.guestDraft.storageErrorDescription, variant: "destructive" });
+                  return;
+                }
+                const businessType = form.getValues("businessType");
+                if (businessType !== signupRouteIntent.businessType) {
+                  window.location.href = buildGuestBusinessSignupPath(signupRouteIntent, businessType);
+                  return;
+                }
+                setAccountRequested(true);
+              }}
+            />
+          </div>
+        </div>
+      );
+    }
     return (
       <div className="min-h-screen bg-[var(--bg-layered)]">
         <SEOHead
@@ -1509,6 +1555,11 @@ export default function RestaurantSignup() {
         />
 
         <div className="mx-auto max-w-6xl px-4 py-6 sm:px-6">
+          <div className="mb-6 rounded-xl border bg-card p-4" data-testid="guest-draft-account-gate">
+            <h1 className="text-xl font-bold">{COPY.guestDraft.accountTitle}</h1>
+            <p className="mt-2 text-sm text-muted-foreground">{COPY.guestDraft.accountDescription}</p>
+            <Button type="button" variant="outline" className="mt-3" onClick={() => setAccountRequested(false)}>{COPY.guestDraft.edit}</Button>
+          </div>
           <div className="grid items-start gap-6 lg:grid-cols-[1.1fr_1fr]">
             <Card className="border-[color:var(--border-subtle)] bg-[var(--bg-card)] shadow-clean-lg">
               <CardContent className="p-6 sm:p-8">
