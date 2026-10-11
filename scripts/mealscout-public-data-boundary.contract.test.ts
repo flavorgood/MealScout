@@ -1289,7 +1289,7 @@ const assertPureLegacyHandler = (handler: ts.ArrowFunction): void => {
   const visit = (node: ts.Node): void => {
     if (ts.isIdentifier(node)) assert.equal(forbidden.has(node.text), false, "legacy handler cannot use " + node.text);
     if (ts.isCallExpression(node)) assert.ok(safeCall(node), "legacy handler cannot call " + node.expression.getText());
-    if (ts.isNewExpression(node)) assert.ok(isNamed(node.expression, "URLSearchParams"));
+    if (ts.isNewExpression(node)) assert.ok(isNamed(node.expression, "URLSearchParams"), "legacy handler may construct URLSearchParams only");
     if (ts.isBinaryExpression(node)) {
       assert.ok(node.operatorToken.kind < ts.SyntaxKind.FirstAssignment ||
         node.operatorToken.kind > ts.SyntaxKind.LastAssignment, "legacy handler cannot assign/mutate state");
@@ -1342,8 +1342,8 @@ const assertLegacyRedirect = (source: string): void => {
       checkoutPath: fixture.path,
     });
     assert.equal(req.params.eventId, fixture.pass);
-    assert.ok(Object.isFrozen(req) && Object.isFrozen(req.params) && Object.isFrozen(res));
-    if (req.body) assert.ok(Object.isFrozen(req.body));
+    assert.ok(Object.isFrozen(req) && Object.isFrozen(req.params) && Object.isFrozen(res), "legacy redirect fixture must freeze request, params, and response");
+    if (req.body) assert.ok(Object.isFrozen(req.body), "legacy redirect fixture must freeze a supplied request body");
   }
 };
 assertLegacyRedirect(eventRoutesSource);
@@ -1380,11 +1380,11 @@ const canonicalCheckoutSource = readSource("server/routes/hostRoutes.ts");
 const assertCanonicalCheckoutPolicy = (source: string): void => {
   const route = selectPostHandler(source, "/api/parking-pass/:passId/book");
   const middleware = route.call.arguments.slice(1, -1);
-  assert.ok(ts.isIdentifier(middleware[0]) && middleware[0].text === "parkingPassBookingBurstLimiter");
-  assert.ok(ts.isIdentifier(middleware[1]) && middleware[1].text === "parkingPassBookingDayLimiter");
-  assert.ok(ts.isIdentifier(middleware[2]) && middleware[2].text === "isAuthenticated");
+  assert.ok(ts.isIdentifier(middleware[0]) && middleware[0].text === "parkingPassBookingBurstLimiter", "canonical checkout must retain the burst limiter as first middleware");
+  assert.ok(ts.isIdentifier(middleware[1]) && middleware[1].text === "parkingPassBookingDayLimiter", "canonical checkout must retain the daily limiter as second middleware");
+  assert.ok(ts.isIdentifier(middleware[2]) && middleware[2].text === "isAuthenticated", "canonical checkout must retain authentication as third middleware");
   assert.ok(ts.isCallExpression(middleware[3]) &&
-    ts.isIdentifier(middleware[3].expression) && middleware[3].expression.text === "requireDurableIdempotencyKey");
+    ts.isIdentifier(middleware[3].expression) && middleware[3].expression.text === "requireDurableIdempotencyKey", "canonical checkout must retain durable idempotency as fourth middleware");
   assert.equal(middleware.length, 4);
   assert.match(route.registration, /authorizeReplay:[\s\S]*storage\.verifyRestaurantOwnership\([\s\S]*"manageParkingPass"[\s\S]*reconcileParkingBooking/,
     "canonical durable replay must retain ownership and reconciliation");
@@ -1398,7 +1398,7 @@ const assertCanonicalCheckoutPolicy = (source: string): void => {
   assert.equal(occurrenceCalls.length, 2, "canonical checkout must retain exact and range occurrence admission");
   for (const call of occurrenceCalls) {
     const options = call.arguments[0];
-    assert.ok(ts.isObjectLiteralExpression(options));
+    assert.ok(ts.isObjectLiteralExpression(options), "canonical occurrence admission must use an explicit options object");
     const future = options.properties.find(property => ts.isPropertyAssignment(property) &&
       ts.isIdentifier(property.name) && property.name.text === "requireFuture");
     assert.ok(future && ts.isPropertyAssignment(future) &&
@@ -1407,11 +1407,11 @@ const assertCanonicalCheckoutPolicy = (source: string): void => {
   }
   const exactOptions = occurrenceCalls[0].arguments[0] as ts.ObjectLiteralExpression;
   assert.ok(exactOptions.properties.some(property =>
-    ts.isShorthandPropertyAssignment(property) && property.name.text === "passId"));
+    ts.isShorthandPropertyAssignment(property) && property.name.text === "passId"), "exact canonical occurrence admission must retain the requested passId");
   const rangeOptions = occurrenceCalls[1].arguments[0] as ts.ObjectLiteralExpression;
   const rangePass = rangeOptions.properties.find(property => ts.isPropertyAssignment(property) &&
     ts.isIdentifier(property.name) && property.name.text === "passId");
-  assert.ok(rangePass && ts.isPropertyAssignment(rangePass));
+  assert.ok(rangePass && ts.isPropertyAssignment(rangePass), "range canonical occurrence admission must declare passId");
   assert.match(rangePass.initializer.getText(route.parsed),
     /buildParkingPassVirtualId\([\s\S]*parsedVirtualPassId\.seriesId,[\s\S]*dateKey,/);
   const body = route.body;
