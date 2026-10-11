@@ -86,7 +86,7 @@ for (const [name, options] of [
 
 test.describe("real Parking Pass selection", () => {
 test.use({ serviceWorkers: "block" });
-test("real Parking Pass retains requested occurrence and truck after delayed reads and reload", async ({ page }) => {
+test("real Parking Pass retains a later requested occurrence and truck after delayed reads and reload", async ({ page }) => {
   const { createTestWorld } = createRequire(import.meta.url)("../scripts/qa/test-world.cjs");
   const world = createTestWorld();
   const identity = { actorId: world.actors.truck.id };
@@ -94,14 +94,16 @@ test("real Parking Pass retains requested occurrence and truck after delayed rea
   const trucks = [decoyTruck, world.truck];
   const host = { id: "qa-requested-host", businessName: "QA ONLY requested location",
     address: "20 QA Target Street", city: "Test City", state: "LA", status: "active" };
-  const listing = { id: EVENT_ID, date: "2026-08-23T00:00:00.000Z", startTime: "07:00", endTime: "21:00",
+  const requestedPassId = EVENT_ID.replace("2026-08-23", "2026-08-24");
+  const requestedDate = "2026-08-24";
+  const listing = { id: requestedPassId, date: `${requestedDate}T00:00:00.000Z`, startTime: "07:00", endTime: "21:00",
     status: "open", requiresPayment: true, paymentsEnabled: true, hostPriceCents: 2500,
     breakfastPriceCents: 1000, lunchPriceCents: 1000, dinnerPriceCents: 1000, dailyPriceCents: 2500,
     hardCapEnabled: true, spotCount: 2, availableSpotNumbers: [1, 2], bookings: [], host };
   const listings = [
-    { ...listing, id: "pp:ffffffff-ffff-4444-aaaa-ffffffffffff:2026-08-23",
+    { ...listing, id: "pp:ffffffff-ffff-4444-aaaa-ffffffffffff:2026-08-23", date: "2026-08-23T00:00:00.000Z",
       host: { ...host, id: "qa-decoy-host", businessName: "QA ONLY decoy location", address: "10 QA Decoy Street" } },
-    { ...listing, id: EVENT_ID.replace("2026-08-23", "2026-08-24"), date: "2026-08-24T00:00:00.000Z" },
+    { ...listing, id: EVENT_ID, date: "2026-08-23T00:00:00.000Z" },
     listing,
   ];
   const gate = () => {
@@ -163,7 +165,7 @@ test("real Parking Pass retains requested occurrence and truck after delayed rea
     const result = world.handle(identity, url.toString(), "GET");
     return reply(result.body, result.status);
   });
-  const params = new URLSearchParams({ pass: EVENT_ID, date: "2026-08-23", truckId: world.truck.id });
+  const params = new URLSearchParams({ pass: requestedPassId, date: requestedDate, truckId: world.truck.id });
   const target = `${FRONTEND}/parking-pass?${params}`;
   const targetCard = page.locator('[role="button"][aria-pressed]').filter({ hasText: host.businessName });
   for (let visit = 0; visit < 2; visit++) {
@@ -182,9 +184,9 @@ test("real Parking Pass retains requested occurrence and truck after delayed rea
     listingGate.release();
     await expect(targetCard).toBeVisible();
     await expect(targetCard).toHaveAttribute("aria-pressed", "true");
-    await expect(targetCard.locator("div, p").filter({ hasText: /^Sun, Aug 23$/ })).toBeVisible();
+    await expect(targetCard.locator("div, p").filter({ hasText: /^Mon, Aug 24$/ })).toBeVisible();
     await expect(targetCard).not.toContainText("Sat, Aug 22");
-    await expect(targetCard.locator("select")).toHaveValue("2026-08-23");
+    await expect(targetCard.locator("select")).toHaveValue(requestedDate);
     await expect.poll(() => reads.filter((path) => path === selectedTruckRead).length)
       .toBeGreaterThan(priorSelectedTruckReads);
     expect(reads.some((path) => path.includes(`/${decoyTruck.id}/`))).toBe(false);

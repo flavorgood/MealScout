@@ -1506,7 +1506,9 @@ export default function ParkingPassPage() {
     if (!pendingPassId || isLoading) return;
     const match = passListings.find((listing) => listing.id === pendingPassId);
     if (match) {
-      setActiveLocationKey(getLocationKey(match));
+      const requestedLocationKey = getLocationKey(match);
+      lastActiveLocationKeyRef.current = requestedLocationKey;
+      setActiveLocationKey(requestedLocationKey);
       setSelectedDate(getListingDateKey(match.date));
     } else {
       toast({
@@ -4795,7 +4797,7 @@ export default function ParkingPassPage() {
 
   const lastActiveLocationKeyRef = useRef<string | null>(null);
   useEffect(() => {
-    if (!activeLocation) return;
+    if (pendingPassId || !activeLocation) return;
     if (lastActiveLocationKeyRef.current === activeLocation.key) return;
     lastActiveLocationKeyRef.current = activeLocation.key;
 
@@ -4805,14 +4807,14 @@ export default function ParkingPassPage() {
     } else if (activeLocation.listings.length > 0) {
       setSelectedDate(getListingDateKey(activeLocation.listings[0].date));
     }
-  }, [activeLocation, nextBookableDateByGroup]);
+  }, [activeLocation, nextBookableDateByGroup, pendingPassId]);
 
   useEffect(() => {
-    if (!activeLocation) return;
+    if (pendingPassId || !activeLocation) return;
     if (activeListingDateKeys.length === 0) return;
     if (activeListingDateKeys.includes(selectedDate)) return;
     setSelectedDate(activeListingDateKeys[0]);
-  }, [activeListingDateKeys, activeLocation, selectedDate]);
+  }, [activeListingDateKeys, activeLocation, selectedDate, pendingPassId]);
 
   return (
     <div className="min-h-screen bg-transparent parking-pass-page">
