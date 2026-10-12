@@ -5,13 +5,16 @@ export type ProgressiveContactAnchorProps = ComponentPropsWithoutRef<"a"> & {
   href: string;
   user: { emailVerified?: unknown } | null | undefined;
   destination: string;
+  "data-analytics-action"?: string;
 };
 
 // Set the actual href so keyboard, middle-click and new-tab navigation use the
 // same boundary. Authentication returns to the page for a fresh explicit click.
 export const ProgressiveContactAnchor = forwardRef<HTMLAnchorElement, ProgressiveContactAnchorProps>(
-  function ProgressiveContactAnchor({ user, destination, href, ...props }, ref) {
+  function ProgressiveContactAnchor({ user, destination, href, "data-analytics-action": analyticsAction, ...props }, ref) {
     const gateHref = getProgressiveContactGatePath(user, href, destination);
-    return <a {...props} ref={ref} href={gateHref || href} />;
+    // A gate opens account setup rather than the intended contact destination.
+    // Leave conversion capture for the later explicit, allowed contact click.
+    return <a {...props} ref={ref} href={gateHref || href} data-analytics-action={gateHref ? undefined : analyticsAction} />;
   },
 );

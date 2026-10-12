@@ -5,7 +5,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { ProgressiveContactAnchor } from "../client/src/components/progressive-contact-anchor";
 
 const destination = "/restaurant/taco-truck?ref=scout#visit";
-const render = (user: { emailVerified?: unknown } | null, href: string, extra: object = {}) => renderToStaticMarkup(createElement(ProgressiveContactAnchor, { user, href, destination, ...extra }, "Contact"));
+const render = (user: { emailVerified?: unknown } | null | undefined, href: string, extra: object = {}) => renderToStaticMarkup(createElement(ProgressiveContactAnchor, { user, href, destination, ...extra }, "Contact"));
 const hrefFrom = (html: string) => html.match(/href="([^"]+)"/)![1].replace(/&amp;/g, "&");
 
 // The default Node/tsx path lowers imported TSX through React.createElement.
@@ -49,5 +49,33 @@ test("authentication return renders the direct contact anchor without sending or
 test("public menus, map directions and ordinary business websites remain usable by guests", () => {
   for (const href of ["/menu/business-id", "#menu", "https://maps.google.com/?q=Tacos", "https://business.example/menu", "https://instagram.com/example", "https://wa.me.evil.test/12025550123"]) {
     assert.equal(hrefFrom(render(null, href)), href);
+  }
+});
+
+test("gated contact anchors suppress conversion capture until the intended contact is allowed", () => {
+  const contact = "tel:+12025550123";
+  const analytics = { "data-analytics-action": "call_click", "data-analytics-target-type": "phone" };
+  for (const user of [null, undefined, { emailVerified: false }, {}, { emailVerified: "true" }, { emailVerified: 1 }]) {
+    const html = render(user, contact, { ...analytics, target: "_blank", rel: "noreferrer" });
+    assert.doesNotMatch(html, /data-analytics-action=/, "an account gate must not be counted as a call");
+    assert.match(html, /data-analytics-target-type="phone"/);
+    assert.match(html, /target="_blank"/);
+    const gate = new URL(hrefFrom(html), "https://mealscout.local");
+    assert.ok(["/login", "/post-verification"].includes(gate.pathname));
+    assert.equal(gate.searchParams.get("redirect"), destination);
+  }
+  const allowed = render({ emailVerified: true }, contact, analytics);
+  assert.equal(hrefFrom(allowed), contact);
+  assert.match(allowed, /data-analytics-action="call_click"/, "the next allowed explicit call must remain trackable");
+});
+
+test("guest menu and directions retain their actual destination conversion labels", () => {
+  for (const [href, action] of [
+    ["/menu/business-id", "menu_click"],
+    ["https://maps.google.com/?q=Tacos", "directions_click"],
+  ]) {
+    const html = render(null, href, { "data-analytics-action": action });
+    assert.equal(hrefFrom(html), href);
+    assert.ok(html.includes('data-analytics-action="' + action + '"'));
   }
 });
