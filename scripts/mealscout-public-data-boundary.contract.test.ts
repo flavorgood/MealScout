@@ -1236,91 +1236,241 @@ assert.match(
   /hostPriceCents: row\.hostPriceCents \?\? null/,
   "eligible event detail must retain the consumer booking price",
 );
-// The legacy writer is retired. Parse its exact registration so a neighboring
-// confirm/cancel route cannot accidentally satisfy this boundary contract.
-const eventRoutesAst = ts.createSourceFile(
-  "eventRoutes.ts",
-  eventRoutesSource,
-  ts.ScriptTarget.Latest,
-  true,
-  ts.ScriptKind.TS,
-);
-const legacyCheckoutRegistrations: ts.CallExpression[] = [];
-const findLegacyCheckout = (node: ts.Node) => {
-  if (
-    ts.isCallExpression(node) &&
-    ts.isPropertyAccessExpression(node.expression) &&
-    node.expression.expression.getText(eventRoutesAst) === "app" &&
-    node.expression.name.text === "post" &&
-    node.arguments[0] &&
-    ts.isStringLiteral(node.arguments[0]) &&
-    node.arguments[0].text === "/api/events/:eventId/book"
-  ) {
-    legacyCheckoutRegistrations.push(node);
-  }
-  ts.forEachChild(node, findLegacyCheckout);
-};
-findLegacyCheckout(eventRoutesAst);
-assert.equal(legacyCheckoutRegistrations.length, 1);
-const legacyCheckoutSource = legacyCheckoutRegistrations[0].getText(eventRoutesAst);
-assert.doesNotMatch(
-  legacyCheckoutSource,
-  /\b(?:db|storage|stripe)\b|ensureParkingPassEventRow|pg_advisory_xact_lock/,
-  "the retired legacy checkout must not read/write booking state or call providers",
-);
-const authenticatedMiddleware = Symbol("isAuthenticated");
-let legacyCheckoutHandler: ((req: unknown, res: unknown) => unknown) | undefined;
-runInNewContext(
-  ts.transpileModule(legacyCheckoutSource, {
-    compilerOptions: { target: ts.ScriptTarget.ES2022 },
-  }).outputText,
-  {
-    app: {
-      post(path: string, ...handlers: unknown[]) {
-        assert.equal(path, "/api/events/:eventId/book");
-        assert.equal(handlers.length, 2);
-        assert.equal(handlers[0], authenticatedMiddleware);
-        assert.equal(typeof handlers[1], "function");
-        legacyCheckoutHandler = handlers[1] as typeof legacyCheckoutHandler;
-      },
-    },
-    isAuthenticated: authenticatedMiddleware,
-    URLSearchParams,
-  },
-  { timeout: 1000 },
-);
-assert.ok(legacyCheckoutHandler);
-for (const truckId of [undefined, "", "  ", " truck-1 ", "truck&next=/outside"]) {
-  let status: number | undefined;
-  let response: { code: string; checkoutPath: string } | undefined;
-  const res = {
-    status(value: number) {
-      status = value;
-      return this;
-    },
-    json(value: typeof response) {
-      response = value;
-      return value;
-    },
+// Bind each checkout policy to its exact registration, never a neighboring route.
+const selectPostHandler = (source: string, route: string) => {
+  const parsed = ts.createSourceFile("checkout-route.ts", source, ts.ScriptTarget.Latest, true);
+  assert.equal((parsed as any).parseDiagnostics.length, 0, "checkout source must parse");
+  const matches: ts.CallExpression[] = [];
+  const visit = (node: ts.Node): void => {
+    if (
+      ts.isCallExpression(node) &&
+      ts.isPropertyAccessExpression(node.expression) &&
+      ts.isIdentifier(node.expression.expression) &&
+      node.expression.expression.text === "app" &&
+      node.expression.name.text === "post" &&
+      node.arguments.length > 0 &&
+      ts.isStringLiteral(node.arguments[0]) &&
+      node.arguments[0].text === route
+    ) matches.push(node);
+    ts.forEachChild(node, visit);
   };
-  const result = legacyCheckoutHandler(
-    { params: { eventId: "pp:series:2026-10-10&next=/outside" }, body: { truckId } },
-    res,
+  visit(parsed);
+  assert.equal(matches.length, 1, "expected one exact app.post registration for " + route);
+  const call = matches[0];
+  const handler = call.arguments[call.arguments.length - 1];
+  assert.ok(ts.isArrowFunction(handler), "the exact route must register its actual arrow handler");
+  assert.ok(
+    call.arguments.slice(1, -1).some(arg => ts.isIdentifier(arg) && arg.text === "isAuthenticated"),
+    "the exact route must retain isAuthenticated before its handler",
   );
-  assert.equal(result, response, "legacy checkout must return its rejection");
-  assert.equal(status, 409);
-  assert.ok(response);
-  assert.equal(response.code, "canonical_checkout_required");
-  const destination = new URL(response.checkoutPath, "https://mealscout.test");
-  assert.equal(destination.origin, "https://mealscout.test");
-  assert.equal(destination.pathname, "/parking-pass");
-  assert.equal(destination.searchParams.get("pass"), "pp:series:2026-10-10&next=/outside");
-  assert.equal(destination.searchParams.get("truckId"), truckId?.trim() || null);
-  assert.deepEqual(
-    [...destination.searchParams.keys()].sort(),
-    truckId?.trim() ? ["pass", "truckId"] : ["pass"],
-  );
+  return { parsed, call, handler, registration: call.getText(parsed), body: handler.getText(parsed) };
+};
+
+const assertPureLegacyHandler = (handler: ts.ArrowFunction): void => {
+  assert.equal(handler.modifiers?.some(m => m.kind === ts.SyntaxKind.AsyncKeyword) || false, false);
+  const forbidden = new Set(["fetch", "process", "storage", "db", "require", "module", "global",
+    "globalThis", "eval", "Function", "WebSocket", "XMLHttpRequest"]);
+  const isNamed = (node: ts.Node, name: string) => ts.isIdentifier(node) && node.text === name;
+  const safeCall = (call: ts.CallExpression): boolean => {
+    const expression = call.expression;
+    if (isNamed(expression, "String")) return true;
+    if (!ts.isPropertyAccessExpression(expression)) return false;
+    const base = expression.expression;
+    if (isNamed(base, "params")) return ["set", "toString"].includes(expression.name.text);
+    if (isNamed(base, "res") && expression.name.text === "status") return true;
+    if (ts.isCallExpression(base) && expression.name.text === "trim")
+      return isNamed(base.expression, "String");
+    if (ts.isCallExpression(base) && expression.name.text === "json") {
+      return ts.isPropertyAccessExpression(base.expression) &&
+        isNamed(base.expression.expression, "res") && base.expression.name.text === "status";
+    }
+    return false;
+  };
+  const visit = (node: ts.Node): void => {
+    if (ts.isIdentifier(node)) assert.equal(forbidden.has(node.text), false, "legacy handler cannot use " + node.text);
+    if (ts.isCallExpression(node)) assert.ok(safeCall(node), "legacy handler cannot call " + node.expression.getText());
+    if (ts.isNewExpression(node)) assert.ok(isNamed(node.expression, "URLSearchParams"), "legacy handler may construct URLSearchParams only");
+    if (ts.isBinaryExpression(node)) {
+      assert.ok(node.operatorToken.kind < ts.SyntaxKind.FirstAssignment ||
+        node.operatorToken.kind > ts.SyntaxKind.LastAssignment, "legacy handler cannot assign/mutate state");
+    }
+    assert.ok(!ts.isDeleteExpression(node) && !ts.isAwaitExpression(node) && !ts.isYieldExpression(node),
+      "legacy handler must remain synchronous and effect-free");
+    ts.forEachChild(node, visit);
+  };
+  visit(handler);
+};
+
+const legacyRedirectCases: Array<{ pass: string; truck?: unknown; omitBody?: boolean; path: string }> = [
+  { pass: "legacy-id", omitBody: true, path: "/parking-pass?pass=legacy-id" },
+  { pass: "pp:synthetic:2026-10-18", path: "/parking-pass?pass=pp%3Asynthetic%3A2026-10-18" },
+  { pass: "legacy-id?unexpected=true&truckId=foreign# fragment+ü", truck: " truck+/?&é ",
+    path: "/parking-pass?pass=legacy-id%3Funexpected%3Dtrue%26truckId%3Dforeign%23+fragment%2B%C3%BC&truckId=truck%2B%2F%3F%26%C3%A9" },
+  { pass: "legacy-id", truck: "   ", path: "/parking-pass?pass=legacy-id" },
+  { pass: "legacy-id", truck: null, path: "/parking-pass?pass=legacy-id" },
+  { pass: "legacy-id", truck: 0, path: "/parking-pass?pass=legacy-id" },
+  { pass: "legacy-id", truck: false, path: "/parking-pass?pass=legacy-id" },
+  // Retain all five PR424 rejection/encoding cases while preserving the live
+  // contract's pure-handler and canonical-policy mutation controls.
+  { pass: "pp:series:2026-10-10&next=/outside",
+    path: "/parking-pass?pass=pp%3Aseries%3A2026-10-10%26next%3D%2Foutside" },
+  { pass: "pp:series:2026-10-10&next=/outside", truck: "",
+    path: "/parking-pass?pass=pp%3Aseries%3A2026-10-10%26next%3D%2Foutside" },
+  { pass: "pp:series:2026-10-10&next=/outside", truck: "  ",
+    path: "/parking-pass?pass=pp%3Aseries%3A2026-10-10%26next%3D%2Foutside" },
+  { pass: "pp:series:2026-10-10&next=/outside", truck: " truck-1 ",
+    path: "/parking-pass?pass=pp%3Aseries%3A2026-10-10%26next%3D%2Foutside&truckId=truck-1" },
+  { pass: "pp:series:2026-10-10&next=/outside", truck: "truck&next=/outside",
+    path: "/parking-pass?pass=pp%3Aseries%3A2026-10-10%26next%3D%2Foutside&truckId=truck%26next%3D%2Foutside" },
+];
+const assertLegacyRedirect = (source: string): void => {
+  const route = selectPostHandler(source, "/api/events/:eventId/book");
+  assert.equal(route.call.arguments.length, 3, "legacy route must register auth and the pure redirect only");
+  assertPureLegacyHandler(route.handler);
+  for (const fixture of legacyRedirectCases) {
+    const req = Object.freeze({
+      params: Object.freeze({ eventId: fixture.pass }),
+      body: fixture.omitBody ? undefined : Object.freeze({ truckId: fixture.truck }),
+    });
+    let statusCalls = 0, jsonCalls = 0, status: number | undefined, payload: unknown;
+    const res = Object.freeze({
+      status: Object.freeze((value: number) => { statusCalls++; status = value; return res; }),
+      json: Object.freeze((value: unknown) => { jsonCalls++; payload = value; return res; }),
+    });
+    const executable = ts.transpileModule(
+      "const handler = (" + route.body + "); handler(req, res);",
+      { compilerOptions: { target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.None } },
+    ).outputText;
+    const context = Object.freeze({ req, res, URLSearchParams, String });
+    const returned = runInNewContext('"use strict";\n' + executable, context,
+      { codeGeneration: { strings: false, wasm: false } });
+    assert.equal(returned, res);
+    assert.equal(statusCalls, 1);
+    assert.equal(jsonCalls, 1);
+    assert.equal(status, 409);
+    assert.deepEqual(JSON.parse(JSON.stringify(payload)), {
+      code: "canonical_checkout_required",
+      message: "Choose your Parking Pass date and slots before checking out.",
+      checkoutPath: fixture.path,
+    });
+    assert.equal(req.params.eventId, fixture.pass);
+    assert.ok(Object.isFrozen(req) && Object.isFrozen(req.params) && Object.isFrozen(res), "legacy redirect fixture must freeze request, params, and response");
+    if (req.body) assert.ok(Object.isFrozen(req.body), "legacy redirect fixture must freeze a supplied request body");
+  }
+};
+assertLegacyRedirect(eventRoutesSource);
+const legacyRegistration = selectPostHandler(eventRoutesSource, "/api/events/:eventId/book").registration;
+const mutateLegacy = (from: string, to: string) => {
+  assert.ok(legacyRegistration.includes(from), "negative-control seam must exist: " + from);
+  return legacyRegistration.replace(from, to);
+};
+const legacyRejections: Array<[string, string]> = [
+  ["removed authentication", mutateLegacy("isAuthenticated,", "")],
+  ["storage effect", mutateLegacy("const params =", "storage.createEvent({}); const params =")],
+  ["fetch effect", mutateLegacy("const params =", 'fetch("https://example.invalid"); const params =')],
+  ["process access", mutateLegacy("const params =", "process.env.SECRET; const params =")],
+  ["database mutation", mutateLegacy("const params =", "db.insert({}); const params =")],
+  ["request mutation", mutateLegacy("const params =", 'req.params.eventId = "changed"; const params =')],
+  ["wrong status", mutateLegacy("res.status(409)", "res.status(200)")],
+  ["wrong code", mutateLegacy("canonical_checkout_required", "direct_booking_allowed")],
+  ["wrong destination", mutateLegacy("/parking-pass?", "/events?")],
+  ["missing pass", mutateLegacy("String(req.params.eventId)", '""')],
+  ["untrimmed truck", mutateLegacy(".trim()", "")],
+  ["neighbor-only match", '// "/api/events/:eventId/book"\n' +
+    mutateLegacy('"/api/events/:eventId/book"', '"/api/events/:eventId/book/confirm"')],
+  ["duplicate exact route", legacyRegistration + "\n" + legacyRegistration],
+];
+for (const [name, source] of legacyRejections) {
+  assert.throws(() => assertLegacyRedirect(source), undefined, "must reject " + name);
 }
+
+// Booking safeguards belong to canonical host checkout, not the retired redirect.
+// This is bounded SOURCE POLICY proof; it does not execute DB/provider booking or
+// establish zoned selected-slot runtime correctness. The existing virtual
+// materializer's zoned-future-before-insert assertions above remain unchanged.
+const canonicalCheckoutSource = readSource("server/routes/hostRoutes.ts");
+const assertCanonicalCheckoutPolicy = (source: string): void => {
+  const route = selectPostHandler(source, "/api/parking-pass/:passId/book");
+  const middleware = route.call.arguments.slice(1, -1);
+  assert.ok(ts.isIdentifier(middleware[0]) && middleware[0].text === "parkingPassBookingBurstLimiter", "canonical checkout must retain the burst limiter as first middleware");
+  assert.ok(ts.isIdentifier(middleware[1]) && middleware[1].text === "parkingPassBookingDayLimiter", "canonical checkout must retain the daily limiter as second middleware");
+  assert.ok(ts.isIdentifier(middleware[2]) && middleware[2].text === "isAuthenticated", "canonical checkout must retain authentication as third middleware");
+  assert.ok(ts.isCallExpression(middleware[3]) &&
+    ts.isIdentifier(middleware[3].expression) && middleware[3].expression.text === "requireDurableIdempotencyKey", "canonical checkout must retain durable idempotency as fourth middleware");
+  assert.equal(middleware.length, 4);
+  assert.match(route.registration, /authorizeReplay:[\s\S]*storage\.verifyRestaurantOwnership\([\s\S]*"manageParkingPass"[\s\S]*reconcileParkingBooking/,
+    "canonical durable replay must retain ownership and reconciliation");
+  const occurrenceCalls: ts.CallExpression[] = [];
+  const visitOccurrence = (node: ts.Node): void => {
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) &&
+      node.expression.text === "ensureParkingPassEventRow") occurrenceCalls.push(node);
+    ts.forEachChild(node, visitOccurrence);
+  };
+  visitOccurrence(route.handler);
+  assert.equal(occurrenceCalls.length, 2, "canonical checkout must retain exact and range occurrence admission");
+  for (const call of occurrenceCalls) {
+    const options = call.arguments[0];
+    assert.ok(ts.isObjectLiteralExpression(options), "canonical occurrence admission must use an explicit options object");
+    const future = options.properties.find(property => ts.isPropertyAssignment(property) &&
+      ts.isIdentifier(property.name) && property.name.text === "requireFuture");
+    assert.ok(future && ts.isPropertyAssignment(future) &&
+      future.initializer.kind === ts.SyntaxKind.TrueKeyword,
+      "each canonical occurrence admission must require future truth");
+  }
+  const exactOptions = occurrenceCalls[0].arguments[0] as ts.ObjectLiteralExpression;
+  assert.ok(exactOptions.properties.some(property =>
+    ts.isShorthandPropertyAssignment(property) && property.name.text === "passId"), "exact canonical occurrence admission must retain the requested passId");
+  const rangeOptions = occurrenceCalls[1].arguments[0] as ts.ObjectLiteralExpression;
+  const rangePass = rangeOptions.properties.find(property => ts.isPropertyAssignment(property) &&
+    ts.isIdentifier(property.name) && property.name.text === "passId");
+  assert.ok(rangePass && ts.isPropertyAssignment(rangePass), "range canonical occurrence admission must declare passId");
+  assert.match(rangePass.initializer.getText(route.parsed),
+    /buildParkingPassVirtualId\([\s\S]*parsedVirtualPassId\.seriesId,[\s\S]*dateKey,/);
+  const body = route.body;
+  for (const [name, policy] of [
+    ["ownership", /const hasManageParkingPass = await storage\.verifyRestaurantOwnership\([\s\S]*"manageParkingPass"[\s\S]*if \(!truck \|\| !hasManageParkingPass\)[\s\S]*return res\.status\(403\)/],
+    ["truck eligibility", /const truckEligibility = assessParkingPassTruckEligibility\([\s\S]*if \(!truckEligibility\.isTruckProfile\)[\s\S]*return res\.status\(403\)/],
+    ["verification", /if \(!truckEligibility\.shouldBypassVerificationGate\)[\s\S]*!truckEligibility\.emailVerified \|\|[\s\S]*!truckEligibility\.storedInsuranceValid[\s\S]*truck_verification_required/],
+    ["role", /if \(!truckEligibility\.roleAllowed\)[\s\S]*return res\.status\(403\)/],
+    ["virtual range materialization", /parseParkingPassVirtualId\(passId\)[\s\S]*expectedDateKeys\.map\([\s\S]*ensureParkingPassEventRow\(/],
+    ["selected-slot future source policy", /const nowMinutes = now\.getHours\(\) \* 60 \+ now\.getMinutes\(\)[\s\S]*if \(isSameDayBooking\)[\s\S]*getSlotWindowMinutesWithCleanup\([\s\S]*if \(!window \|\| window\.startMinutes <= nowMinutes\)[\s\S]*return res\.status\(400\)/],
+    ["event-row lock and current row", /db\.transaction\([\s\S]*for \(let index = 0; index < sortedDateKeys\.length[\s\S]*where \$\{events\.id\} = \$\{row\.id\} for update[\s\S]*const \[lockedRow\] = await tx\.select\(\)\.from\(events\)/],
+    ["current eligibility under locks", /\.from\(restaurants\)[\s\S]*\.for\("share"\)[\s\S]*\.from\(users\)[\s\S]*\.for\("share"\)[\s\S]*assessParkingPassTruckEligibility\([\s\S]*!currentEligibility\.isTruckProfile[\s\S]*!currentEligibility\.roleAllowed[\s\S]*!currentEligibility\.emailVerified \|\| !currentEligibility\.storedInsuranceValid/],
+    ["locked hard capacity", /const reservedCount = Number\(counts\[0\]\?\.count \|\| 0\)[\s\S]*const hardCapEnabled = Boolean\(lockedRow\.hardCapEnabled\)[\s\S]*if \(hardCapEnabled && reservedCount >= maxSpots\)[\s\S]*FULLY_BOOKED[\s\S]*\.insert\(eventBookings\)/],
+  ] as Array<[string, RegExp]>) assert.match(body, policy, "canonical checkout must retain " + name);
+  assert.doesNotMatch(body, /pg_advisory_xact_lock/,
+    "booking capacity admission must use the shared event-row lock");
+};
+assertCanonicalCheckoutPolicy(canonicalCheckoutSource);
+const canonicalRegistration = selectPostHandler(canonicalCheckoutSource, "/api/parking-pass/:passId/book").registration;
+const mutateCanonical = (from: string, to: string) => {
+  assert.ok(canonicalRegistration.includes(from), "canonical negative-control seam must exist: " + from);
+  return canonicalRegistration.replace(from, to);
+};
+const canonicalRejections: Array<[string, string]> = [
+  ["removed authentication", mutateCanonical("isAuthenticated,", "")],
+  ["removed burst limiter", mutateCanonical("parkingPassBookingBurstLimiter,", "")],
+  ["removed daily limiter", mutateCanonical("parkingPassBookingDayLimiter,", "")],
+  ["removed durable admission", mutateCanonical("requireDurableIdempotencyKey({", "unsafeAdmission({")],
+  ["removed ownership denial", mutateCanonical("if (!truck || !hasManageParkingPass)", "if (!truck)")],
+  ["removed truck gate", mutateCanonical("if (!truckEligibility.isTruckProfile)", "if (false)")],
+  ["removed verification gate", mutateCanonical("!truckEligibility.emailVerified", "false")],
+  ["removed role gate", mutateCanonical("if (!truckEligibility.roleAllowed)", "if (false)")],
+  ["removed future materialization", mutateCanonical("requireFuture: true", "requireFuture: false")],
+  ["removed selected-slot future check", mutateCanonical("window.startMinutes <= nowMinutes", "window.startMinutes > nowMinutes")],
+  ["removed event row lock", mutateCanonical("for update", "for no key update")],
+  ["removed current role recheck", mutateCanonical("!currentEligibility.roleAllowed", "false")],
+  ["removed locked capacity denial", mutateCanonical("hardCapEnabled && reservedCount >= maxSpots", "false")],
+];
+for (const [name, source] of canonicalRejections) {
+  assert.throws(() => assertCanonicalCheckoutPolicy(source), undefined, "must reject " + name);
+}
+console.log("CHECKOUT BOUNDARY PROOF " + JSON.stringify({
+  legacyRedirectCases: legacyRedirectCases.length,
+  legacyMutationControls: legacyRejections.length,
+  canonicalMutationControls: canonicalRejections.length,
+  scope: "actual legacy pure handler + exact canonical SOURCE POLICY; no DB/provider/zoned-slot runtime proof",
+}));
 const eventDetailClientSource = readSource("client/src/pages/event-detail.tsx");
 assert.match(
   eventDetailClientSource,
