@@ -1,6 +1,7 @@
 import type { Express, Request, Response, NextFunction } from "express";
 
 import { buildJsonLdScript } from "./jsonLdScript";
+import { roleAcquisitionGuides, type RoleAcquisitionGuide } from "../../shared/roleAcquisitionContent";
 
 type AcquisitionPageConfig = {
   path: string;
@@ -10,6 +11,7 @@ type AcquisitionPageConfig = {
   body: string[];
   ctaLinks: Array<{ label: string; href: string }>;
   schemaType: "ProfessionalService" | "LocalBusiness";
+  guide?: RoleAcquisitionGuide;
 };
 
 const BOT_UA_PATTERN =
@@ -78,6 +80,12 @@ const buildPageHtml = (
   <main>
     <h1>${escapeHtml(page.h1)}</h1>
     ${page.body.map((line) => `<p>${escapeHtml(line)}</p>`).join("\n")}
+    ${page.guide ? `
+      <p class="links"><a href="${escapeHtml(page.guide.listingLink.href)}">${escapeHtml(page.guide.listingLink.label)}</a></p>
+      ${page.guide.sections.map(section => `<section class="card"><h2>${escapeHtml(section.title)}</h2>${section.paragraphs.map(paragraph => `<p>${escapeHtml(paragraph)}</p>`).join("\n")}</section>`).join("\n")}
+      ${page.guide.examples.map(example => `<section class="card"><h2>${escapeHtml(example.title)}</h2><p>${escapeHtml(example.copy)}</p></section>`).join("\n")}
+      <section class="card"><h2>Questions before you get started</h2>${page.guide.questions.map(item => `<h3>${escapeHtml(item.question)}</h3><p>${escapeHtml(item.answer)}</p>`).join("\n")}</section>
+    ` : ""}
     <div class="card">
       <strong>Important links</strong>
       <div class="links">
@@ -120,18 +128,14 @@ export function registerAcquisitionPrerenderRoutes(
     },
     {
       path: "/for-food-trucks",
-      title: "List or Claim Your Food Truck | MealScout",
-      description:
-        "Create or claim your MealScout food truck profile, publish your menu and schedule, and help nearby diners find where you are serving.",
-      h1: "Put your food truck where locals can find it",
-      body: [
-        "Create a new food truck profile or claim an existing listing that belongs to your business.",
-        "Use your owner workspace to publish menus, schedules, live location, and current profile details.",
-        "The complete profile tools require no card and do not become a monthly bill. Separate paid orders, deliveries, bookings, and other transactions may carry charges shown before payment.",
-      ],
+      title: roleAcquisitionGuides.truck.title,
+      description: roleAcquisitionGuides.truck.description,
+      h1: roleAcquisitionGuides.truck.headline,
+      body: [roleAcquisitionGuides.truck.intro],
+      guide: roleAcquisitionGuides.truck,
       ctaLinks: [
-        { label: "Create a New Truck Profile", href: "/restaurant-signup?businessType=food_truck&intent=create&source=for-food-trucks" },
-        { label: "Claim an Existing Truck", href: "/claim-business?businessType=food_truck&claim=1&intent=claim&source=for-food-trucks" },
+        roleAcquisitionGuides.truck.listingLink,
+        ...roleAcquisitionGuides.truck.relatedLinks,
         { label: "Find Food Trucks", href: "/scout" },
         { label: "Sitemap", href: "/sitemap" },
       ],
@@ -139,18 +143,14 @@ export function registerAcquisitionPrerenderRoutes(
     },
     {
       path: "/for-hosts",
-      title: "MealScout for Host Locations",
-      description:
-        "Businesses with available parking can host food truck events and convert underused space into recurring booking revenue.",
-      h1: "Turn open parking into recurring host revenue",
-      body: [
-        "MealScout host locations include offices, retail centers, churches, campuses, and other non-food businesses with parking space.",
-        "Hosts publish availability, receive booking demand from active food trucks, and run repeat event days with minimal overhead.",
-        "You can start with one location and scale into weekly or monthly recurring spots.",
-      ],
+      title: roleAcquisitionGuides.hosts.title,
+      description: roleAcquisitionGuides.hosts.description,
+      h1: roleAcquisitionGuides.hosts.headline,
+      body: [roleAcquisitionGuides.hosts.intro],
+      guide: roleAcquisitionGuides.hosts,
       ctaLinks: [
-        { label: "Host Partnership Signup", href: "/host-location-partner" },
-        { label: "Host Program", href: "/for-hosts" },
+        roleAcquisitionGuides.hosts.listingLink,
+        ...roleAcquisitionGuides.hosts.relatedLinks,
         { label: "Explore nearby food", href: "/scout" },
         { label: "Sitemap", href: "/sitemap" },
       ],
