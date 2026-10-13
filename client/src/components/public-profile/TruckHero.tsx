@@ -1,3 +1,4 @@
+import { ProgressiveContactLink } from "@/components/progressive-contact-link";
 import type {
   PublicCta,
   PublicRestaurantProfile,
@@ -317,7 +318,7 @@ export function TruckHero({ profile, safeCtas }: TruckHeroProps) {
                 asChild
                 className="bg-orange-500 font-bold text-black hover:bg-orange-400"
               >
-                <a
+                <ProgressiveContactLink
                   href={primaryHeroCta.href}
                   data-analytics-action={primaryHeroCta.analyticsAction}
                   data-analytics-target-type={
@@ -330,7 +331,7 @@ export function TruckHero({ profile, safeCtas }: TruckHeroProps) {
                     <primaryHeroCta.icon className="mr-2 h-4 w-4" />
                   ) : null}
                   {primaryHeroCta.label}
-                </a>
+                </ProgressiveContactLink>
               </Button>
             ) : null}
             {secondaryHeroCta ? (
@@ -339,7 +340,7 @@ export function TruckHero({ profile, safeCtas }: TruckHeroProps) {
                 variant="outline"
                 className="border-white/20 text-white hover:bg-white/10"
               >
-                <a
+                <ProgressiveContactLink
                   href={secondaryHeroCta.href}
                   data-analytics-action={secondaryHeroCta.analyticsAction}
                   data-analytics-target-type={
@@ -357,7 +358,7 @@ export function TruckHero({ profile, safeCtas }: TruckHeroProps) {
                   }
                 >
                   {secondaryHeroCta.label}
-                </a>
+                </ProgressiveContactLink>
               </Button>
             ) : null}
           </div>
@@ -367,12 +368,12 @@ export function TruckHero({ profile, safeCtas }: TruckHeroProps) {
               <p className="font-semibold text-white/88">
                 Own this truck? Add menu, schedule, logo, or hours.
               </p>
-              <a
+              <ProgressiveContactLink
                 href="/claim-business"
                 className="mt-1 inline-flex font-semibold text-orange-200 hover:text-orange-100"
               >
                 Claim or update this profile
-              </a>
+              </ProgressiveContactLink>
             </div>
           ) : null}
         </div>

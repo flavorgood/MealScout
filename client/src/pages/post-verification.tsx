@@ -13,20 +13,14 @@ import { apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { SEOHead } from "@/components/seo-head";
 import { CANONICAL_DASHBOARD_ENTRY_PATH } from "@/lib/dashboard-route";
-import { normalizeSafeInternalPath } from "@shared/safeInternalPath";
+import {
+  getProgressiveAccountGate,
+  preserveProgressiveAuthContext,
+  resolveProgressivePostVerificationDestination,
+} from "@shared/progressiveOnboarding";
 
 const REDIRECT_STORAGE_KEY = "mealscout:post-verification-redirect";
 const EMAIL_STORAGE_KEY = "mealscout:lastSignupEmail";
-
-function getSafePath(value: string | null): string | null {
-  const path = normalizeSafeInternalPath(value);
-  if (!path) return null;
-  if (path === "/account-setup" || path.startsWith("/account-setup?")) {
-    const params = new URLSearchParams(path.split("?")[1] || "");
-    if (!params.get("token")) return null;
-  }
-  return path;
-}
 
 function getStoredValue(key: string): string | null {
   try {
@@ -37,22 +31,19 @@ function getStoredValue(key: string): string | null {
 }
 
 function getBestRedirect(params: URLSearchParams): string {
-  const queryRedirect = getSafePath(params.get("redirect"));
-  const storedRedirect = getSafePath(getStoredValue(REDIRECT_STORAGE_KEY));
-  const verifiedFromEmail = params.get("verified") === "1";
-
-  if (verifiedFromEmail) {
-    return queryRedirect || storedRedirect || CANONICAL_DASHBOARD_ENTRY_PATH;
-  }
-
-  return storedRedirect || queryRedirect || CANONICAL_DASHBOARD_ENTRY_PATH;
+  return resolveProgressivePostVerificationDestination(
+    params,
+    params.get("redirect"),
+    getStoredValue(REDIRECT_STORAGE_KEY),
+    CANONICAL_DASHBOARD_ENTRY_PATH,
+  );
 }
 
-function getLoginHref(redirectPath: string, verified: boolean) {
+function getLoginHref(redirectPath: string, verified: boolean, source: URLSearchParams) {
   const params = new URLSearchParams();
   if (verified) params.set("verified", "1");
   params.set("redirect", redirectPath);
-  return `/login?${params.toString()}`;
+  return preserveProgressiveAuthContext(`/login?${params.toString()}`, source);
 }
 
 type SetupBrief = {
@@ -148,19 +139,20 @@ function getSetupBrief(redirectPath: string): SetupBrief {
 }
 
 export default function PostVerification() {
-  const { isAuthenticated, isLoading } = useAuth();
+  const { user, isAuthenticated, isLoading } = useAuth();
   const { toast } = useToast();
   const [isResending, setIsResending] = useState(false);
   const [isCheckingVerification, setIsCheckingVerification] = useState(false);
 
   const params = useMemo(() => new URLSearchParams(window.location.search), []);
   const redirectPath = useMemo(() => getBestRedirect(params), [params]);
-  const email = getStoredValue(EMAIL_STORAGE_KEY) || "";
+  const canContinue = isAuthenticated && getProgressiveAccountGate(user) === "continue";
+  const email = user?.email || getStoredValue(EMAIL_STORAGE_KEY) || "";
   const mode = params.get("status") || "";
   const isSetupComplete = params.get("setup") === "complete";
-  const isVerified = params.get("verified") === "1";
-  const needsEmailCheck = mode === "check-email" || isSetupComplete;
-  const loginHref = getLoginHref(redirectPath, isVerified);
+  const isVerified = canContinue || (!isAuthenticated && params.get("verified") === "1");
+  const needsEmailCheck = mode === "check-email" || isSetupComplete || (isAuthenticated && !canContinue);
+  const loginHref = getLoginHref(redirectPath, isVerified, params);
   const setupBrief = useMemo(() => getSetupBrief(redirectPath), [redirectPath]);
   const showsOwnerAiHandoff =
     redirectPath.startsWith("/truck-onboarding") ||
@@ -245,7 +237,7 @@ export default function PostVerification() {
     }
   };
 
-  const headline = isAuthenticated
+  const headline = canContinue
     ? "You are ready to continue."
     : needsEmailCheck
       ? isSetupComplete
@@ -255,15 +247,15 @@ export default function PostVerification() {
         ? "Email verified."
         : "Finish your MealScout setup.";
 
-  const body = isAuthenticated
+  const body = canContinue
     ? "Your account is active. Continue to the next step MealScout picked for this account."
     : needsEmailCheck
-      ? "We sent a verification link to your inbox. Open it on this device, then log in and we will send you to the right place."
+      ? "Verify your email, then continue to your saved destination. You can request a fresh link below."
       : isVerified
         ? "Your email is verified. Log in once and we will take you to the next step for your account."
         : "Use this page as your checkpoint after signup, email verification, or account setup.";
 
-  const statusLabel = isAuthenticated
+  const statusLabel = canContinue
     ? "Signed in"
     : isVerified
       ? "Verified"
@@ -288,7 +280,7 @@ export default function PostVerification() {
           <div className="mb-8 flex items-center justify-between gap-4">
             <div className="flex items-center gap-3">
               <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-amber-400 text-black shadow-[0_0_30px_rgba(251,191,36,0.45)]">
-                {isVerified || isAuthenticated ? (
+                {isVerified || canContinue ? (
                   <CheckCircle2 className="h-5 w-5" />
                 ) : (
                   <MailCheck className="h-5 w-5" />
@@ -362,7 +354,7 @@ export default function PostVerification() {
             <div className="flex h-14 items-center justify-center rounded-2xl bg-white/10">
               <div className="h-5 w-5 animate-spin rounded-full border-2 border-amber-300 border-t-transparent" />
             </div>
-          ) : isAuthenticated ? (
+          ) : canContinue ? (
             <Link
               href={redirectPath}
               onClick={clearStoredRedirect}
@@ -408,7 +400,7 @@ export default function PostVerification() {
               Explore Scout
             </Link>
             <span aria-hidden="true">/</span>
-            <Link href="/login" className="hover:text-amber-200">
+            <Link href={loginHref} className="hover:text-amber-200">
               Login help
             </Link>
           </div>

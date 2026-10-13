@@ -149,6 +149,11 @@ export default function RoleLandingPage({
             <p className="text-lg text-[var(--ink-muted)]">
               {content.subhead}
             </p>
+            {content.guide && (
+              <Link href={content.guide.listingLink.href} className="inline-flex min-h-11 items-center font-semibold text-[var(--accent-strong)] underline underline-offset-4">
+                {content.guide.listingLink.label}
+              </Link>
+            )}
             <div className="flex flex-col sm:flex-row gap-3">
               <Button
                 asChild
@@ -241,6 +246,39 @@ export default function RoleLandingPage({
             </Card>
           </div>
         </section>
+
+        {content.guide && (
+          <section className="space-y-8" aria-label="Practical planning guide">
+            {content.guide.sections.map((section) => (
+              <article key={section.title} className="space-y-3 rounded-2xl border p-6" style={{ backgroundColor: "var(--card)", borderColor: "var(--border)" }}>
+                <h2 className="text-2xl font-semibold text-[var(--ink-dark)]">{section.title}</h2>
+                {section.paragraphs.map((paragraph) => <p key={paragraph} className="text-base leading-relaxed text-[var(--ink-dark-muted)]">{paragraph}</p>)}
+              </article>
+            ))}
+            <div className="grid gap-5 md:grid-cols-2">
+              {content.guide.examples.map((example) => (
+                <article key={example.title} className="space-y-3 rounded-2xl border p-6" style={{ backgroundColor: "var(--card-muted)", borderColor: "var(--border)" }}>
+                  <h2 className="text-xl font-semibold text-[var(--ink-dark)]">{example.title}</h2>
+                  <p className="text-base leading-relaxed text-[var(--ink-dark-muted)]">{example.copy}</p>
+                </article>
+              ))}
+            </div>
+            <div className="space-y-4 rounded-2xl border p-6" style={{ backgroundColor: "var(--card)", borderColor: "var(--border)" }}>
+              <h2 className="text-2xl font-semibold text-[var(--ink-dark)]">Questions before you get started</h2>
+              {content.guide.questions.map((item) => (
+                <div key={item.question} className="space-y-2">
+                  <h3 className="text-lg font-semibold text-[var(--ink-dark)]">{item.question}</h3>
+                  <p className="text-base leading-relaxed text-[var(--ink-dark-muted)]">{item.answer}</p>
+                </div>
+              ))}
+              <nav className="flex flex-wrap gap-x-6 gap-y-3 pt-2" aria-label="Listings and next steps">
+                {[content.guide.listingLink, ...content.guide.relatedLinks].map((link) => (
+                  <Link key={link.href} href={link.href} className="inline-flex min-h-11 items-center font-semibold text-[var(--accent-strong)] underline underline-offset-4">{link.label}</Link>
+                ))}
+              </nav>
+            </div>
+          </section>
+        )}
 
         <section className="grid gap-4 rounded-3xl border p-6 text-sm shadow-clean-lg md:grid-cols-3" style={{ backgroundColor: "var(--card-muted)", borderColor: "var(--border)", color: "var(--ink-dark-muted)" }}>
           {content.valueProps.map((value) => (

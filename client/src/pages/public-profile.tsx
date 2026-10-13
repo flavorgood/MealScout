@@ -1,7 +1,9 @@
+import { ProgressiveContactLink } from "@/components/progressive-contact-link";
 import { readScoutJourney } from "@/lib/scout-journey-state";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { apiUrl } from "@/lib/api";
-import { readPublicProfileJson, isMissingPublicProfile, isPrivatePublicProfile, publicProfileLoginHref } from "@/lib/public-profile-recovery";
+import { readPublicProfileJson, isMissingPublicProfile, isPrivatePublicProfile } from "@/lib/public-profile-recovery";
+import { buildProgressiveAccountPath, getProgressiveAccountGate } from "@shared/progressiveOnboarding";
 import { getDishCategoryPhoto } from "@/lib/dishCategoryPhoto";
 import { useQuery } from "@tanstack/react-query";
 import { Link, useParams } from "wouter";
@@ -349,7 +351,7 @@ const renderCtaButton = (
   variant: "default" | "outline",
   key: string,
 ) => (
-  <a
+  <ProgressiveContactLink
     key={key}
     href={cta.href}
     data-analytics-action={
@@ -381,7 +383,7 @@ const renderCtaButton = (
     }
   >
     {cta.label}
-  </a>
+  </ProgressiveContactLink>
 );
 
 function HeroBlock({ profile }: { profile: PublicProfilePayload }) {
@@ -778,7 +780,7 @@ function TruckVisitStrip({
         </div>
 
         {action ? (
-          <a
+          <ProgressiveContactLink
             href={action.href}
             target={ctaTarget(action)}
             rel={ctaRel(action)}
@@ -787,7 +789,7 @@ function TruckVisitStrip({
             className="inline-flex min-h-10 shrink-0 items-center justify-center rounded-xl bg-orange-500 px-4 text-sm font-bold text-black hover:bg-orange-400"
           >
             {action.label}
-          </a>
+          </ProgressiveContactLink>
         ) : rows.hasActionableSchedule ? (
           <button
             type="button"
@@ -1220,17 +1222,17 @@ function LocationTruckOptionsSection({
         </div>
         <div className="mt-3 flex items-center gap-2">
           {truck.truckPath ? (
-            <a
+            <ProgressiveContactLink
               href={truck.truckPath}
               data-analytics-action="profile_view"
               data-analytics-target-type="internal"
               className="inline-flex items-center rounded-md bg-orange-500 px-3 py-1.5 text-xs font-semibold text-black hover:bg-orange-400"
             >
               View
-            </a>
+            </ProgressiveContactLink>
           ) : null}
           {locationLine(profile) ? (
-            <a
+            <ProgressiveContactLink
               href={`https://maps.google.com/?q=${encodeURIComponent(String(locationLine(profile) || ""))}`}
               data-analytics-action="directions_click"
               data-analytics-target-type="map"
@@ -1240,7 +1242,7 @@ function LocationTruckOptionsSection({
             >
               <Route className="h-3.5 w-3.5" />
               Route
-            </a>
+            </ProgressiveContactLink>
           ) : null}
         </div>
       </div>
@@ -1353,7 +1355,7 @@ function LocationMapSection({ profile }: { profile: PublicLocationProfile }) {
           <p className="text-sm text-white/80">{locationLine(profile)}</p>
         ) : null}
         {mapHref ? (
-          <a
+          <ProgressiveContactLink
             href={mapHref}
             data-analytics-action="directions_click"
             data-analytics-target-type="map"
@@ -1362,7 +1364,7 @@ function LocationMapSection({ profile }: { profile: PublicLocationProfile }) {
             className="inline-flex items-center gap-1 text-sm font-medium text-orange-300 hover:text-orange-200"
           >
             Get directions <ExternalLink className="h-3.5 w-3.5" />
-          </a>
+          </ProgressiveContactLink>
         ) : null}
       </CardContent>
     </Card>
@@ -1915,7 +1917,7 @@ function MenuSection({
         {!internalMenuHref && menuCta ? (
           renderCtaButton(menuCta, "default", "menu-cta")
         ) : !internalMenuHref && fallbackMenuLink ? (
-          <a
+          <ProgressiveContactLink
             href={fallbackMenuLink}
             data-analytics-action="menu_click"
             data-analytics-target-type="menu"
@@ -1924,7 +1926,7 @@ function MenuSection({
             className="inline-flex items-center gap-1 text-sm font-medium text-orange-300 hover:text-orange-200"
           >
             See menu <MenuSquare className="h-4 w-4" />
-          </a>
+          </ProgressiveContactLink>
         ) : null}
       </CardContent>
     </Card>
@@ -2013,7 +2015,7 @@ function DealsSection({ profile }: { profile: PublicRestaurantProfile }) {
               ) : null}
             </div>
             <div className="mt-3">
-              <a
+              <ProgressiveContactLink
                 href={deal.actionHref}
                 data-analytics-action="deal_click"
                 data-analytics-target-type={deal.actionType || "deal"}
@@ -2032,7 +2034,7 @@ function DealsSection({ profile }: { profile: PublicRestaurantProfile }) {
                 className="inline-flex items-center rounded-md bg-orange-500 px-3 py-1.5 text-xs font-semibold text-black hover:bg-orange-400"
               >
                 {deal.actionLabel}
-              </a>
+              </ProgressiveContactLink>
             </div>
           </div>
         ))}
@@ -2109,7 +2111,7 @@ function EventsSection({
               </p>
             ) : null}
             <div className="mt-3">
-              <a
+              <ProgressiveContactLink
                 href={event.actionHref}
                 data-analytics-action="event_click"
                 data-analytics-target-type={event.actionType || "event"}
@@ -2127,7 +2129,7 @@ function EventsSection({
               >
                 <CalendarDays className="h-3.5 w-3.5" />
                 {event.actionLabel}
-              </a>
+              </ProgressiveContactLink>
             </div>
           </div>
         ))}
@@ -2410,7 +2412,7 @@ function RestaurantSchedule({ profile }: { profile: PublicRestaurantProfile }) {
           </Badge>
         ) : null}
         {stop.directionsUrl ? (
-          <a
+          <ProgressiveContactLink
             href={stop.directionsUrl}
             data-analytics-action="directions_click"
             data-analytics-target-type="map"
@@ -2420,7 +2422,7 @@ function RestaurantSchedule({ profile }: { profile: PublicRestaurantProfile }) {
           >
             <Route className="h-3.5 w-3.5" />
             Get directions
-          </a>
+          </ProgressiveContactLink>
         ) : null}
       </div>
     </div>
@@ -2617,30 +2619,30 @@ function PublicProfileRelatedDiscoveryLinks({
         </CardDescription>
       </CardHeader>
       <CardContent className="grid grid-cols-1 gap-2 text-sm sm:grid-cols-2">
-        <a
+        <ProgressiveContactLink
           href={`/city/${encodedCitySlug}/food`}
           className="rounded-md border border-white/10 px-3 py-2 text-white/85 hover:bg-white/10"
         >
           Browse local food
-        </a>
-        <a
+        </ProgressiveContactLink>
+        <ProgressiveContactLink
           href={`/food-trucks-today/${encodedCitySlug}`}
           className="rounded-md border border-white/10 px-3 py-2 text-white/85 hover:bg-white/10"
         >
           Food trucks today
-        </a>
-        <a
+        </ProgressiveContactLink>
+        <ProgressiveContactLink
           href="/scout"
           className="rounded-md border border-white/10 px-3 py-2 text-white/85 hover:bg-white/10"
         >
           Scout
-        </a>
-        <a
+        </ProgressiveContactLink>
+        <ProgressiveContactLink
           href="/claim-business"
           className="rounded-md border border-white/10 px-3 py-2 text-white/85 hover:bg-white/10"
         >
           Claim or update a profile
-        </a>
+        </ProgressiveContactLink>
       </CardContent>
     </Card>
   );
@@ -3041,8 +3043,8 @@ export default function PublicProfilePage() {
                 {retrying ? "Retrying…" : "Retry profile"}
               </Button>
             )}
-            {accessDenied && !isAuthenticated && (
-              <Link href={publicProfileLoginHref()} className="inline-flex min-h-11 items-center px-4 font-bold">Sign in</Link>
+            {accessDenied && getProgressiveAccountGate(user) !== "continue" && (
+              <Link href={buildProgressiveAccountPath(user ? "verify_email" : "sign_in", "restricted", `${window.location.pathname}${window.location.search}${window.location.hash}`)} className="inline-flex min-h-11 items-center px-4 font-bold">{user ? "Verify email to continue" : "Sign in to continue"}</Link>
             )}
             <Link href={scoutHref}>
               <Button className="profile-action-primary min-h-11">Scout</Button>

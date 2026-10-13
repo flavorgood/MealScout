@@ -5,6 +5,18 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { z } from "zod";
 import { Link, useLocation } from "wouter";
 import { useAuth } from "@/hooks/useAuth";
+import { GuestBusinessDraft } from "@/components/guest-business-draft";
+import {
+  buildGuestBusinessSignupPath,
+  buildProgressiveAccountPath,
+  getProgressiveAccountGate,
+  getGuestBusinessDraftIntent,
+  getGuestClaimPrefillValue,
+  persistGuestBusinessDraft,
+  shouldRestoreGuestBusinessDraft,
+  preserveProgressiveAuthContext,
+  resolveProgressiveBusinessSetupDestination,
+} from "@shared/progressiveOnboarding";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { isUnauthorizedError } from "@/lib/authUtils";
@@ -53,7 +65,6 @@ import {
   buildRestaurantSignupPath,
   buildRestaurantSignupContinuationPath,
   parseBusinessSignupRouteIntent,
-  shouldRestoreBusinessSignupDraft,
 } from "@shared/businessSignupIntent";
 
 /**
@@ -355,13 +366,18 @@ export default function RestaurantSignup() {
   const { user, isAuthenticated, isLoading } = useAuth();
   const queryClient = useQueryClient();
   const [authMode, setAuthMode] = useState<"signup" | "login">("signup");
+  const [accountRequested, setAccountRequested] = useState(
+    () => new URLSearchParams(window.location.search).get("keepDraft") === "1",
+  );
   const signupRouteIntent = useMemo(
     () => parseBusinessSignupRouteIntent(window.location.search),
     [],
   );
-  const continuationPath = useMemo(
-    () => buildRestaurantSignupContinuationPath(signupRouteIntent),
-    [signupRouteIntent],
+  const currentClaimDraftListingIdRef = useRef(signupRouteIntent.passthrough.claimListingId || "");
+  const signupAuthContext = useMemo(() => new URLSearchParams(window.location.search), []);
+  const continuationPath = preserveProgressiveAuthContext(
+    buildRestaurantSignupContinuationPath(getGuestBusinessDraftIntent(signupRouteIntent, currentClaimDraftListingIdRef.current)),
+    signupAuthContext,
   );
   const isFoodTruckRoute = signupRouteIntent.businessType === "food_truck";
   const isMissingListingFlow =
@@ -475,10 +491,7 @@ export default function RestaurantSignup() {
         businessType?: string;
       };
       if (
-        !shouldRestoreBusinessSignupDraft(
-          signupRouteIntent,
-          parsed.businessType,
-        )
+        !shouldRestoreGuestBusinessDraft(signupRouteIntent, parsed)
       ) {
         return "";
       }
@@ -509,6 +522,7 @@ export default function RestaurantSignup() {
     }
   };
 
+  const restoredGuestDraftRef = useRef<Record<string, unknown> | null>(null);
   const restaurantDefaultValues = useMemo<RestaurantFormData>(() => {
     const base: RestaurantFormData = {
       ...BLANK_RESTAURANT_FORM_VALUES,
@@ -522,6 +536,7 @@ export default function RestaurantSignup() {
       if (!stored) return base;
       const parsed = JSON.parse(stored) as Partial<RestaurantFormData> & {
         __savedAt?: number;
+        __guestClaim?: unknown;
       };
       const savedAt = parsed.__savedAt;
       if (
@@ -533,15 +548,13 @@ export default function RestaurantSignup() {
         window.localStorage.removeItem(RESTAURANT_DRAFT_KEY);
         return base;
       }
-      const { __savedAt, ...draftFields } = parsed;
+      const { __savedAt, __guestClaim, ...draftFields } = parsed;
       if (
-        !shouldRestoreBusinessSignupDraft(
-          signupRouteIntent,
-          draftFields.businessType,
-        )
+        !shouldRestoreGuestBusinessDraft(signupRouteIntent, parsed)
       ) {
         return base;
       }
+      if (signupRouteIntent.isClaim) restoredGuestDraftRef.current = parsed;
       return {
         ...base,
         ...draftFields,
@@ -669,10 +682,9 @@ export default function RestaurantSignup() {
           ? Number(prefillLongitudeRaw)
           : null;
 
-        if (prefillName) form.setValue("name", prefillName);
-        if (prefillAddress) form.setValue("address", prefillAddress);
-        if (prefillCity) form.setValue("city", prefillCity);
-        if (prefillState) form.setValue("state", prefillState);
+        for (const [field, value] of [["name", prefillName], ["address", prefillAddress], ["city", prefillCity], ["state", prefillState]] as const) {
+          if (value) form.setValue(field, getGuestClaimPrefillValue(signupRouteIntent, restoredGuestDraftRef.current, form.getValues(field), value));
+        }
         if (
           prefillPlaceId ||
           prefillAddress ||
@@ -755,16 +767,13 @@ export default function RestaurantSignup() {
   useEffect(() => {
     const subscription = form.watch((value) => {
       try {
-        window.localStorage.setItem(
-          RESTAURANT_DRAFT_KEY,
-          JSON.stringify({ ...value, __savedAt: Date.now() }),
-        );
+        persistGuestBusinessDraft(() => window.localStorage, value, Date.now(), getGuestBusinessDraftIntent(signupRouteIntent, currentClaimDraftListingIdRef.current));
       } catch {
         // ignore storage errors
       }
     });
     return () => subscription.unsubscribe();
-  }, [form]);
+  }, [form, signupRouteIntent]);
 
   useEffect(() => {
     const subscription = signupForm.watch((value, info) => {
@@ -1063,7 +1072,7 @@ export default function RestaurantSignup() {
         title: COPY.notifications.verification.successTitle,
         description: COPY.notifications.verification.successDescription,
       });
-      setLocation(ownerAiSetupHref);
+      setLocation(resolveProgressiveBusinessSetupDestination(signupAuthContext, ownerAiSetupHref, createdRestaurant?.id));
     },
     onError: (error) => {
       toast({
@@ -1076,6 +1085,16 @@ export default function RestaurantSignup() {
   });
 
   const onSubmit = async (data: RestaurantFormData) => {
+    const accountGate = getProgressiveAccountGate(user);
+    if (accountGate !== "continue") {
+      const currentIntent = getGuestBusinessDraftIntent(signupRouteIntent, currentClaimDraftListingIdRef.current);
+      if (!persistGuestBusinessDraft(() => window.localStorage, form.getValues(), Date.now(), currentIntent)) {
+        toast({ title: COPY.guestDraft.storageErrorTitle, description: COPY.guestDraft.storageErrorDescription, variant: "destructive" });
+        return;
+      }
+      window.location.href = buildProgressiveAccountPath(accountGate, "keep_draft", buildGuestBusinessSignupPath(currentIntent, data.businessType, signupAuthContext));
+      return;
+    }
     const { confirmNotFoodTruck, ...restaurantData } = data;
 
     if (signupRouteIntent.isClaim && !claimSelection) {
@@ -1184,7 +1203,7 @@ export default function RestaurantSignup() {
       title: COPY.notifications.verification.skippedTitle,
       description: COPY.notifications.verification.skippedDescription,
     });
-    setLocation(ownerAiSetupHref);
+    setLocation(resolveProgressiveBusinessSetupDestination(signupAuthContext, ownerAiSetupHref, createdRestaurant?.id));
   };
 
   const isAutoBusinessVerified = Boolean(
@@ -1296,14 +1315,13 @@ export default function RestaurantSignup() {
           setClaimError(COPY.forms.restaurant.claimUnavailable);
           return;
         }
+        currentClaimDraftListingIdRef.current = String(exactListing.id);
         setClaimSelection(exactListing);
         setClaimResults([]);
         setClaimQuery(exactListing.externalId || exactListing.name || query);
-        form.setValue("name", exactListing.name || "");
-        form.setValue("address", exactListing.address || "");
-        form.setValue("city", exactListing.city || "");
-        form.setValue("state", exactListing.state || "");
-        form.setValue("phone", exactListing.phone || "");
+        for (const field of ["name", "address", "city", "state", "phone"] as const) {
+          form.setValue(field, getGuestClaimPrefillValue(signupRouteIntent, restoredGuestDraftRef.current, form.getValues(field), String(exactListing[field] || ""), String(exactListing.id)));
+        }
         return;
       }
 
@@ -1351,14 +1369,14 @@ export default function RestaurantSignup() {
       );
       return;
     }
+    // Update before setValue emits synchronous autosave notifications.
+    currentClaimDraftListingIdRef.current = String(listing.id);
     setClaimSelection(listing);
     setClaimResults([]);
     setClaimQuery(listing.externalId || listing.name || "");
-    form.setValue("name", listing.name || "");
-    form.setValue("address", listing.address || "");
-    form.setValue("city", listing.city || "");
-    form.setValue("state", listing.state || "");
-    form.setValue("phone", listing.phone || "");
+    for (const field of ["name", "address", "city", "state", "phone"] as const) {
+      form.setValue(field, getGuestClaimPrefillValue(signupRouteIntent, restoredGuestDraftRef.current, form.getValues(field), String(listing[field] || ""), String(listing.id)));
+    }
   };
 
   const handleWebsiteImport = async () => {
@@ -1494,6 +1512,34 @@ export default function RestaurantSignup() {
   }
 
   if (!isAuthenticated) {
+    if (!accountRequested) {
+      return (
+        <div className="min-h-screen bg-[var(--bg-layered)]">
+          <SEOHead title={routePresentation.metaTitle} description={routePresentation.metaDescription} canonicalUrl={COPY.meta.canonicalUrl} />
+          <BackHeader title={routePresentation.headerTitle} fallbackHref="/" icon={isFoodTruckRoute ? Truck : Store} />
+          <div className="mx-auto max-w-5xl px-4 py-8 sm:px-6">
+            <GuestBusinessDraft
+              draft={form.watch()}
+              onChange={(field, value) => form.setValue(field, value, { shouldDirty: true })}
+              canChangeBusinessType={!signupRouteIntent.isClaim}
+              onKeep={() => {
+                const currentIntent = getGuestBusinessDraftIntent(signupRouteIntent, currentClaimDraftListingIdRef.current);
+                if (!persistGuestBusinessDraft(() => window.localStorage, form.getValues(), Date.now(), currentIntent)) {
+                  toast({ title: COPY.guestDraft.storageErrorTitle, description: COPY.guestDraft.storageErrorDescription, variant: "destructive" });
+                  return;
+                }
+                const businessType = form.getValues("businessType");
+                if (businessType !== signupRouteIntent.businessType || currentIntent.passthrough.claimListingId !== signupRouteIntent.passthrough.claimListingId) {
+                  window.location.href = buildGuestBusinessSignupPath(currentIntent, businessType, signupAuthContext);
+                  return;
+                }
+                setAccountRequested(true);
+              }}
+            />
+          </div>
+        </div>
+      );
+    }
     return (
       <div className="min-h-screen bg-[var(--bg-layered)]">
         <SEOHead
@@ -1509,6 +1555,11 @@ export default function RestaurantSignup() {
         />
 
         <div className="mx-auto max-w-6xl px-4 py-6 sm:px-6">
+          <div className="mb-6 rounded-xl border bg-card p-4" data-testid="guest-draft-account-gate">
+            <h1 className="text-xl font-bold">{COPY.guestDraft.accountTitle}</h1>
+            <p className="mt-2 text-sm text-muted-foreground">{COPY.guestDraft.accountDescription}</p>
+            <Button type="button" variant="outline" className="mt-3" onClick={() => setAccountRequested(false)}>{COPY.guestDraft.edit}</Button>
+          </div>
           <div className="grid items-start gap-6 lg:grid-cols-[1.1fr_1fr]">
             <Card className="border-[color:var(--border-subtle)] bg-[var(--bg-card)] shadow-clean-lg">
               <CardContent className="p-6 sm:p-8">

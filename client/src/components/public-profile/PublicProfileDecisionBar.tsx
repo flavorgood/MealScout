@@ -1,3 +1,4 @@
+import { ProgressiveContactLink } from "@/components/progressive-contact-link";
 import type {
   PublicCta,
   PublicMenuItem,
@@ -188,7 +189,7 @@ export function PublicProfileDecisionBar({
           <p className="profile-section-label">At a glance</p>
         </div>
         {action ? (
-          <a
+          <ProgressiveContactLink
             href={action.href}
             target={action.type === "external" || action.type === "map" ? "_blank" : undefined}
             rel={action.type === "external" || action.type === "map" ? "noopener noreferrer" : undefined}
@@ -198,7 +199,7 @@ export function PublicProfileDecisionBar({
           >
             <ActionIcon className="h-4 w-4" />
             <span className="truncate">{action.label}</span>
-          </a>
+          </ProgressiveContactLink>
         ) : null}
       </div>
 

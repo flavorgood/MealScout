@@ -1,3 +1,4 @@
+import { ProgressiveContactLink } from "@/components/progressive-contact-link";
 /**
  * MobileActionDock
  *
@@ -103,7 +104,7 @@ export function MobileActionDock({
       <div className="border-t border-[color:var(--profile-border)] bg-white/95 px-3 py-2.5 shadow-[0_-12px_34px_rgba(96,46,20,0.12)] backdrop-blur-md">
         <div className={`grid gap-2 ${gridClass}`}>
           {/* Primary action — full orange */}
-          <a
+          <ProgressiveContactLink
             href={primary.cta.href}
             target={primary.cta.type === "external" || primary.cta.type === "map" ? "_blank" : undefined}
             rel={primary.cta.type === "external" || primary.cta.type === "map" ? "noopener noreferrer" : undefined}
@@ -112,11 +113,11 @@ export function MobileActionDock({
           >
             <primary.icon className="h-4 w-4 flex-none" />
             <span className="truncate">{primary.label}</span>
-          </a>
+          </ProgressiveContactLink>
 
           {/* Secondary actions — outlined */}
           {rest.map((action, i) => (
-            <a
+            <ProgressiveContactLink
               key={`${action.cta.href}-${i}`}
               href={action.cta.href}
               target={action.cta.type === "external" || action.cta.type === "map" ? "_blank" : undefined}
@@ -128,7 +129,7 @@ export function MobileActionDock({
               <span className="text-[10px] font-semibold leading-none truncate max-w-full">
                 {action.label}
               </span>
-            </a>
+            </ProgressiveContactLink>
           ))}
         </div>
       </div>

@@ -1,4 +1,5 @@
 import type { LucideIcon } from "lucide-react";
+import { roleAcquisitionGuides, type RoleAcquisitionGuide } from "@shared/roleAcquisitionContent";
 import {
   Truck,
   Radar,
@@ -26,6 +27,7 @@ export type RoleLandingContent = {
   badge: string;
   headline: string;
   subhead: string;
+  guide?: RoleAcquisitionGuide;
   primaryCta: Cta;
   secondaryCta?: Cta;
   bullets: string[];
@@ -47,16 +49,15 @@ export type RoleLandingContent = {
 export const roleLandingContent = {
   truck: {
     seo: {
-      title: "List or Claim Your Food Truck | MealScout",
-      description:
-        "Create or claim your MealScout food truck profile, publish your menu and schedule, and help nearby diners find where you are serving.",
+      title: roleAcquisitionGuides.truck.title,
+      description: roleAcquisitionGuides.truck.description,
       keywords: "list food truck, food truck booking platform, food truck host locations, book food truck spots, food truck scheduling, local food truck discovery",
       canonicalPath: "/for-food-trucks",
     },
     badge: "MealScout for Trucks",
-    headline: "Put your food truck where locals can find it.",
-    subhead:
-      "Create a new profile or claim an existing listing, then publish your menu, schedule, live location, and booking availability from one owner workspace.",
+    headline: roleAcquisitionGuides.truck.headline,
+    subhead: roleAcquisitionGuides.truck.intro,
+    guide: roleAcquisitionGuides.truck,
     primaryCta: {
       label: "Create a new truck profile",
       href: "/restaurant-signup?businessType=food_truck&intent=create&source=for-food-trucks",
@@ -98,13 +99,13 @@ export const roleLandingContent = {
       },
       {
         icon: Radar,
-        title: "Get discovered",
-        copy: "Publish your schedule and location so nearby diners can find you.",
+        title: "Compare host locations",
+        copy: "Browse current Parking Pass dates, service windows, spot details and listed prices.",
       },
       {
         icon: Calendar,
-        title: "Manage opportunities",
-        copy: "Review available host, event, ordering, and delivery tools from your workspace.",
+        title: "Keep your route visible",
+        copy: "Publish a current menu, service schedule and location from your owner workspace.",
       },
     ],
     reasons: {
@@ -113,7 +114,7 @@ export const roleLandingContent = {
         "Create a new truck profile or claim a listing already in MealScout.",
         "Update menus, schedules, and live location from the owner workspace.",
         "Keep your public details current as your route changes.",
-        "Use booking, ordering, and delivery tools when they fit your operation.",
+        "Review a host's actual dates and site details before choosing a service day.",
       ],
     },
     starter: {
@@ -404,24 +405,23 @@ export const roleLandingContent = {
   },
   hosts: {
     seo: {
-      title: "Host Food Trucks at Your Location | MealScout",
-      description:
-        "List your parking spot or lot and let food trucks book your location. Turn your address into a bookable food truck host spot on MealScout.",
+      title: roleAcquisitionGuides.hosts.title,
+      description: roleAcquisitionGuides.hosts.description,
       keywords: "host food truck location, food truck parking spot, bookable truck spots, food truck host platform, list parking for food trucks",
       canonicalPath: "/for-hosts",
     },
     badge: "MealScout for Hosts",
-    headline: "Turn your address into a booking hub.",
-    subhead:
-      "Add a location once, control your slots, and let trucks book with clarity.",
+    headline: roleAcquisitionGuides.hosts.headline,
+    subhead: roleAcquisitionGuides.hosts.intro,
+    guide: roleAcquisitionGuides.hosts,
     primaryCta: { label: "List my location", href: "/customer-signup?role=host" },
     secondaryCta: { label: "Sign in", href: "/login" },
-    bullets: ["One pass per address", "Control slots", "Hosts keep their fee"],
+    bullets: ["Describe your space", "Control availability", "Review booking status"],
     map: {
       kicker: "Location control",
-      title: "Hosts + available slots",
-      badge: "Live listings",
-      hint: "Bookable addresses",
+      title: "Dates + capacity + site details",
+      badge: "Host controls",
+      hint: "Live listings are on Parking Pass",
     },
     stats: [
       { label: "Locations listed", value: "--" },
@@ -438,7 +438,7 @@ export const roleLandingContent = {
       },
       {
         icon: Sparkles,
-        text: "Hosts keep their full fee minus processing",
+        text: "Review pricing alongside the location's availability",
       },
     ],
     steps: [
@@ -454,14 +454,14 @@ export const roleLandingContent = {
       },
       {
         icon: Truck,
-        title: "Get booked",
-        copy: "Trucks pay to confirm. You see bookings instantly.",
+        title: "Review booking status",
+        copy: "Use your host workspace to review the actual booking status, not just page views or selected dates.",
       },
     ],
     reasons: {
       title: "Why hosts use MealScout",
       items: [
-        "Clear bookings with no guessing.",
+        "Published dates and site details give trucks a clearer decision.",
         "Control availability per address.",
         "Trucks see rules and slots up front.",
         "Everything stays local and simple.",
@@ -470,7 +470,7 @@ export const roleLandingContent = {
     starter: {
       kicker: "Start now",
       title: "List your first address",
-      copy: "Get set up once and let trucks book the right way.",
+      copy: "Set up your host profile and review the location details before publishing availability.",
       bullets: [
         "Free to join",
         "Control slots and availability",
