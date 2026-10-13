@@ -762,7 +762,7 @@ const renderCrawlerPage = (path: string) => {
 };
 
 const truckCrawlerHtml = renderCrawlerPage("/for-food-trucks");
-assert(truckCrawlerHtml.includes("<h1>Put your food truck where locals can find it</h1>"));
+assert(truckCrawlerHtml.includes("<h1>Find food truck parking and plan your next service day.</h1>"));
 assert(truckCrawlerHtml.includes('rel="canonical" href="https://www.mealscout.us/for-food-trucks"'));
 assert(truckCrawlerHtml.includes("businessType=food_truck&amp;intent=create"));
 assert(truckCrawlerHtml.includes("claim-business?businessType=food_truck&amp;claim=1"));
