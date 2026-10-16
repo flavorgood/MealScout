@@ -40,9 +40,13 @@ for (const redGuestLink of [
 
 assert(
   guestPrimary.includes('path: "/scout"') &&
-    guestPrimary.includes('path: "/favorites"') &&
+    guestPrimary.includes('path: "/menu-builder"') &&
     guestPrimary.includes('path: "/login"'),
-  "Guest primary navigation must stay focused on Scout, Saved, and Account.",
+  "Guest primary navigation must stay focused on Scout, Create menu, and Account.",
+);
+assert(
+  guestMore.includes('path: "/favorites"'),
+  "Guest saved items must remain available under More.",
 );
 assert(
   guestMore.includes('path: "/events"') &&

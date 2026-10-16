@@ -47,7 +47,7 @@ assert.match(
 
 assert.match(
   navigation,
-  /guest: \[[\s\S]*label: "Scout"[\s\S]*label: "Saved"[\s\S]*label: "Account"/,
+  /guest: \[[\s\S]*label: "Scout"[\s\S]*label: "Create menu"[\s\S]*label: "Account"/,
 );
 assert.match(
   navigation,
