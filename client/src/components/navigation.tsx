@@ -66,6 +66,8 @@ type NavigationLane =
 const NAV_HELP: Record<string, string> = {
   Scout: "Discover local food or see MealScout as a customer.",
   Saved: "Return to food and places you saved.",
+  "Create menu": "Start a menu for a food business — design it first as a private draft.",
+  Menu: "Open the menu builder for your food business.",
   Account: "Open your MealScout account and settings.",
   Overview: "See the current state of your business workspace.",
   Work: "Open the orders, requests, or bookings that need attention.",
@@ -303,12 +305,12 @@ export default function Navigation({ scope = "local" }: NavigationProps) {
   const primaryNavigationByLane: Record<typeof lane, NavItem[]> = {
     guest: [
       { path: "/scout", icon: Compass, label: "Scout" },
-      { path: "/favorites", icon: Heart, label: "Saved" },
+      { path: "/menu-builder", icon: ChefHat, label: "Create menu" },
       { path: "/login", icon: User, label: "Account" },
     ],
     customer: [
       { path: "/scout", icon: Compass, label: "Scout" },
-      { path: "/favorites", icon: Heart, label: "Saved" },
+      { path: "/menu-builder", icon: ChefHat, label: "Menu" },
       { path: "/profile", icon: User, label: "Account" },
     ],
     food_truck: businessOnboardingRequired
@@ -393,6 +395,7 @@ export default function Navigation({ scope = "local" }: NavigationProps) {
 
     if (lane === "guest") {
       items.push(
+        { path: "/favorites", icon: Heart, label: "Saved" },
         { path: "/events", icon: Calendar, label: "Events" },
         { path: "/deals", icon: Tag, label: "Deals" },
         {
@@ -404,6 +407,7 @@ export default function Navigation({ scope = "local" }: NavigationProps) {
       );
     } else if (lane === "customer") {
       items.push(
+        { path: "/favorites", icon: Heart, label: "Saved" },
         { path: "/orders", icon: Receipt, label: "Activity" },
         { path: "/events", icon: Calendar, label: "Events" },
         { path: "/deals", icon: Tag, label: "Deals" },
@@ -704,7 +708,7 @@ export default function Navigation({ scope = "local" }: NavigationProps) {
             }
           >
             <div
-              className="relative flex items-stretch justify-around gap-1 px-2 pb-[env(safe-area-inset-bottom)] shadow-[0_-8px_22px_rgba(36,18,8,0.10)]"
+              className="relative flex items-stretch justify-around gap-1 px-2 pb-[env(safe-area-inset-bottom)] shadow-[0_-8px_22px_rgba(36,18,8,0.10)] [&>span]:min-w-[44px] [&>span]:flex-1"
               style={{
                 height: isScoutRoute
                   ? "52px"
