@@ -1696,10 +1696,10 @@ export function registerHostRoutes(app: Express) {
         }
 
         for (const booking of existingBookings) {
-          const dateKey = dateKeyInZone(
-            new Date(booking.eventDate),
-            bookingTimeZone,
-          );
+          // Event dates store the intended calendar day at UTC midnight.
+          // Shifting that marker into a US timezone changes it to yesterday.
+          const dateKey = dateKeyFromUnknown(booking.eventDate, "UTC");
+          if (!dateKey) continue;
           const requested = requestedWindowsByDate.get(dateKey);
           if (!requested || requested.length === 0) continue;
           const slotParts = (booking.slotType || "")

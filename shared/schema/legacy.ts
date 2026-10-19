@@ -2423,6 +2423,9 @@ export const operatingHoursSchema = z.object({
 export const updateRestaurantLocationSchema = z.object({
   latitude: z.number().min(-90).max(90),
   longitude: z.number().min(-180).max(180),
+  source: z.enum(["gps", "manual"]).optional(),
+  accuracy: z.number().min(0).max(10000).optional(),
+  address: z.string().trim().max(500).optional(),
   mobileOnline: z.boolean().optional(),
   city: z.string().optional(),
   state: z.string().optional(),
@@ -2610,6 +2613,7 @@ export const insertFoodTruckLocationSchema = createInsertSchema(
     heading: z.number().min(0).max(360).optional(),
     speed: z.number().min(0).max(200).optional(), // Max 200 km/h
     accuracy: z.number().min(0).max(10000).optional(), // Max 10km accuracy
+    source: z.enum(["gps", "network", "manual"]).optional(),
   });
 
 export const updateRestaurantMobileSettingsSchema = z.object({

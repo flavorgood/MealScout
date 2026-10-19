@@ -4107,34 +4107,45 @@ export class DatabaseStorage implements IStorage {
     restaurantId: string,
     location: UpdateRestaurantLocation,
   ): Promise<Restaurant> {
-    const updateData: any = {
-      currentLatitude: location.latitude.toString(),
-      currentLongitude: location.longitude.toString(),
-      lastBroadcastAt: new Date(),
-      updatedAt: new Date(),
-    };
-
-    if (location.mobileOnline !== undefined) {
-      updateData.mobileOnline = location.mobileOnline;
-      if (location.mobileOnline === false) {
-        updateData.liveUntilAt = null;
-      } else {
-        updateData.liveUntilAt = new Date(Date.now() + 240 * 60_000);
+    return db.transaction(async (tx) => {
+      const [existing] = await tx.select().from(restaurants)
+        .where(eq(restaurants.id, restaurantId)).for("update");
+      if (!existing) throw new Error("Restaurant not found");
+      const rawData = existing.rawData && typeof existing.rawData === "object"
+        ? existing.rawData as Record<string, any> : {};
+      const profileLocations = rawData.profileLocations && typeof rawData.profileLocations === "object"
+        ? rawData.profileLocations : {};
+      const isTruck = existing.isFoodTruck === true || existing.businessType === "food_truck";
+      const updateData: any = {
+        latitude: location.latitude.toString(),
+        longitude: location.longitude.toString(),
+        updatedAt: new Date(),
+      };
+      // A saved pin is an owner-confirmed operating location, not a live broadcast.
+      // Keep any administrative address as private evidence; never label it pickup.
+      if (isTruck) {
+        updateData.address = location.address || "";
+        updateData.rawData = {
+          ...rawData,
+          profileLocations: {
+            ...profileLocations,
+            businessAdminAddress: profileLocations.businessAdminAddress || existing.address || null,
+            addressKind: "operating_location",
+            customerFacingLocationSource: "owner_confirmed_operating_location",
+            operatingLocationSource: "owner_confirmed_operating_location",
+            savedLocationSource: location.source || "unknown",
+            savedLocationAccuracy: location.accuracy ?? null,
+          },
+        };
+      } else if (location.address !== undefined) {
+        updateData.address = location.address;
       }
-    }
-    if (location.city) {
-      updateData.city = location.city;
-    }
-    if (location.state) {
-      updateData.state = location.state;
-    }
-
-    const [restaurant] = await db
-      .update(restaurants)
-      .set(updateData)
-      .where(eq(restaurants.id, restaurantId))
-      .returning();
-    return restaurant;
+      if (location.city) updateData.city = location.city;
+      if (location.state) updateData.state = location.state;
+      const [restaurant] = await tx.update(restaurants).set(updateData)
+        .where(eq(restaurants.id, restaurantId)).returning();
+      return restaurant;
+    });
   }
 
   async setRestaurantOperatingHours(
@@ -4296,17 +4307,8 @@ export class DatabaseStorage implements IStorage {
       })
       .returning();
 
-    // Update restaurant mobile status
-    await db
-      .update(restaurants)
-      .set({
-        mobileOnline: true,
-        lastBroadcastAt: new Date(),
-        liveUntilAt: new Date(Date.now() + 240 * 60_000),
-        updatedAt: new Date(),
-      })
-      .where(eq(restaurants.id, restaurantId));
-
+    // Session creation alone is not proof of a fresh GPS position. The atomic
+    // location write enables sharing only after its current pin is persisted.
     return session;
   }
 
@@ -4391,57 +4393,50 @@ export class DatabaseStorage implements IStorage {
     location: InsertFoodTruckLocation,
     options?: { liveUntilAt?: Date | null },
   ): Promise<FoodTruckLocation> {
-    // Check for recent duplicate location
-    const hasRecent = await this.hasRecentLocationUpdate(
-      location.restaurantId,
-      location.latitude,
-      location.longitude,
-    );
-
-    if (hasRecent) {
-      // Return the most recent location instead of inserting duplicate
-      const [recent] = await db
-        .select()
-        .from(foodTruckLocations)
-        .where(eq(foodTruckLocations.restaurantId, location.restaurantId))
-        .orderBy(desc(foodTruckLocations.recordedAt))
-        .limit(1);
-      return recent;
+    const source = location.source;
+    if (source !== "gps") {
+      throw new Error("Live sharing requires device GPS. Confirm a manual service stop instead.");
     }
-
-    // Get active session for the restaurant
-    const activeSession = await this.getActiveTruckSession(
-      location.restaurantId,
-    );
-
-    // Insert new location record
-    const [newLocation] = await db
-      .insert(foodTruckLocations)
-      .values({
+    return db.transaction(async (tx) => {
+      // Serialize updates for one truck and commit history + current pin together.
+      const [restaurant] = await tx.select({ id: restaurants.id }).from(restaurants)
+        .where(eq(restaurants.id, location.restaurantId)).for("update");
+      if (!restaurant) throw new Error("Restaurant not found");
+      const now = new Date();
+      const [recent] = await tx.select().from(foodTruckLocations)
+        .where(and(eq(foodTruckLocations.restaurantId, location.restaurantId),
+          gte(foodTruckLocations.recordedAt, new Date(now.getTime() - 10000))))
+        .orderBy(desc(foodTruckLocations.recordedAt)).limit(1);
+      const duplicate = recent && Math.hypot(Number(recent.latitude) - location.latitude,
+        Number(recent.longitude) - location.longitude) * 111320 < 10;
+      const [activeSession] = await tx.select().from(foodTruckSessions)
+        .where(and(eq(foodTruckSessions.restaurantId, location.restaurantId),
+          eq(foodTruckSessions.isActive, true))).limit(1);
+      const values = {
         restaurantId: location.restaurantId,
         latitude: location.latitude.toString(),
         longitude: location.longitude.toString(),
         sessionId: activeSession?.id,
-      })
-      .returning();
-
-    // Update restaurant's current location
-    await db
-      .update(restaurants)
-      .set({
+        source,
+        accuracy: location.accuracy === undefined ? null : location.accuracy.toString(),
+        heading: location.heading === undefined ? null : location.heading.toString(),
+        speed: location.speed === undefined ? null : location.speed.toString(),
+        recordedAt: now,
+      };
+      const [accepted] = duplicate
+        ? await tx.update(foodTruckLocations).set(values).where(eq(foodTruckLocations.id, recent.id)).returning()
+        : await tx.insert(foodTruckLocations).values(values).returning();
+      await tx.update(restaurants).set({
         currentLatitude: location.latitude.toString(),
         currentLongitude: location.longitude.toString(),
         mobileOnline: true,
-        lastBroadcastAt: new Date(),
-        liveUntilAt:
-          options?.liveUntilAt !== undefined
-            ? options.liveUntilAt
-            : new Date(Date.now() + 240 * 60_000),
-        updatedAt: new Date(),
-      })
-      .where(eq(restaurants.id, location.restaurantId));
-
-    return newLocation;
+        lastBroadcastAt: now,
+        liveUntilAt: options?.liveUntilAt !== undefined ? options.liveUntilAt
+          : new Date(now.getTime() + 240 * 60_000),
+        updatedAt: now,
+      }).where(eq(restaurants.id, location.restaurantId));
+      return accepted;
+    });
   }
 
   async getLiveTrucksNearby(
@@ -4486,6 +4481,8 @@ export class DatabaseStorage implements IStorage {
         currentLongitude: restaurants.currentLongitude,
         lastBroadcastAt: restaurants.lastBroadcastAt,
         liveUntilAt: restaurants.liveUntilAt,
+        gpsAccuracy: sql<string | null>`(select accuracy from food_truck_locations where restaurant_id = ${restaurants.id} order by recorded_at desc limit 1)`,
+        liveLocationSource: sql<string>`coalesce((select source from food_truck_locations where restaurant_id = ${restaurants.id} order by recorded_at desc limit 1), 'unknown')`,
         operatingHours: restaurants.operatingHours,
         isActive: restaurants.isActive,
         isVerified: restaurants.isVerified,
@@ -4528,7 +4525,8 @@ export class DatabaseStorage implements IStorage {
             currentLongitude: truck.currentLongitude,
             lastBroadcastAt: truck.lastBroadcastAt,
             liveUntilAt: truck.liveUntilAt,
-            locationSource: "owner_gps",
+            locationSource: truck.liveLocationSource || "unknown",
+            gpsAccuracy: truck.gpsAccuracy,
           },
           { freshnessMs },
         ),

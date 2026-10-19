@@ -32,6 +32,7 @@ import {
   deals,
   eventBookings,
   events,
+  foodTruckLocations,
   hosts,
   menuCategories,
   menuItemModifiers,
@@ -472,6 +473,36 @@ const resolveTruckRestaurantForPublicId = async (id: string) => {
     .where(eq(restaurants.claimedFromImportId, id))
     .limit(1);
   return mapped || null;
+};
+
+const loadCurrentTruckLocationProvenance = async (row: typeof restaurants.$inferSelect) => {
+  const capturedAt = row.lastBroadcastAt ? new Date(row.lastBroadcastAt) : null;
+  const latitude = row.currentLatitude;
+  const longitude = row.currentLongitude;
+  const unknown = { liveLocationSource: "unknown", gpsAccuracy: null };
+  if (
+    row.mobileOnline !== true ||
+    !capturedAt || !Number.isFinite(capturedAt.getTime()) ||
+    latitude == null || longitude == null ||
+    !Number.isFinite(Number(latitude)) || !Number.isFinite(Number(longitude))
+  ) return unknown;
+
+  // A live write commits the current pin, broadcast timestamp and history row
+  // together. Older or differently positioned history cannot establish its GPS
+  // source or precision. Ambiguous historical matches remain unknown as well.
+  const matches = await db.select({
+    source: foodTruckLocations.source,
+    accuracy: foodTruckLocations.accuracy,
+  }).from(foodTruckLocations).where(and(
+    eq(foodTruckLocations.restaurantId, row.id),
+    eq(foodTruckLocations.latitude, String(latitude)),
+    eq(foodTruckLocations.longitude, String(longitude)),
+    eq(foodTruckLocations.recordedAt, capturedAt),
+  )).limit(2);
+  const match = matches.length === 1 ? matches[0] : null;
+  return match?.source === "gps"
+    ? { liveLocationSource: "gps", gpsAccuracy: match.accuracy }
+    : unknown;
 };
 
 const buildPublicDealsPayload = async (
@@ -2780,6 +2811,7 @@ export function registerPublicDiscoveryRoutes(app: Express) {
           return res.status(404).json({ message: "Profile not found" });
         }
         const { showAddress, showContact } = ownerProfile;
+        const liveLocationProvenance = await loadCurrentTruckLocationProvenance(row);
         const [menuPayload, operatingPlanPayload, dealsPayload] =
           await Promise.all([
             buildPublicMenuPayload(String(row.id), {
@@ -2793,6 +2825,7 @@ export function registerPublicDiscoveryRoutes(app: Express) {
         const mapped = toPublicTruckProfile({
           row: {
             ...row,
+            ...liveLocationProvenance,
             ...menuPayload,
             ...operatingPlanPayload,
             ...dealsPayload,

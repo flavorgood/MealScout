@@ -795,10 +795,8 @@ export function registerEventRoutes(
 
     const bookingsByEvent = new Map<string, typeof bookingRows>();
     for (const row of bookingRows) {
-      const isPublicTruck = (
-        publicTrucksByEvent.get(String(row.eventId || "")) || []
-      ).some((truck) => truck.truckId === String(row.truckId || ""));
-      if (!isPublicTruck) continue;
+      // Every confirmed reservation occupies capacity, including private trucks.
+      // Public truck details are filtered only when projecting the response.
       const list = bookingsByEvent.get(row.eventId) ?? [];
       list.push(row);
       bookingsByEvent.set(row.eventId, list);
@@ -806,6 +804,9 @@ export function registerEventRoutes(
 
     const enhancedEvents = parkingEvents.map((event) => {
       const rows = bookingsByEvent.get(event.id) ?? [];
+      const publicRows = rows.filter((row) => (
+        publicTrucksByEvent.get(String(row.eventId || "")) || []
+      ).some((truck) => truck.truckId === String(row.truckId || "")));
       const pending = pendingByEvent.get(event.id) ?? 0;
       const maxSpots = event.maxTrucks ?? 1;
 
@@ -855,7 +856,7 @@ export function registerEventRoutes(
         spotCount: maxSpots,
         bookedSpots: reservedCount,
         availableSpotNumbers: trimmedAvailable,
-        bookings: rows.map((row: (typeof rows)[number]) => ({
+        bookings: publicRows.map((row: (typeof rows)[number]) => ({
           truckId: row.truckId,
           truckName:
             (
