@@ -57,6 +57,17 @@
       "destination": "https://mealscout.onrender.com/:indexNowKey.txt"
     },
     {
+      "source": "/",
+      "destination": "https://mealscout.onrender.com/",
+      "has": [
+        {
+          "type": "header",
+          "key": "user-agent",
+          "value": ".*([Bb][Oo][Tt]|[Cc][Rr][Aa][Ww][Ll][Ee][Rr]|[Ss][Pp][Ii][Dd][Ee][Rr]|[Ss][Ll][Uu][Rr][Pp]|[Cc][Hh][Aa][Tt][Gg][Pp][Tt]-[Uu][Ss][Ee][Rr]|[Aa][Nn][Tt][Hh][Rr][Oo][Pp][Ii][Cc]-[Aa][Ii]|[Cc][Oo][Hh][Ee][Rr][Ee]-[Aa][Ii]).*"
+        }
+      ]
+    },
+    {
       "source": "/for-food-trucks",
       "destination": "https://mealscout.onrender.com/for-food-trucks",
       "has": [
@@ -237,6 +248,17 @@
     {
       "src": "/([A-Za-z0-9_-]{8,128})\\.txt",
       "dest": "https://mealscout.onrender.com/$1.txt"
+    },
+    {
+      "src": "^/$",
+      "dest": "https://mealscout.onrender.com/",
+      "has": [
+        {
+          "type": "header",
+          "key": "user-agent",
+          "value": ".*([Bb][Oo][Tt]|[Cc][Rr][Aa][Ww][Ll][Ee][Rr]|[Ss][Pp][Ii][Dd][Ee][Rr]|[Ss][Ll][Uu][Rr][Pp]|[Cc][Hh][Aa][Tt][Gg][Pp][Tt]-[Uu][Ss][Ee][Rr]|[Aa][Nn][Tt][Hh][Rr][Oo][Pp][Ii][Cc]-[Aa][Ii]|[Cc][Oo][Hh][Ee][Rr][Ee]-[Aa][Ii]).*"
+        }
+      ]
     },
     {
       "src": "/for-food-trucks",
