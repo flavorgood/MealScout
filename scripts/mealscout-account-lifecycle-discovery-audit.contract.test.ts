@@ -104,7 +104,7 @@ function requireIncludes(source: string, snippet: string, label = snippet) {
   "Manually copied legacy keys remain draft-only",
   "Email verification, business/profile setup, insurance verification, claim verification, password reset, and forced password change are separate lifecycle steps",
   "`/api/business-access/me` represents linked business-team access and must not collapse admin identity into business identity",
-  "Food truck schedule-required continuation uses owner-scoped `/owner-ai?...&focus=schedule`",
+  "Food truck schedule-required continuation uses `/restaurant-owner-dashboard?setup=schedule`",
   "`/parking-pass` is a public discovery/search and truck-side booking/schedule surface",
   "food truck owners must not be routed into host-only management",
   "## Blessed Berry Isolation Boundary",
@@ -373,8 +373,10 @@ if (!/app\.post\(\s*["']\/api\/auth\/complete-setup["']\s*,/.test(unifiedAuth)) 
 [
   'continuationPath: "/account-setup"',
   '"/restaurant-signup?businessType=food_truck&source=auth&claim=1"',
-  'source: "onboarding"',
-  'focus: "schedule"',
+  'continuationPath = "/restaurant-owner-dashboard?setup=profile"',
+  'continuationPath = "/restaurant-owner-dashboard?setup=profile-media"',
+  'continuationPath = "/menu-builder"',
+  'continuationPath = "/restaurant-owner-dashboard?setup=schedule"',
   'continuationPath = "/restaurant-owner-dashboard?setup=verification"',
 ].forEach((snippet) =>
   requireIncludes(

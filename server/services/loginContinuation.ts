@@ -6,7 +6,6 @@ import {
   truckManualSchedules,
   verificationRequests,
 } from "@shared/schema";
-import { buildOwnerAiHref } from "@shared/ownerAiNavigation";
 import { getBusinessVerificationState } from "./businessVerificationState";
 
 type LinkState = "linked" | "not_attached";
@@ -230,41 +229,32 @@ export async function resolveUserContinuation(params: {
 
   if (isBusinessUser && !profileComplete) {
     nextRequiredStep = "profile";
-    continuationPath = buildOwnerAiHref({
-      restaurantId: primaryBusinessId,
-      source: "onboarding",
-      focus: "profile",
-    });
+    continuationPath = "/restaurant-owner-dashboard?setup=profile";
     reason = "Business profile is missing required basics.";
   } else if (isBusinessUser && !profileVisualComplete) {
     nextRequiredStep = "profile_visual";
-    continuationPath = buildOwnerAiHref({
-      restaurantId: primaryBusinessId,
-      source: "onboarding",
-      focus: "media",
-    });
+    continuationPath = "/restaurant-owner-dashboard?setup=profile-media";
     reason =
       "Add a logo, profile photo, or banner so customers can recognize your business.";
   } else if (isBusinessUser && menuRequired) {
     nextRequiredStep = "menu";
-    continuationPath = buildOwnerAiHref({
-      restaurantId: primaryBusinessId,
-      source: "onboarding",
-      focus: "menu",
-    });
+    continuationPath = "/menu-builder";
     reason = "Add at least one menu item so customers can discover your business.";
   } else if (isBusinessUser && scheduleRequired && !hasSchedule) {
     nextRequiredStep = "schedule";
-    continuationPath = buildOwnerAiHref({
-      restaurantId: primaryBusinessId,
-      source: "onboarding",
-      focus: "schedule",
-    });
+    continuationPath = "/restaurant-owner-dashboard?setup=schedule";
     reason = "Schedule and location setup is still required.";
   } else if (isBusinessUser && verificationRequired && !businessInsuranceSubmitted) {
     nextRequiredStep = "verification";
     continuationPath = "/restaurant-owner-dashboard?setup=verification";
     reason = "Verification details are still missing, but setup can continue.";
+  }
+
+  if (continuationPath && primaryBusinessId &&
+      ["profile", "profile_visual", "menu", "schedule"].includes(nextRequiredStep)) {
+    const target = new URL(continuationPath, "https://mealscout.local");
+    target.searchParams.set("restaurantId", primaryBusinessId);
+    continuationPath = `${target.pathname}${target.search}`;
   }
 
   return {

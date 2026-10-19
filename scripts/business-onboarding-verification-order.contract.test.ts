@@ -6,9 +6,8 @@ const restaurantSignup = readFileSync("client/src/pages/restaurant-signup.tsx", 
 const requiredContinuationSnippets = [
   'nextRequiredStep = "menu";',
   'nextRequiredStep = "schedule";',
-  'source: "onboarding",',
-  'focus: "menu",',
-  'focus: "schedule",',
+  'continuationPath = "/menu-builder";',
+  'continuationPath = "/restaurant-owner-dashboard?setup=schedule";',
   'nextRequiredStep = "verification";',
   'continuationPath = "/restaurant-owner-dashboard?setup=verification";',
   'reason = "Verification details are still missing, but setup can continue.";',
@@ -31,11 +30,11 @@ if (!restaurantSignup.includes('data-testid="button-skip-verification"')) {
 }
 
 if (
-  !restaurantSignup.includes('data-testid="owner-ai-onboarding-handoff"') ||
-  (restaurantSignup.match(/setLocation\(ownerAiSetupHref\)/g) || []).length !== 2
+  restaurantSignup.includes('data-testid="owner-ai-onboarding-handoff"') ||
+  (restaurantSignup.match(/setLocation\(resolveProgressiveBusinessSetupDestination\(signupAuthContext, manualSetupHref, createdRestaurant\?\.id\)\)/g) || []).length !== 2
 ) {
   throw new Error(
-    "Restaurant signup must send both verification outcomes to the same owner AI setup handoff",
+    "Restaurant signup must retain progressive auth context for both manual setup handoffs",
   );
 }
 

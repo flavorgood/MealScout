@@ -13,7 +13,6 @@ import {
   Image,
   Link as LinkIcon,
   Megaphone,
-  Sparkles,
   Store,
   Truck,
   Utensils,
@@ -32,7 +31,6 @@ const standardProfileIncludes = [
   "Local discovery",
   "Customer action paths where available",
   "Marketing and affiliate tools where available",
-  "AI-prepared updates with owner approval",
 ];
 
 const doneForYouIncludes = [
@@ -81,7 +79,6 @@ const mealscoutProfileAdvantages = [
   "Profile link for social media",
   "Custom domain support",
   "Marketing and affiliate tools where available",
-  "Use any free or paid AI you already have",
 ];
 
 const squareOneSupport = [
@@ -131,7 +128,7 @@ export default function ProfileSetupPage() {
     areaServed: "United States",
     serviceType: "Food business profile setup",
     description:
-      "Free MealScout food profiles with owner-approved AI setup using any model, plus optional done-for-you help for restaurants, food trucks, vendors, caterers, meal prep sellers, and online food brands.",
+      "Free MealScout food profiles with optional done-for-you setup for restaurants, food trucks, vendors, caterers, meal prep sellers, and online food brands.",
     offers: {
       "@type": "Offer",
       price: "100",
@@ -145,7 +142,7 @@ export default function ProfileSetupPage() {
     <div className="min-h-screen bg-[#fff7ed] text-stone-950">
       <SEOHead
         title="MealScout Profile Setup - Free Food Profiles + Optional Setup Help"
-        description="Create a free MealScout Profile and use any AI you already have to prepare owner-approved menus, images, hours, schedules, deals, and social previews. Optional done-for-you setup is usually $100."
+        description="Create a free MealScout Profile for your restaurant, food truck, bakery, caterer, vendor, meal prep business, or online food brand. Optional done-for-you setup is usually $100."
         keywords="MealScout profile setup, free restaurant profile, food truck profile, restaurant menu profile, food vendor profile, bakery profile, caterer profile, online food seller profile"
         canonicalUrl="https://www.mealscout.us/profile-setup"
         schemaData={schemaData}
@@ -177,24 +174,6 @@ export default function ProfileSetupPage() {
               <p className="mt-5 max-w-2xl text-base font-bold text-stone-800">
                 {audience}
               </p>
-              <div className="mt-6 flex max-w-2xl gap-3 rounded-2xl border border-orange-200 bg-white/80 p-4 shadow-clean">
-                <Sparkles
-                  className="mt-0.5 h-5 w-5 shrink-0 text-orange-700"
-                  aria-hidden="true"
-                />
-                <div>
-                  <p className="text-sm font-black text-orange-950">
-                    Use the AI you already have
-                  </p>
-                  <p className="mt-1 text-sm leading-6 text-stone-700">
-                    Any free or paid AI can prepare your profile, menus and
-                    prices, logos and images, hours, schedules or events, deals,
-                    and matching social posts. After it shows the complete exact
-                    revision, the owner can consent in that chat and the AI can
-                    approve, apply, and publish it through MealScout.
-                  </p>
-                </div>
-              </div>
               <div className="mt-8 flex flex-col gap-3 sm:flex-row">
                 <Link href="/restaurant-signup">
                   <Button className="h-12 rounded-full bg-orange-600 px-6 text-base font-black text-white hover:bg-orange-700">

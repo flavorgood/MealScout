@@ -3985,35 +3985,6 @@ export default function RestaurantOwnerDashboard() {
                     style={{ width: completionPercent + "%" }}
                   />
                 </div>
-                {ownsSelectedBusiness ? (
-                  <div
-                    className="mb-3 flex flex-col gap-3 rounded-lg border border-orange-200 bg-orange-50 p-3 sm:flex-row sm:items-center sm:justify-between"
-                    data-testid="owner-ai-completion-entry"
-                  >
-                    <div className="flex items-start gap-2.5">
-                      <Sparkles
-                        className="mt-0.5 h-4 w-4 shrink-0 text-orange-700"
-                        aria-hidden="true"
-                      />
-                      <p className="text-xs leading-5 text-orange-950">
-                        Use any free or paid AI to prepare every missing setup
-                        item plus the matching social previews. You approve the
-                        complete draft before MealScout changes anything.
-                      </p>
-                    </div>
-                    <Button asChild size="sm" className="shrink-0">
-                      <Link
-                        href={buildOwnerAiHref({
-                          restaurantId: String(selectedRestaurant),
-                          source: "completion",
-                          focus: "all",
-                        })}
-                      >
-                        Finish with AI
-                      </Link>
-                    </Button>
-                  </div>
-                ) : null}
                 {ownsSelectedBusiness && currentRestaurant && (
                   <a className="mb-3 block text-sm text-orange-700 underline"
                     href={`/owner/ecosystem-sharing/${encodeURIComponent(String(currentRestaurant.id))}`}>

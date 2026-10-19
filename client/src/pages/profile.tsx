@@ -18,7 +18,6 @@ import {
   MapPin,
   Store,
   Building2,
-  Sparkles,
   PartyPopper,
   Calendar,
   Link as LinkIcon,
@@ -29,7 +28,6 @@ import { SEOHead } from "@/components/seo-head";
 import { apiUrl, authUrl } from "@/lib/api";
 import { getOptimizedImageUrl } from "@/lib/images";
 import { useIsStandalone } from "@/hooks/useIsStandalone";
-import { buildOwnerAiHref } from "@shared/ownerAiNavigation";
 
 export default function ProfilePage() {
   const { user, isAuthenticated } = useAuth();
@@ -65,11 +63,6 @@ export default function ProfilePage() {
       "event_coordinator",
       "staff",
     ].includes(user?.userType || "");
-  const ownerAiHref = buildOwnerAiHref({
-    restaurantId: user?.primaryBusinessId,
-    source: "profile",
-    focus: "all",
-  });
   const primaryDashboard =
     isAdminUser
       ? {
@@ -108,7 +101,7 @@ export default function ProfilePage() {
                       ? "Food Truck Dashboard"
                       : "Business Dashboard",
                   description:
-                    "Manage profile, menu, schedules, deals, and approvals.",
+                    "Manage profile, deals, menu, bookings, and publishing.",
                   Icon: Store,
                 }
               : {
@@ -156,22 +149,10 @@ export default function ProfilePage() {
     primaryDashboard,
     ...(user?.userType === "restaurant_owner" || user?.userType === "food_truck"
       ? [
-          ...(user?.primaryBusinessId
-            ? [
-                {
-                  href: ownerAiHref,
-                  title: "AI Control",
-                  description:
-                    "Sign your favorite AI into MealScout, link socials, and approve exact updates in that AI chat.",
-                  Icon: Sparkles,
-                },
-              ]
-            : []),
           {
             href: "/restaurant-owner-dashboard?setup=profile",
             title: "Business Profile",
-            description:
-              "Edit public details manually or review AI-prepared profile changes.",
+            description: "Edit public business details, claim status, and visibility.",
             Icon: Store,
           },
           {
@@ -229,8 +210,7 @@ export default function ProfilePage() {
     {
       href: "/settings",
       title: "Profile Settings",
-      description:
-        "Manage account access, AI connections, notifications, and public visibility.",
+      description: "Edit preferences, privacy, profile studio, and public profile.",
       Icon: Settings,
     },
     {
@@ -515,16 +495,14 @@ export default function ProfilePage() {
                       Profile Settings
                     </p>
                     <p className="text-sm text-muted-foreground mt-1">
-                      Manage account access, AI connections, notifications,
-                      support, and public contact visibility.
+                      Edit your profile, privacy, public profile studio, notifications,
+                      language, and local preferences.
                     </p>
                     <div className="mt-3 flex flex-wrap gap-2">
-                      <Badge variant="secondary">Account</Badge>
-                      {user?.primaryBusinessId ? (
-                        <Badge variant="secondary">AI access</Badge>
-                      ) : null}
+                      <Badge variant="secondary">Profile</Badge>
+                      <Badge variant="secondary">Privacy</Badge>
                       <Badge variant="secondary">Notifications</Badge>
-                      <Badge variant="secondary">Visibility</Badge>
+                      <Badge variant="secondary">Public page</Badge>
                     </div>
                   </div>
                   <ChevronRight className="w-5 h-5 text-muted-foreground mt-1" />
