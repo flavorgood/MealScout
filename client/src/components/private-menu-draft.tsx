@@ -6,24 +6,35 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/hooks/use-toast";
 import { buildProgressiveAccountPath, getProgressiveAccountGate, preserveProgressiveAuthContext } from "@shared/progressiveOnboarding";
+import { getGuestMenuJourneyStage } from "@/lib/menu-builder-navigation";
 import {
   emptyGuestMenuDraft, emptyGuestMenuItem, GUEST_MENU_MAX_ITEMS, GUEST_MENU_CATEGORY_NOTICE,
   persistGuestMenuDraft, readGuestMenuDraft,
   type GuestMenuDraft, type GuestMenuItemDraft,
 } from "@shared/guestMenuDraft";
 
-export function PrivateMenuDraftEditor({ draft, onChange, onKeep }: {
-  draft: GuestMenuDraft; onChange: (draft: GuestMenuDraft) => void; onKeep: () => void;
+export function PrivateMenuDraftEditor({ draft, onChange, onKeep, kept = false }: {
+  draft: GuestMenuDraft; onChange: (draft: GuestMenuDraft) => void; onKeep: () => void; kept?: boolean;
 }) {
   const changeItem = (index: number, field: keyof GuestMenuItemDraft, value: string) => {
     onChange({ ...draft, items: draft.items.map((item, position) => position === index ? { ...item, [field]: value } : item) });
   };
+  const journeyStage = getGuestMenuJourneyStage({
+    hasNamedItem: draft.items.some((item) => item.name.trim().length > 0),
+    kept,
+  });
   return (
     <section className="mx-auto max-w-5xl space-y-6 px-4 py-8" aria-labelledby="private-menu-title">
       <header>
         <p className="text-sm font-medium text-muted-foreground">Private draft</p>
         <h1 id="private-menu-title" className="text-3xl font-bold">Design your menu</h1>
         <p className="mt-2 text-muted-foreground">Build and preview here. Keep your work when you are ready to sign in and verify your email.</p>
+        <p className="mt-3 text-sm font-medium" data-testid="menu-journey-stage">
+          Step {journeyStage.step} of {journeyStage.stageCount}: {journeyStage.title}.{" "}
+          {journeyStage.isComplete
+            ? "Your draft is saved on this device."
+            : journeyStage.hint}
+        </p>
       </header>
       <div className="grid gap-6 lg:grid-cols-2">
         <div className="space-y-4">
@@ -43,11 +54,11 @@ export function PrivateMenuDraftEditor({ draft, onChange, onKeep }: {
               <Button type="button" variant="outline" onClick={() => onChange({ ...draft, items: draft.items.filter((_item, position) => position !== index) })}>Remove item {index + 1}</Button>
             </fieldset>
           ))}
-          <Button type="button" variant="outline" disabled={draft.items.length >= GUEST_MENU_MAX_ITEMS} onClick={() => onChange({ ...draft, items: [...draft.items, emptyGuestMenuItem()] })}>Add item</Button>
+          <Button type="button" variant={journeyStage.id === "add-items" ? "default" : "outline"} disabled={draft.items.length >= GUEST_MENU_MAX_ITEMS} onClick={() => onChange({ ...draft, items: [...draft.items, emptyGuestMenuItem()] })}>Add item</Button>
         </div>
         <MenuDraftPreview draft={draft} />
       </div>
-      <div className="space-y-2"><Button type="button" onClick={onKeep}>Keep this menu draft</Button><p className="text-sm text-muted-foreground">Your draft stays on this device. A business owner must review it before creating or importing a menu.</p></div>
+      <div className="space-y-2"><Button type="button" variant={journeyStage.id === "save-and-preview" ? "default" : "outline"} onClick={onKeep}>Keep this menu draft</Button><p className="text-sm text-muted-foreground">Your draft stays on this device. A business owner must review it before creating or importing a menu.</p></div>
     </section>
   );
 }
@@ -86,7 +97,7 @@ export function PrivateMenuDraftPage({ user }: { user: { emailVerified?: unknown
     setKept(true);
   };
   return <main className="min-h-screen bg-background">
-    <PrivateMenuDraftEditor draft={draft} onChange={value => { setDraft(value); setKept(false); }} onKeep={keep} />
+    <PrivateMenuDraftEditor draft={draft} onChange={value => { setDraft(value); setKept(false); }} onKeep={keep} kept={kept} />
     {getProgressiveAccountGate(user) === "continue" && <div className="mx-auto max-w-5xl px-4 pb-8">
       {kept && <p role="status" className="mb-3">Your menu draft is saved on this device.</p>}
       <p className="text-sm text-muted-foreground">Choose or set up a business to review this draft in its menu workspace.</p>

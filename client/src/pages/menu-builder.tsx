@@ -8,6 +8,10 @@ import { apiRequest, queryClient } from "@/lib/queryClient";
 import { prepareMenuCreationAttempt, confirmMenuCreationAttempt, assertMenuCreationReceipt, type MenuCreationAttempt } from "@/lib/menu-creation-request";
 import { useAuth } from "@/hooks/useAuth";
 import { MenuDraftPreview, PrivateMenuDraftPage } from "@/components/private-menu-draft";
+import {
+  getOwnerMenuJourneyStage,
+  type MenuJourneyStage,
+} from "@/lib/menu-builder-navigation";
 import { guestMenuDraftToCsv, readGuestMenuDraft, GUEST_MENU_CATEGORY_NOTICE } from "@shared/guestMenuDraft";
 import { getProgressiveAccountGate } from "@shared/progressiveOnboarding";
 import { useToast } from "@/hooks/use-toast";
@@ -622,6 +626,16 @@ function OwnerMenuBuilderPage() {
   }
 
   const selectedMenu = normalizeFullMenu(fullMenuQuery.data);
+  const journeyStage = getOwnerMenuJourneyStage({
+    menuCount: menus.length,
+    hasSelectedMenu: !!selectedMenu,
+    selectedMenuItemCount: selectedMenu
+      ? selectedMenu.categories.reduce(
+          (total, category) => total + toArray(category.items).length,
+          0,
+        ) + toArray(selectedMenu.uncategorizedItems).length
+      : 0,
+  });
 
   return (
     <BusinessWorkspaceShell
@@ -748,7 +762,10 @@ function OwnerMenuBuilderPage() {
               <div className="rounded-full bg-orange-100 p-3 text-orange-700">
                 <UtensilsCrossed className="h-7 w-7" />
               </div>
-              <h2 className="mt-4 text-lg font-bold">Add your first menu</h2>
+              <p className="mt-4 text-xs font-semibold uppercase tracking-[0.16em] text-orange-700">
+                Step {journeyStage.step} of {journeyStage.stageCount} · {journeyStage.title}
+              </p>
+              <h2 className="mt-2 text-lg font-bold">Add your first menu</h2>
               <p className="mt-1 max-w-md text-sm text-muted-foreground">
                 Start with an empty menu, then add items manually or import an
                 existing file or photo.
@@ -795,6 +812,7 @@ function OwnerMenuBuilderPage() {
             key={selectedMenu.id}
             menu={selectedMenu}
             restaurantId={restaurantId}
+            journeyStage={journeyStage}
             onImport={() => setShowImportDialog(true)}
             onRefresh={() => {
               queryClient.invalidateQueries({
@@ -1115,15 +1133,18 @@ function OwnerMenuBuilderPage() {
 function MenuEditor({
   menu,
   restaurantId,
+  journeyStage,
   onImport,
   onRefresh,
 }: {
   menu: FullMenu;
   restaurantId: string;
+  journeyStage: MenuJourneyStage;
   onImport: () => void;
   onRefresh: () => void;
 }) {
   const { toast } = useToast();
+  const [, navigate] = useLocation();
   const [showCategoryDialog, setShowCategoryDialog] = useState(false);
   const [editingCategory, setEditingCategory] = useState<MenuCategory | null>(
     null,
@@ -1324,20 +1345,44 @@ function MenuEditor({
     }
   };
 
-  const saveMenuSettings = async () => {
+  const saveMenuSettings = async (): Promise<boolean> => {
     setSavingSettings(true);
     try {
       await apiRequest("PATCH", `/api/owner/menus/${menu.id}`, menuSettings);
       onRefresh();
       toast({ title: "Settings saved" });
+      return true;
     } catch (err: any) {
       toast({
         title: "Error",
         description: err.message,
         variant: "destructive",
       });
+      return false;
     } finally {
       setSavingSettings(false);
+    }
+  };
+
+  const firstCategorySection = sections.find((section) => section.category);
+  const handleJourneyMainAction = async () => {
+    if (journeyStage.id === "add-items") {
+      if (firstCategorySection?.category) {
+        setEditingItem(null);
+        setActiveCategoryId(firstCategorySection.category.id);
+        setShowItemDialog(true);
+      } else {
+        setEditingCategory(null);
+        setCategoryName("");
+        setCategoryDesc("");
+        setShowCategoryDialog(true);
+      }
+      return;
+    }
+    const saved = await saveMenuSettings();
+    if (saved) {
+      queryClient.removeQueries({ queryKey: ["/api/menus", restaurantId], exact: true });
+      navigate(`/menu/${encodeURIComponent(restaurantId)}?menuId=${encodeURIComponent(menu.id)}`);
     }
   };
 
@@ -1399,6 +1444,35 @@ function MenuEditor({
               <p className="text-lg font-bold">{menu.categories.length}</p>
               <p className="text-xs text-muted-foreground">Categories</p>
             </div>
+          </div>
+          <div
+            className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border bg-background/80 px-3 py-3"
+            data-testid="menu-journey-next-step"
+          >
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-[0.14em] text-orange-700">
+                Step {journeyStage.step} of {journeyStage.stageCount} · {journeyStage.title}
+              </p>
+              <p className="mt-0.5 text-sm text-muted-foreground">
+                {journeyStage.hint}
+              </p>
+            </div>
+            <Button
+              type="button"
+              onClick={() => void handleJourneyMainAction()}
+              disabled={journeyStage.id === "save-and-preview" && savingSettings}
+            >
+              {journeyStage.id === "save-and-preview" && savingSettings ? (
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              ) : journeyStage.id === "save-and-preview" ? (
+                <Eye className="mr-1.5 h-4 w-4" />
+              ) : (
+                <Plus className="mr-1.5 h-4 w-4" />
+              )}
+              {journeyStage.id === "add-items" && !firstCategorySection
+                ? "Add category"
+                : journeyStage.mainActionLabel}
+            </Button>
           </div>
         </CardHeader>
 
