@@ -70,8 +70,15 @@ const typeDotClass: Record<ParkingScheduleItem["type"], string> = {
   accepted_interest: "pp-calendar-dot pp-calendar-dot--accepted",
 };
 
-const toDate = (value: string | Date) =>
-  value instanceof Date ? value : parseISO(value);
+const toDate = (value: string | Date) => {
+  if (value instanceof Date) return value;
+  const parsed = parseISO(value);
+  if (!Number.isFinite(parsed.getTime())) return parsed;
+  // API schedule dates are calendar markers, including UTC-midnight serialization.
+  // Preserve their supplied day; grid/selection Date objects remain local dates.
+  const dateKey = value.match(/^(\d{4}-\d{2}-\d{2})(?:T|$)/)?.[1];
+  return dateKey ? parseISO(dateKey) : parsed;
+};
 
 const toDateKey = (value: string | Date) => format(toDate(value), "yyyy-MM-dd");
 
