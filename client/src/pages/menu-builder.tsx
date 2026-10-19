@@ -633,7 +633,7 @@ function OwnerMenuBuilderPage() {
       ? selectedMenu.categories.reduce(
           (total, category) => total + toArray(category.items).length,
           0,
-        )
+        ) + toArray(selectedMenu.uncategorizedItems).length
       : 0,
   });
 
@@ -1144,6 +1144,7 @@ function MenuEditor({
   onRefresh: () => void;
 }) {
   const { toast } = useToast();
+  const [, navigate] = useLocation();
   const [showCategoryDialog, setShowCategoryDialog] = useState(false);
   const [editingCategory, setEditingCategory] = useState<MenuCategory | null>(
     null,
@@ -1380,7 +1381,7 @@ function MenuEditor({
     }
     const saved = await saveMenuSettings();
     if (saved) {
-      window.open(`/menu/${restaurantId}`, "_blank");
+      navigate(`/menu/${encodeURIComponent(restaurantId)}?menuId=${encodeURIComponent(menu.id)}`);
     }
   };
 

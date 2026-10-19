@@ -58,7 +58,7 @@ export function PrivateMenuDraftEditor({ draft, onChange, onKeep, kept = false }
         </div>
         <MenuDraftPreview draft={draft} />
       </div>
-      <div className="space-y-2"><Button type="button" onClick={onKeep}>Keep this menu draft</Button><p className="text-sm text-muted-foreground">Your draft stays on this device. A business owner must review it before creating or importing a menu.</p></div>
+      <div className="space-y-2"><Button type="button" variant={journeyStage.id === "save-and-preview" ? "default" : "outline"} onClick={onKeep}>Keep this menu draft</Button><p className="text-sm text-muted-foreground">Your draft stays on this device. A business owner must review it before creating or importing a menu.</p></div>
     </section>
   );
 }

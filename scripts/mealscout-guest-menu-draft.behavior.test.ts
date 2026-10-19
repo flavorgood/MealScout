@@ -79,3 +79,17 @@ test("the real guest menu editor previews escaped items before account, contact 
   assert.match(html, /Categories stay in your private preview/);
   assert.doesNotMatch(html, /type="password"|type="email"|href="mailto:|<script>|Submit order|Pay now/);
 });
+
+test("guest menu stages emphasize one next action while keeping the draft action available", () => {
+  for (const [draft, expectedPrimary] of [[emptyGuestMenuDraft(), "Add item"], [sample, "Keep this menu draft"]] as const) {
+    const html = renderToStaticMarkup(createElement(PrivateMenuDraftEditor, { draft, onChange() {}, onKeep() {} }));
+    const buttons = Array.from(html.matchAll(/<button\b([^>]*)>([\s\S]*?)<\/button>/g), ([, attributes, content]) => ({
+      attributes,
+      label: content.replace(/<[^>]*>/g, "").trim(),
+    }));
+    assert.deepEqual(buttons.filter(({ attributes }) => /\baction-primary\b/.test(attributes)).map(({ label }) => label), [expectedPrimary]);
+    const keep = buttons.find(({ label }) => label === "Keep this menu draft");
+    assert.ok(keep);
+    assert.doesNotMatch(keep.attributes, /(?:^|\s)disabled(?:=|\s|$)/);
+  }
+});
