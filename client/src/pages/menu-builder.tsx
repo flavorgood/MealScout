@@ -1381,6 +1381,7 @@ function MenuEditor({
     }
     const saved = await saveMenuSettings();
     if (saved) {
+      queryClient.removeQueries({ queryKey: ["/api/menus", restaurantId], exact: true });
       navigate(`/menu/${encodeURIComponent(restaurantId)}?menuId=${encodeURIComponent(menu.id)}`);
     }
   };
