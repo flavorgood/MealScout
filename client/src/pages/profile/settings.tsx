@@ -19,7 +19,6 @@ import {
   Settings2,
   ShieldCheck,
   Share2,
-  Sparkles,
   UserRound,
   Users,
 } from "lucide-react";
@@ -39,7 +38,6 @@ import {
   type BusinessAccessContext,
 } from "@/lib/business-access";
 import { buildPublicProfilePath } from "@/lib/public-profile-path";
-import { buildOwnerAiHref } from "@shared/ownerAiNavigation";
 
 type SettingsPayload = {
   accountSettings?: Record<string, unknown>;
@@ -239,11 +237,6 @@ export default function SettingsPage() {
     businessAccess,
     selectedBusinessId,
   );
-  const ownerAiHref = buildOwnerAiHref({
-    restaurantId: selectedBusinessId,
-    source: "settings",
-    focus: "all",
-  });
   const { data: aiCredentialPayload } = useQuery<{
     credentials?: SettingsAiCredential[];
   }>({
@@ -442,8 +435,7 @@ export default function SettingsPage() {
               {accountName}
             </h2>
             <p className="mt-2 max-w-2xl text-sm leading-6 text-stone-700">
-              Account access, AI connections, browser notifications, support,
-              and public contact visibility.
+              Account access, browser notifications, support, and public contact visibility.
             </p>
           </div>
           {user?.email ? (
@@ -493,20 +485,12 @@ export default function SettingsPage() {
                 description="Open a support request or review existing tickets."
               />
               {selectedBusinessId ? (
-                <>
-                  <SettingsLinkCard
-                    href={buildBusinessHref("/settings", { tab: "ai" })}
-                    icon={Sparkles}
-                    title="AI and app access"
-                    description="Link your favorite AI through MealScout sign-in and connect the social accounts it can publish to with your consent."
-                  />
-                  <SettingsLinkCard
-                    href={buildBusinessHref("/subscribe")}
-                    icon={CreditCard}
-                    title="Profile access"
-                    description="Review the free trial and everything included with the profile."
-                  />
-                </>
+                <SettingsLinkCard
+                  href={buildBusinessHref("/subscribe")}
+                  icon={CreditCard}
+                  title="Profile access"
+                  description="Review the free trial and everything included with the profile."
+                />
               ) : null}
             </CardContent>
           </Card>
@@ -561,62 +545,6 @@ export default function SettingsPage() {
         <TabsContent value="ai" className="space-y-5">
           {selectedBusinessId && currentBusiness ? (
             <>
-              <Card
-                className="overflow-hidden border-orange-200 bg-[linear-gradient(135deg,#fff7ed,#fffbeb)] shadow-clean"
-                data-testid="settings-owner-ai-entry"
-              >
-                <CardContent className="p-5 sm:p-6">
-                  <div className="flex flex-col gap-5 lg:flex-row lg:items-start lg:justify-between">
-                    <div className="max-w-3xl">
-                      <div className="flex items-center gap-2 text-sm font-black text-orange-800">
-                        <Sparkles className="h-4 w-4" aria-hidden="true" />
-                        One control surface for {currentBusiness.name}
-                      </div>
-                      <h3 className="mt-2 text-2xl font-black tracking-tight text-stone-950">
-                        Use the AI you already have
-                      </h3>
-                      <p className="mt-3 text-sm leading-6 text-stone-700">
-                        Link any compatible free or paid AI by signing into
-                        MealScout from that AI. It can prepare profile details,
-                        menus, prices, logos, images, hours, schedules, events,
-                        deals, and matching social descriptions and artwork as
-                        one exact revision. Once you consent to that exact
-                        revision in chat, the AI can approve it and tell
-                        MealScout to apply and publish it.
-                      </p>
-                    </div>
-                    {ownsCurrentBusiness ? (
-                      <Button asChild className="min-h-11 shrink-0">
-                        <Link href={ownerAiHref}>
-                          <Bot className="mr-2 h-4 w-4" aria-hidden="true" />
-                          Open AI Control
-                        </Link>
-                      </Button>
-                    ) : null}
-                  </div>
-
-                  <div className="mt-5 grid gap-3 sm:grid-cols-3">
-                    {[
-                      ["AI prepares", "Draft and previews only"],
-                      ["Owner approves in chat", "Exact complete revision"],
-                      ["AI calls MealScout", "Then linked socials publish"],
-                    ].map(([title, detail]) => (
-                      <div
-                        key={title}
-                        className="rounded-2xl border border-orange-200 bg-white/80 p-4"
-                      >
-                        <p className="text-sm font-black text-stone-950">
-                          {title}
-                        </p>
-                        <p className="mt-1 text-xs leading-5 text-stone-600">
-                          {detail}
-                        </p>
-                      </div>
-                    ))}
-                  </div>
-                </CardContent>
-              </Card>
-
               {ownsCurrentBusiness ? (
                 <Card className="border-[color:var(--border-subtle)] bg-[var(--bg-surface)] shadow-clean">
                   <CardHeader>
@@ -679,11 +607,6 @@ export default function SettingsPage() {
                         </div>
                       ))}
                     </div>
-                    <Button asChild>
-                      <Link href={ownerAiHref}>
-                        Finish AI and social connections
-                      </Link>
-                    </Button>
                   </CardContent>
                 </Card>
               ) : null}

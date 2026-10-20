@@ -275,12 +275,6 @@ export const HOST_ONBOARDING_COPY = {
       "EIN or tax registration documents",
       "Updated insurance or health department certificates",
     ],
-    aiSetupTitle: "Next: finish with the AI you already use",
-    aiSetupDescription:
-      "Sign your favorite free or paid AI into MealScout, connect the social accounts you use, and let it prepare your profile, menus and prices, logos and photos, hours, schedules or events, deals, and matching social posts as one exact revision.",
-    aiSetupSafety:
-      "The AI can apply and publish only after the actual owner reviews and explicitly approves that exact revision in the AI chat or on MealScout. Manual setup tools remain available in the business workspace.",
-    continueAiButton: "Continue to AI setup",
     whyVerify:
       "Verified businesses get a visible trust badge, priority placement on the map, and the ability to book parking pass spots.",
     backButton: "Back to Business Details",

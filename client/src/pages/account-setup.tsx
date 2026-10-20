@@ -16,14 +16,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
-import {
-  Eye,
-  EyeOff,
-  CheckCircle,
-  KeyRound,
-  AlertTriangle,
-  Sparkles,
-} from "lucide-react";
+import { Eye, EyeOff, CheckCircle, KeyRound, AlertTriangle } from "lucide-react";
 import { BackHeader } from "@/components/back-header";
 import { SEOHead } from "@/components/seo-head";
 import { useAuth } from "@/hooks/useAuth";
@@ -546,8 +539,7 @@ export default function AccountSetup() {
                 Account Setup Complete!
               </CardTitle>
               <CardDescription className="text-center">
-                Redirecting you to email verification. Business owners can
-                then finish MealScout with any AI they already use.
+                Redirecting you to the email verification step...
               </CardDescription>
             </CardHeader>
           </Card>
@@ -588,31 +580,6 @@ export default function AccountSetup() {
             </p>
           </CardHeader>
           <CardContent>
-            <div
-              className="mb-5 rounded-xl border border-orange-200 bg-orange-50 p-4"
-              data-testid="account-setup-owner-ai-introduction"
-            >
-              <div className="flex items-start gap-3">
-                <Sparkles
-                  className="mt-0.5 h-5 w-5 shrink-0 text-orange-700"
-                  aria-hidden="true"
-                />
-                <div>
-                  <p className="text-sm font-black text-orange-950">
-                    Managing a food business?
-                  </p>
-                  <p className="mt-1 text-xs leading-5 text-orange-900/80">
-                    After you connect or claim it, any free or paid AI can
-                    prepare your profile, menu and prices, images, hours,
-                    schedules, events, deals, and social previews in one place.
-                    Link that AI by signing into MealScout and connect your
-                    socials. Nothing changes or publishes until the actual
-                    owner approves the exact revision in the AI chat or on
-                    MealScout.
-                  </p>
-                </div>
-              </div>
-            </div>
             <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-4">
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-2">

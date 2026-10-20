@@ -1,13 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "wouter";
-import {
-  ArrowRight,
-  CheckCircle2,
-  MailCheck,
-  MapPin,
-  RefreshCw,
-  Sparkles,
-} from "lucide-react";
+import { ArrowRight, CheckCircle2, MailCheck, MapPin, RefreshCw } from "lucide-react";
 import { useAuth } from "@/hooks/useAuth";
 import { apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
@@ -73,17 +66,17 @@ function getSetupBrief(redirectPath: string): SetupBrief {
     return {
       label: "Food truck setup",
       description:
-        "Claim or create the truck, then use any free or paid AI to prepare the menu, prices, images, schedule, events, and matching social previews together.",
-      steps: ["Personal login", "Truck profile", "AI-prepared setup", "Owner approval"],
-      optionalSteps: ["Manual profile, menu, and schedule tools remain available"],
+        "Claim or create the truck, confirm service area, add or import the menu, then publish schedule and live status.",
+      steps: ["Personal login", "Truck profile", "Menu import", "Schedule"],
+      optionalSteps: [],
     };
   }
   if (isBarSetup) {
     return {
       label: "Bar setup",
       description:
-        "Finish the bar profile with any AI you already use, then approve its complete preview for hours, events or specials, images, and matching social posts.",
-      steps: ["Personal login", "Bar profile", "AI-prepared setup", "Owner approval"],
+        "Finish your bar profile, set hours, then publish events or specials. Food menu, truck hosting, and staff showcase are optional.",
+      steps: ["Personal login", "Bar profile", "Hours", "Events or specials"],
       optionalSteps: [
         "Food menu (if serves food)",
         "Host food trucks (if enabled)",
@@ -95,9 +88,9 @@ function getSetupBrief(redirectPath: string): SetupBrief {
     return {
       label: "Business setup",
       description:
-        "Connect the business, then use any free or paid AI to prepare the profile, menu and prices, images, hours, deals, and matching social previews together.",
-      steps: ["Personal login", "Business profile", "AI-prepared setup", "Owner approval"],
-      optionalSteps: ["Manual profile, menu, photo, and hours tools remain available"],
+        "Finish the business profile, add location and hours, then build or import the menu customers will see on Scout.",
+      steps: ["Personal login", "Business profile", "Menu setup", "Hours"],
+      optionalSteps: [],
     };
   }
   if (redirectPath.startsWith("/host-signup")) {
@@ -154,9 +147,6 @@ export default function PostVerification() {
   const needsEmailCheck = mode === "check-email" || isSetupComplete || (isAuthenticated && !canContinue);
   const loginHref = getLoginHref(redirectPath, isVerified, params);
   const setupBrief = useMemo(() => getSetupBrief(redirectPath), [redirectPath]);
-  const showsOwnerAiHandoff =
-    redirectPath.startsWith("/truck-onboarding") ||
-    redirectPath.startsWith("/restaurant-signup");
 
   useEffect(() => {
     window.scrollTo(0, 0);
@@ -311,20 +301,6 @@ export default function PostVerification() {
             <p className="text-sm text-white/60">
               {setupBrief.description}
             </p>
-            {showsOwnerAiHandoff ? (
-              <div
-                className="mt-3 flex gap-2 rounded-xl border border-amber-300/20 bg-amber-300/10 px-3 py-2 text-xs leading-5 text-amber-100"
-                data-testid="post-verification-owner-ai-handoff"
-              >
-                <Sparkles className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
-                <span>
-                  Sign your favorite AI into MealScout and connect the social
-                  accounts you use. It prepares the exact preview, then can
-                  apply and publish only after the actual owner approves that
-                  revision in the AI chat or on MealScout.
-                </span>
-              </div>
-            ) : null}
             <div className="mt-4 grid grid-cols-2 gap-2">
               {setupBrief.steps.map((step, index) => (
                 <div
