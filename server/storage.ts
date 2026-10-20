@@ -130,6 +130,8 @@ import {
   not,
   ne,
 } from "drizzle-orm";
+import type { ExtractTablesWithRelations } from "drizzle-orm";
+import type { NeonTransaction } from "drizzle-orm/neon-serverless";
 import bcrypt from "bcryptjs";
 import { syncUserToBrevo } from "./brevoCrm";
 import { ensureAffiliateTag } from "./affiliateTagService";
@@ -151,6 +153,12 @@ import { createUsersRepository } from "./storage/usersRepository";
 import { createPaymentsSubscriptionsRepository } from "./storage/paymentsSubscriptionsRepository";
 import { createAnalyticsRepository } from "./storage/analyticsRepository";
 import { createParkingPassRepository } from "./storage/parkingPassRepository";
+
+type LocationSchema = typeof import("@shared/schema");
+type LocationTransaction = NeonTransaction<
+  LocationSchema,
+  ExtractTablesWithRelations<LocationSchema>
+>;
 
 // Interface for storage operations
 export interface IStorage {
@@ -4107,7 +4115,7 @@ export class DatabaseStorage implements IStorage {
     restaurantId: string,
     location: UpdateRestaurantLocation,
   ): Promise<Restaurant> {
-    return db.transaction(async (tx) => {
+    return db.transaction(async (tx: LocationTransaction) => {
       const [existing] = await tx.select().from(restaurants)
         .where(eq(restaurants.id, restaurantId)).for("update");
       if (!existing) throw new Error("Restaurant not found");
@@ -4397,7 +4405,7 @@ export class DatabaseStorage implements IStorage {
     if (source !== "gps") {
       throw new Error("Live sharing requires device GPS. Confirm a manual service stop instead.");
     }
-    return db.transaction(async (tx) => {
+    return db.transaction(async (tx: LocationTransaction) => {
       // Serialize updates for one truck and commit history + current pin together.
       const [restaurant] = await tx.select({ id: restaurants.id }).from(restaurants)
         .where(eq(restaurants.id, location.restaurantId)).for("update");

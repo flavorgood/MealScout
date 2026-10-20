@@ -793,7 +793,11 @@ export function registerEventRoutes(
       pendingByEvent.set(row.eventId, Number(row.count || 0));
     }
 
-    const bookingsByEvent = new Map<string, typeof bookingRows>();
+    type ParkingBookingRow = Pick<
+      typeof eventBookings.$inferSelect,
+      "eventId" | "spotNumber" | "bookingConfirmedAt" | "slotType" | "truckId"
+    >;
+    const bookingsByEvent = new Map<string, ParkingBookingRow[]>();
     for (const row of bookingRows) {
       // Every confirmed reservation occupies capacity, including private trucks.
       // Public truck details are filtered only when projecting the response.
