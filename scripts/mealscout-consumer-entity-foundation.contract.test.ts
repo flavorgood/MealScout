@@ -164,34 +164,112 @@ assert.equal(
   "Out-of-range live and static pairs must be rejected",
 );
 
+const freshPublicTruckRow = {
+  id: "truck-live",
+  name: "Live Truck",
+  isFoodTruck: true,
+  mobileOnline: true,
+  currentLatitude: "30.4213",
+  currentLongitude: "-87.2169",
+  lastBroadcastAt: new Date(),
+};
+
 const serializedLiveTruck = toPublicRestaurantProfile({
-  row: {
-    id: "truck-live",
-    name: "Live Truck",
-    isFoodTruck: true,
-    mobileOnline: true,
-    currentLatitude: "30.4213",
-    currentLongitude: "-87.2169",
-    lastBroadcastAt: new Date(),
-  },
+  // Model the canonical reader's row after it matches persisted GPS history.
+  row: { ...freshPublicTruckRow, liveLocationSource: "gps", gpsAccuracy: "12.25" },
   baseUrl: "https://www.mealscout.us",
   profileType: "truck",
 });
 assert.equal(serializedLiveTruck.truckPresence?.broadcastState, "live");
 assert.equal(serializedLiveTruck.truckPresence?.location?.source, "owner_gps");
+assert.equal(serializedLiveTruck.truckPresence?.location?.accuracyMeters, 12.25);
 assert.match(
   serializedLiveTruck.cta.find((action) => action.type === "map")?.href || "",
   /30\.4213,-87\.2169/,
 );
 
+for (const provenanceCase of [
+  { label: "legacy row without provenance", evidence: {} },
+  {
+    label: "explicit unknown provenance",
+    evidence: { liveLocationSource: "unknown", gpsAccuracy: null },
+  },
+  {
+    label: "canonical unknown overrides an unverified legacy GPS label",
+    evidence: {
+      liveLocationSource: "unknown",
+      locationSource: "owner_gps",
+      gpsAccuracy: null,
+    },
+  },
+]) {
+  const profile = toPublicRestaurantProfile({
+    row: { ...freshPublicTruckRow, ...provenanceCase.evidence },
+    baseUrl: "https://www.mealscout.us",
+    profileType: "truck",
+  });
+  assert.equal(profile.truckPresence?.broadcastState, "live");
+  assert.equal(
+    profile.truckPresence?.location?.source,
+    "unknown",
+    `${provenanceCase.label} must not invent owner GPS evidence`,
+  );
+  assert.equal(
+    profile.truckPresence?.location?.accuracyMeters,
+    null,
+    `${provenanceCase.label} must not invent missing accuracy`,
+  );
+}
+
+for (const savedSource of ["manual", "gps"] as const) {
+  // A confirmed saved-only pin is not an active live broadcast, even if GPS
+  // supplied that pin. Its approved operating-location directions remain useful.
+  const profile = toPublicRestaurantProfile({
+    row: {
+      id: `truck-saved-${savedSource}`,
+      name: "Saved-only Truck",
+      isFoodTruck: true,
+      mobileOnline: false,
+      currentLatitude: null,
+      currentLongitude: null,
+      lastBroadcastAt: null,
+      liveLocationSource: "unknown",
+      gpsAccuracy: null,
+      latitude: "30.40700000",
+      longitude: "-87.21500000",
+      address: "222 W Main St, Pensacola, FL 32502",
+      city: "Pensacola",
+      state: "FL",
+      rawData: {
+        profileLocations: {
+          addressKind: "operating_location",
+          customerFacingLocationSource: "owner_confirmed_operating_location",
+          operatingLocationSource: "owner_confirmed_operating_location",
+          savedLocationSource: savedSource,
+          savedLocationAccuracy: savedSource === "gps" ? 12.25 : null,
+        },
+      },
+    },
+    baseUrl: "https://www.mealscout.us",
+    profileType: "truck",
+  });
+  assert.equal(profile.truckPresence?.broadcastState, "offline");
+  assert.equal(profile.truckPresence?.location, null);
+  assert.equal(profile.latitude, 30.407);
+  assert.equal(profile.longitude, -87.215);
+  assert.match(
+    profile.cta.find((action) => action.type === "map")?.href || "",
+    /30\.407,-87\.215/,
+  );
+}
+
 const serializedStaleTruck = toPublicRestaurantProfile({
   row: {
+    ...freshPublicTruckRow,
     id: "truck-stale",
     name: "Stale Truck",
-    isFoodTruck: true,
-    mobileOnline: true,
-    currentLatitude: "30.4213",
-    currentLongitude: "-87.2169",
+    liveLocationSource: "gps",
+    gpsAccuracy: "12.25",
     lastBroadcastAt: "2020-01-01T00:00:00.000Z",
   },
   baseUrl: "https://www.mealscout.us",
