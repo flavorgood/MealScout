@@ -57,19 +57,22 @@ let failRead=false,failSave=false;
 const storage={getUser:owner,getRestaurant:async(id:string)=>{if(failRead)throw Error('isolated failure');return(await db.select().from(schema.restaurants).where(eq(schema.restaurants.id,id)))[0]},getHost:async(id:string)=>(await db.select().from(schema.hosts).where(eq(schema.hosts.id,id)))[0],getDealsByRestaurant:async(id:string)=>db.select().from(schema.deals).where(eq(schema.deals.restaurantId,id)),verifyRestaurantOwnership:async(id:string,userId:string)=>rows.get('truck').id===id&&userId===ownerId};
 (globalThis as any).__profileFixture={db,storage};
 const bundle=path.resolve('.tmp-tests/profile-native.cjs');
-await build({absWorkingDir:root,stdin:{contents:`export {registerPublicProfilePrerenderRoutes} from './server/seo/publicProfilePrerender'; export {registerPublicDiscoveryRoutes} from './server/routes/publicDiscoveryRoutes'; export {registerRestaurantOperationsRoutes} from './server/routes/restaurantOperationsRoutes'; export {registerSupplierMarketplaceRoutes} from './server/routes/supplierMarketplaceRoutes'; export {registerMenuRoutes} from './server/routes/menuRoutes';`,resolveDir:root,loader:'ts'},outfile:bundle,bundle:true,platform:'node',format:'cjs',packages:'external',tsconfig:root+'/tsconfig.json',plugins:[{name:'isolated-boundaries',setup(b){
+await build({absWorkingDir:root,stdin:{contents:`export {registerPublicProfilePrerenderRoutes} from './server/seo/publicProfilePrerender'; export {registerPublicDiscoveryRoutes} from './server/routes/publicDiscoveryRoutes'; export {registerRestaurantOperationsRoutes} from './server/routes/restaurantOperationsRoutes'; export {registerSupplierMarketplaceRoutes} from './server/routes/supplierMarketplaceRoutes'; export {registerMenuRoutes} from './server/routes/menuRoutes'; export {registerBookingRoutes} from './server/routes/bookingRoutes'; export {DatabaseStorage} from './server/storage.ts';`,resolveDir:root,loader:'ts'},outfile:bundle,bundle:true,platform:'node',format:'cjs',packages:'external',tsconfig:root+'/tsconfig.json',plugins:[{name:'isolated-boundaries',setup(b){
   b.onResolve({filter:/.*/},a=>{const p=path.resolve(a.resolveDir,a.path);if(p===root+'/server/db')return{path:'db',namespace:'fixture'};if(p===root+'/server/unifiedAuth')return{path:'auth',namespace:'fixture'};if(p===root+'/server/storage')return{path:'storage',namespace:'fixture'};});
   b.onLoad({filter:/.*/,namespace:'fixture'},a=>({loader:'js',contents:a.path==='db'?`export const db=globalThis.__profileFixture.db; export const pool=undefined;`:a.path==='storage'?`export const storage=globalThis.__profileFixture.storage;`:`export const isAuthenticated=(req,res,next)=>req.user?next():res.status(401).json({message:'Sign in required'}); export const isAdmin=isAuthenticated; export const isStaffOrAdmin=isAuthenticated; export const isRestaurantOwner=isAuthenticated; export const isAdminOrSuperAdmin=isAuthenticated; export const requireSuperAdmin=isAuthenticated;`}));
 }}]});
 const native=createRequire(import.meta.url)(bundle);
+await pg.exec('alter table truck_manual_schedules alter column id set default gen_random_uuid(); alter table telemetry_events alter column id set default gen_random_uuid()');
+(storage as any).getTruckManualSchedules=native.DatabaseStorage.prototype.getTruckManualSchedules;
+(storage as any).createTruckManualSchedule=native.DatabaseStorage.prototype.createTruckManualSchedule;
 const app=express();app.use(express.json());
 let signedIn=false;
-app.use(async(req:any,res,next)=>{req.isAuthenticated=()=>signedIn; if(signedIn)req.user=await owner();if(req.method!=='GET'&&req.method!=='HEAD'&&!req.path.endsWith('/profile-basics'))return res.status(405).json({message:'Fixture blocks unrelated writes'}); if(failSave&&req.method==='PATCH')return res.status(503).json({message:'Temporary save failure'});next();});
+app.use(async(req:any,res,next)=>{req.isAuthenticated=()=>signedIn; if(signedIn)req.user=await owner();if(req.method!=='GET'&&req.method!=='HEAD'&&!req.path.endsWith('/profile-basics')&&!req.path.endsWith('/manual-schedule'))return res.status(405).json({message:'Fixture blocks unrelated writes'}); if(failSave&&req.method==='PATCH')return res.status(503).json({message:'Temporary save failure'});next();});
 app.get('/api/auth/user',async(_req,res)=>signedIn?res.json(await owner()):res.status(401).json({message:'Logged out'}));
 app.get('/api/restaurants/my-restaurants',async(_req,res)=>res.json(await db.select().from(schema.restaurants).where(eq(schema.restaurants.ownerId,ownerId))));
 app.get('/api/business-access/me',(_req,res)=>res.json({hasAnyAccess:true,permissions:{manageProfile:true,manageParkingPass:true,manageDeals:true},restaurants:[...rows.values()].filter(r=>!['location','supplier'].includes(r.businessType)).map(r=>({id:r.id,isOwner:true,permissions:{manageProfile:true,manageParkingPass:true,manageDeals:true}}))}));
 native.registerPublicDiscoveryRoutes(app);
-native.registerSupplierMarketplaceRoutes(app);native.registerMenuRoutes(app);
+native.registerSupplierMarketplaceRoutes(app);native.registerMenuRoutes(app);native.registerBookingRoutes(app,{hasCompleteProfileAccess:async()=>true});
 native.registerRestaurantOperationsRoutes(app,{validateProfileAnalyticsAccess:async()=>({hasAccess:true}),hasCompleteProfileAccess:async()=>true});
 app.use('/api',(_req,res)=>res.json({}));
 native.registerPublicProfilePrerenderRoutes(app,'https://www.mealscout.us');
@@ -87,7 +90,7 @@ try{
   browser=await chromium.launch({headless:true,executablePath:process.env.PROFILE_CHROMIUM_PATH||'/usr/bin/chromium',args:['--no-sandbox']});
   for(const viewport of [{width:1365,height:900},{width:390,height:844}]){
     const context=await browser.newContext({viewport,serviceWorkers:'block'});let blocked=0;
-    await context.route('**/*',async route=>{const u=new URL(route.request().url());if(u.origin!==base){blocked++;return route.abort();}if(!['GET','HEAD','OPTIONS'].includes(route.request().method())&&!u.pathname.endsWith('/profile-basics'))return route.fulfill({status:204});return route.continue();});
+    await context.route('**/*',async route=>{const u=new URL(route.request().url());if(u.origin!==base){blocked++;return route.abort();}if(!['GET','HEAD','OPTIONS'].includes(route.request().method())&&!u.pathname.endsWith('/profile-basics')&&!u.pathname.endsWith('/manual-schedule'))return route.fulfill({status:204});return route.continue();});
     const page=await context.newPage();page.setDefaultTimeout(30000);
     for(const kind of kinds){const row=rows.get(kind);if(!row.dto)continue;
       await page.goto(base+row.dto.profilePath+'?view=app',{waitUntil:'networkidle'});
@@ -98,6 +101,7 @@ try{
       check(kind+' no horizontal overflow '+viewport.width,await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));
       const filename=`${kind}-${viewport.width}.png`;await page.screenshot({path:path.join(output,filename),fullPage:true});report.screens.push(filename);
       if(kind==='supplier'&&viewport.width>700)check('supplier desktop actions',await page.locator('main a[href="https://harbor.example.invalid"]').first().isVisible());
+      if(kind==='location')check('unknown host activity is not zero',!(await page.locator('#menu').innerText()).includes('No trucks listed right now'));
       if(kind==='truck'){check('truck schedule anchor',await page.locator('#truck-schedule').count()===1);check('scheduled stop is not a live broadcast',!(await page.locator('[data-public-profile-decision-bar]').innerText()).toLowerCase().includes('live now'));}
       const canonical=await page.locator('link[rel="canonical"]').getAttribute('href');check(kind+' canonical origin '+viewport.width,canonical===row.dto.seo.canonicalUrl,canonical);
     }
@@ -146,7 +150,7 @@ try{
   const save=await patch({isActive:true,description:'Owner saved coastal description'});check('already-public unverified owner can save',save.status===200,{status:save.status,body:await save.json()});
   check('owner text persists in public API',(await (await fetch(`${base}/api/public/profiles/truck/${truck.id}`)).json()).description==='Owner saved coastal description');
   const ownerContext=await browser.newContext({viewport:{width:390,height:844},serviceWorkers:'block'});
-  await ownerContext.route('**/*',route=>{const u=new URL(route.request().url());if(u.origin!==base)return route.abort();if(!['GET','HEAD','OPTIONS'].includes(route.request().method())&&!u.pathname.endsWith('/profile-basics'))return route.fulfill({status:204});return route.continue();});
+  await ownerContext.route('**/*',route=>{const u=new URL(route.request().url());if(u.origin!==base)return route.abort();if(!['GET','HEAD','OPTIONS'].includes(route.request().method())&&!u.pathname.endsWith('/profile-basics')&&!u.pathname.endsWith('/manual-schedule'))return route.fulfill({status:204});return route.continue();});
   const editor=await ownerContext.newPage();editor.setDefaultTimeout(30000);
   await editor.addInitScript(()=>{navigator.geolocation.getCurrentPosition=()=>{throw Error('Owner device coordinates must not be used');};});
   await editor.goto(base+`/restaurant-owner-dashboard?setup=profile&restaurantId=${truck.id}`,{waitUntil:'networkidle'});
@@ -160,12 +164,28 @@ try{
   failSave=false;await editor.getByTestId('button-save-profile').click();
   await editor.getByText('Business Profile Updated',{exact:true}).waitFor();
   const manual=editor.getByRole('link',{name:'Add a dated stop manually',exact:true});
-  check('manual fallback preserves selected business',(await manual.getAttribute('href'))===`/restaurant-owner-dashboard?setup=schedule&restaurantId=${truck.id}`);
+  check('manual fallback preserves selected business',(await manual.getAttribute('href'))===`/parking-pass?setup=schedule&truckId=${truck.id}`);
   await editor.screenshot({path:path.join(output,'owner-editor-390.png'),fullPage:true});
   await editor.reload({waitUntil:'networkidle'});await editor.getByRole('heading',{name:'What customers see',exact:true}).waitFor();
   check('owner save survives reload',await about.inputValue()==='Owner edited from mobile profile');
   check('owner AI remains optional',await editor.getByTestId('owner-profile-workspace').isVisible());
+  await editor.getByRole('link',{name:'Add a dated stop manually',exact:true}).click();
+  await editor.locator('#schedule-location').waitFor();
+  check('manual fallback opens native dated-stop editor',new URL(editor.url()).pathname==='/parking-pass'&&await editor.locator('#schedule-location').isEnabled());
+  const manualDate=new Date(today.getTime()+2*86400000).toISOString().slice(0,10);
+  await editor.locator('#schedule-date').fill(manualDate);await editor.locator('#schedule-start').fill('12:00');await editor.locator('#schedule-end').fill('14:00');
+  await editor.locator('#schedule-location').fill('Mobile manual venue');await editor.locator('#schedule-address').fill('303 Public Plaza');await editor.locator('#schedule-city').fill('Pensacola');await editor.locator('#schedule-state').fill('FL');
+  const [manualSaved]=await Promise.all([editor.waitForResponse(r=>r.url().endsWith('/manual-schedule')&&r.request().method()==='POST'),editor.getByRole('button',{name:'Add stop',exact:true}).click()]);
+  check('manual fallback saves through native API',manualSaved.status()===200,await manualSaved.text());
+  const publicAfterManual:any=await(await fetch(`${base}/api/public/profiles/truck/${truck.id}`)).json();
+  check('manual public stop appears without owner GPS',JSON.stringify(publicAfterManual.truckSchedule).includes('Mobile manual venue'));
+  await editor.screenshot({path:path.join(output,'manual-fallback-390.png'),fullPage:true});
   await ownerContext.close();
+  const desktopOwner=await browser.newContext({viewport:{width:1365,height:900},serviceWorkers:'block'});
+  await desktopOwner.route('**/*',route=>{const u=new URL(route.request().url());return u.origin===base&&['GET','HEAD','OPTIONS'].includes(route.request().method())?route.continue():route.fulfill({status:204});});
+  const desktopEditor=await desktopOwner.newPage();desktopEditor.setDefaultTimeout(30000);await desktopEditor.goto(base+`/restaurant-owner-dashboard?setup=profile&restaurantId=${truck.id}`,{waitUntil:'networkidle'});await desktopEditor.getByRole('heading',{name:'What customers see',exact:true}).waitFor();
+  check('desktop owner sees saved mobile edits',await desktopEditor.getByLabel(/^About your business/).inputValue()==='Owner edited from mobile profile');
+  await desktopEditor.screenshot({path:path.join(output,'owner-editor-1365.png'),fullPage:true});await desktopOwner.close();
   await db.update(schema.restaurants).set({isActive:false}).where(eq(schema.restaurants.id,truck.id));
   check('unpublished API stays private',(await fetch(`${base}/api/public/profiles/truck/${truck.id}`)).status===404);
   check('unpublished HTML stays private',(await fetch(base+truck.dto.profilePath+'?view=app')).status===404);

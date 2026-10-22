@@ -180,8 +180,10 @@ export default function OwnerProfileWorkspace({
   const location = [draft.city, draft.state].filter(Boolean).join(", ");
   // Keep the same selected business as the existing manual photos continuation.
   const scheduleUrl = new URL(photosHref, "https://www.mealscout.us");
-  scheduleUrl.searchParams.set("setup", "schedule");
-  const scheduleHref = `${scheduleUrl.pathname}${scheduleUrl.search}`;
+  const selectedBusinessId = scheduleUrl.searchParams.get("restaurantId");
+  const scheduleHref = selectedBusinessId
+    ? `/parking-pass?setup=schedule&truckId=${encodeURIComponent(selectedBusinessId)}`
+    : "/restaurant-owner-dashboard?setup=schedule";
   const customerPhotos = gallery.filter((media) => {
     const category = String(media.category || "").toLowerCase();
     const source = String(media.source || "").toLowerCase();

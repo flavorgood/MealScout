@@ -630,6 +630,8 @@ function LocationNowSection({ profile }: { profile: PublicLocationProfile }) {
   const now = Number(profile.foodTrucksNow || 0);
   const tonight = Number(profile.foodTrucksTonight || 0);
   const upcoming = Number(profile.upcomingFoodTruckSlots || 0);
+  const hasReportedCounts = [profile.foodTrucksNow, profile.foodTrucksTonight, profile.upcomingFoodTruckSlots]
+    .some((value) => typeof value === "number" && Number.isFinite(value));
   const hasAny = now > 0 || tonight > 0 || upcoming > 0;
 
   return (
@@ -665,7 +667,8 @@ function LocationNowSection({ profile }: { profile: PublicLocationProfile }) {
           </div>
         ) : (
           <div className="rounded-lg border border-white/10 bg-black/20 p-4 text-sm text-white/75">
-            No trucks listed right now. Check back soon.
+            {hasReportedCounts ? "No trucks listed right now. Check back soon."
+              : "See posted truck schedules below. Confirm service details with the truck before traveling."}
           </div>
         )}
       </CardContent>
