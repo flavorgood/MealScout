@@ -152,6 +152,7 @@ import { createPaymentsSubscriptionsRepository } from "./storage/paymentsSubscri
 import { createAnalyticsRepository } from "./storage/analyticsRepository";
 import { createParkingPassRepository } from "./storage/parkingPassRepository";
 import { claimDealWithReceipt, getUserDealClaimReceipts, type DealClaimResult } from "./services/dealClaimLifecycle";
+import { getLocatedActiveDealCandidates, type LocatedDealScope } from "./services/locatedDealCandidates";
 
 // Interface for storage operations
 export interface IStorage {
@@ -341,7 +342,7 @@ export interface IStorage {
   createDeal(deal: InsertDeal): Promise<Deal>;
   getDeal(id: string): Promise<Deal | undefined>;
   getDealsByRestaurant(restaurantId: string): Promise<Deal[]>;
-  getActiveDeals(): Promise<Deal[]>;
+  getActiveDeals(scope?: LocatedDealScope): Promise<Deal[]>;
   getFilteredDeals(showLimitedTimeOnly?: boolean): Promise<Deal[]>;
   getNearbyDeals(lat: number, lng: number, radiusKm: number): Promise<Deal[]>;
   searchDeals(filters: {
@@ -2123,7 +2124,10 @@ export class DatabaseStorage implements IStorage {
     return this.restaurantsDealsRepository.getAllDeals();
   }
 
-  async getActiveDeals(): Promise<Deal[]> {
+  async getActiveDeals(scope?: LocatedDealScope): Promise<Deal[]> {
+    if (scope) {
+      return this.filterDealsByOperatingHours(await getLocatedActiveDealCandidates(db, scope));
+    }
     const now = new Date();
     const currentTime = now.toTimeString().slice(0, 5); // "HH:MM"
 

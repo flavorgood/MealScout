@@ -65,7 +65,7 @@ export async function projectPublicDealRows(
   const hasLocation =
     Number.isFinite(options.userLat) && Number.isFinite(options.userLng);
   const radiusKm = Number.isFinite(options.radiusKm)
-    ? Math.max(1, Math.min(100, Number(options.radiusKm)))
+    ? Number(options.radiusKm)
     : null;
 
   const projected: any[] = [];
