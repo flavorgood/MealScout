@@ -64,6 +64,7 @@ await build({absWorkingDir:root,stdin:{contents:`export {registerPublicProfilePr
 const native=createRequire(import.meta.url)(bundle);
 await pg.exec('alter table truck_manual_schedules alter column id set default gen_random_uuid(); alter table telemetry_events alter column id set default gen_random_uuid()');
 (storage as any).getTruckManualSchedules=native.DatabaseStorage.prototype.getTruckManualSchedules;
+(storage as any).getTruckParkingReports=native.DatabaseStorage.prototype.getTruckParkingReports;
 (storage as any).createTruckManualSchedule=native.DatabaseStorage.prototype.createTruckManualSchedule;
 const app=express();app.use(express.json());
 let signedIn=false;
