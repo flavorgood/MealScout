@@ -44,6 +44,7 @@ export function toPublicSupplierProfile(input: {
 
   const cta = [
     buildPublicCta({ label: "View supplier", href: canonicalPath, type: "internal" }),
+    buildPublicCta({ label: "Browse catalog", href: `/suppliers/${encodeURIComponent(id)}?view=app`, type: "internal" }),
     buildPublicCta({ label: "Website", href: websiteUrl, type: "external" }),
     buildPublicCta({ label: "Get directions", href: buildPublicDirectionsUrl({
       latitude: publicLatitude, longitude: publicLongitude,

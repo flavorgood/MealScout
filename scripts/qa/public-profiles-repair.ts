@@ -57,7 +57,7 @@ let failRead=false,failSave=false;
 const storage={getUser:owner,getRestaurant:async(id:string)=>{if(failRead)throw Error('isolated failure');return(await db.select().from(schema.restaurants).where(eq(schema.restaurants.id,id)))[0]},getHost:async(id:string)=>(await db.select().from(schema.hosts).where(eq(schema.hosts.id,id)))[0],getDealsByRestaurant:async(id:string)=>db.select().from(schema.deals).where(eq(schema.deals.restaurantId,id)),verifyRestaurantOwnership:async(id:string,userId:string)=>rows.get('truck').id===id&&userId===ownerId};
 (globalThis as any).__profileFixture={db,storage};
 const bundle=path.resolve('.tmp-tests/profile-native.cjs');
-await build({absWorkingDir:root,stdin:{contents:`export {registerPublicProfilePrerenderRoutes} from './server/seo/publicProfilePrerender'; export {registerPublicDiscoveryRoutes} from './server/routes/publicDiscoveryRoutes'; export {registerRestaurantOperationsRoutes} from './server/routes/restaurantOperationsRoutes';`,resolveDir:root,loader:'ts'},outfile:bundle,bundle:true,platform:'node',format:'cjs',packages:'external',tsconfig:root+'/tsconfig.json',plugins:[{name:'isolated-boundaries',setup(b){
+await build({absWorkingDir:root,stdin:{contents:`export {registerPublicProfilePrerenderRoutes} from './server/seo/publicProfilePrerender'; export {registerPublicDiscoveryRoutes} from './server/routes/publicDiscoveryRoutes'; export {registerRestaurantOperationsRoutes} from './server/routes/restaurantOperationsRoutes'; export {registerSupplierMarketplaceRoutes} from './server/routes/supplierMarketplaceRoutes'; export {registerMenuRoutes} from './server/routes/menuRoutes';`,resolveDir:root,loader:'ts'},outfile:bundle,bundle:true,platform:'node',format:'cjs',packages:'external',tsconfig:root+'/tsconfig.json',plugins:[{name:'isolated-boundaries',setup(b){
   b.onResolve({filter:/.*/},a=>{const p=path.resolve(a.resolveDir,a.path);if(p===root+'/server/db')return{path:'db',namespace:'fixture'};if(p===root+'/server/unifiedAuth')return{path:'auth',namespace:'fixture'};if(p===root+'/server/storage')return{path:'storage',namespace:'fixture'};});
   b.onLoad({filter:/.*/,namespace:'fixture'},a=>({loader:'js',contents:a.path==='db'?`export const db=globalThis.__profileFixture.db; export const pool=undefined;`:a.path==='storage'?`export const storage=globalThis.__profileFixture.storage;`:`export const isAuthenticated=(req,res,next)=>req.user?next():res.status(401).json({message:'Sign in required'}); export const isAdmin=isAuthenticated; export const isStaffOrAdmin=isAuthenticated; export const isRestaurantOwner=isAuthenticated; export const isAdminOrSuperAdmin=isAuthenticated; export const requireSuperAdmin=isAuthenticated;`}));
 }}]});
@@ -69,6 +69,7 @@ app.get('/api/auth/user',async(_req,res)=>signedIn?res.json(await owner()):res.s
 app.get('/api/restaurants/my-restaurants',async(_req,res)=>res.json(await db.select().from(schema.restaurants).where(eq(schema.restaurants.ownerId,ownerId))));
 app.get('/api/business-access/me',(_req,res)=>res.json({hasAnyAccess:true,permissions:{manageProfile:true,manageParkingPass:true,manageDeals:true},restaurants:[...rows.values()].filter(r=>!['location','supplier'].includes(r.businessType)).map(r=>({id:r.id,isOwner:true,permissions:{manageProfile:true,manageParkingPass:true,manageDeals:true}}))}));
 native.registerPublicDiscoveryRoutes(app);
+native.registerSupplierMarketplaceRoutes(app);native.registerMenuRoutes(app);
 native.registerRestaurantOperationsRoutes(app,{validateProfileAnalyticsAccess:async()=>({hasAccess:true}),hasCompleteProfileAccess:async()=>true});
 app.use('/api',(_req,res)=>res.json({}));
 native.registerPublicProfilePrerenderRoutes(app,'https://www.mealscout.us');
@@ -103,6 +104,15 @@ try{
     report.checks.push({label:'browser external requests blocked '+viewport.width,ok:true,detail:blocked});await context.close();
   }
   const truck=rows.get('truck');
+  const catalogContext=await browser.newContext({viewport:{width:390,height:844},serviceWorkers:'block'});
+  await catalogContext.route('**/*',route=>{const u=new URL(route.request().url());return u.origin===base&&['GET','HEAD','OPTIONS'].includes(route.request().method())?route.continue():route.abort();});
+  const catalog=await catalogContext.newPage();catalog.setDefaultTimeout(30000);
+  const supplier=rows.get('supplier');await catalog.goto(base+supplier.dto.profilePath+'?view=app',{waitUntil:'networkidle'});
+  const catalogLink=catalog.locator('[data-mobile-action-dock] a').filter({hasText:'Browse'}).first();
+  check('supplier mobile catalog action visible',await catalogLink.isVisible());
+  await catalogLink.click();await catalog.getByText('You can browse products without an account.',{exact:false}).waitFor();
+  check('supplier catalog opens without login',new URL(catalog.url()).pathname===`/suppliers/${supplier.id}`);
+  await catalog.screenshot({path:path.join(output,'supplier-catalog-390.png'),fullPage:true});await catalogContext.close();
   const metadataBefore=truck.dto.seo;
   await db.insert(schema.restaurantSubscriptions).values({id:'synthetic-paid',restaurantId:truck.id,tier:'yearly',status:'active',priceCents:0});
   check('free and paid public metadata parity',JSON.stringify((await (await fetch(`${base}/api/public/profiles/truck/${truck.id}`)).json()).seo)===JSON.stringify(metadataBefore));

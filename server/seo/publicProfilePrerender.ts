@@ -1330,6 +1330,7 @@ async function supplierPage(baseUrl: string, supplierId: string) {
     schema: [profilePageSchema, supplierSchema, breadcrumbSchema],
     links: [
       { label: "Open profile", href: `${canonicalPath}?view=app` },
+      { label: "Browse catalog", href: `/suppliers/${encodeURIComponent(row.id)}?view=app` },
       { label: "Browse suppliers", href: "/suppliers" },
       ...(canonicalCity
         ? [{
@@ -1479,7 +1480,8 @@ export function registerPublicProfilePrerenderRoutes(
     if (!page.appProfile || page.appProfile.id !== id || page.appProfile.profileType !== expectedType || !match || match[1] !== routeKind) return false;
     let slug: string;
     try { slug = decodeURIComponent(match[2]); } catch { return false; }
-    return slug.includes("--") && extractId(slug) === id && req.path === page.canonicalPath;
+    const isSupplierCatalog = expectedType === "supplier" && req.path === `/suppliers/${encodeURIComponent(id)}`;
+    return slug.includes("--") && extractId(slug) === id && (req.path === page.canonicalPath || isSupplierCatalog);
   };
   const appViewUrl = (req: Request, canonicalPath: string) => {
     const attribution = legacyCityDealRedirectQuery(req);
@@ -1521,7 +1523,9 @@ export function registerPublicProfilePrerenderRoutes(
             const incoming = new URL(req.originalUrl || req.url, canonicalBaseUrl);
             const views = incoming.searchParams.getAll("view");
             if (views.length === 1 && views[0] === "app") {
-              const safeTarget = appViewUrl(req, expected.canonicalPath);
+              const appPath = expectedProfileType === "supplier" && req.path === `/suppliers/${encodeURIComponent(id)}`
+                ? req.path : expected.canonicalPath;
+              const safeTarget = appViewUrl(req, appPath);
               res.setHeader("Cache-Control", "no-store");
               if (incoming.pathname + incoming.search !== safeTarget) return res.redirect(308, safeTarget);
               const discovery = [`<${absoluteUrl(canonicalBaseUrl, expected.canonicalPath)}>; rel="canonical"`];

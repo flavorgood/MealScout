@@ -681,7 +681,7 @@ function QuickActionRow({
   safeCtas: PublicCta[];
 }) {
   const actions = pickActionCtas(profile, safeCtas, 16)
-    .filter((cta) => cta.type !== "share" && cta.type !== "internal")
+    .filter((cta) => cta.type !== "share")
     .slice(0, 7);
   if (actions.length === 0) return null;
   const headerLabel = actions.some(
