@@ -26,9 +26,24 @@ export function withinSearchRadius(row: any, location: SearchLocation, radiusKm:
   return 6371 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(Math.max(0, 1 - a))) <= radiusKm;
 }
 
+const renderedTextFields = [
+  "title", "name", "description", "cuisineType", "restaurantName", "restaurantCity",
+  "restaurantState", "businessName", "businessType", "address", "city", "state",
+  "hostBusinessName", "hostAddress", "hostCity", "hostState", "display_name",
+];
+
+function hasInvalidRenderedText(row: Record<string, unknown>): boolean {
+  if (renderedTextFields.some((field) => row[field] !== null && row[field] !== undefined && typeof row[field] !== "string")) return true;
+  if (row.restaurant !== null && row.restaurant !== undefined) {
+    if (typeof row.restaurant !== "object" || Array.isArray(row.restaurant)) return true;
+    return hasInvalidRenderedText(row.restaurant as Record<string, unknown>);
+  }
+  return false;
+}
+
 export function searchArray(value: unknown, requiredTextFields: string[] = []): any[] {
   if (!Array.isArray(value) || value.some((row) => !row || typeof row !== "object" || Array.isArray(row) ||
-    requiredTextFields.some((field) => typeof row[field] !== "string" || !row[field].trim()))) {
+    requiredTextFields.some((field) => typeof row[field] !== "string" || !row[field].trim()) || hasInvalidRenderedText(row))) {
     throw new Error("Search returned an invalid collection. Please retry.");
   }
   return value;
@@ -37,7 +52,7 @@ export function searchArray(value: unknown, requiredTextFields: string[] = []): 
 export function unifiedSearchResult(value: unknown): Record<string, any[]> {
   if (!value || typeof value !== "object") throw new Error("Search returned an invalid response. Please retry.");
   return Object.fromEntries(["restaurants", "deals", "parkingPassHosts", "videos", "events"].map(
-    (bucket) => [bucket, searchArray((value as Record<string, unknown>)[bucket], bucket === "parkingPassHosts" ? ["hostId", "businessName"] : bucket === "restaurants" ? ["id", "name"] : ["id"])],
+    (bucket) => [bucket, searchArray((value as Record<string, unknown>)[bucket], bucket === "parkingPassHosts" ? ["hostId", "businessName"] : bucket === "restaurants" ? ["id", "name"] : bucket === "deals" ? ["id", "title"] : ["id"])],
   ));
 }
 

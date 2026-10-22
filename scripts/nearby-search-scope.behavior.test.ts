@@ -34,6 +34,15 @@ test("empty collections remain valid while malformed source responses become err
   assert.throws(() => unifiedSearchResult({ ...empty, deals: {} }));
   assert.throws(() => searchArray([{ id: "", name: "broken" }], ["id", "name"]));
   assert.throws(() => unifiedSearchResult({ ...empty, restaurants: [{ id: "r", name: 42 }] }));
+  for (const deal of [
+    { id: "d", title: 42 },
+    { id: "d", title: "Tacos", description: {} },
+    { id: "d", title: "Tacos", restaurant: { name: [] } },
+    { id: "d", title: "Tacos", restaurant: { cuisineType: 42 } },
+  ]) assert.throws(() => unifiedSearchResult({ ...empty, deals: [deal] }));
+  assert.throws(() => searchArray([{ id: "r", name: "Tacos", cuisineType: {} }], ["id", "name"]));
+  assert.throws(() => searchArray([{ id: "m", name: "Tacos", restaurantId: "r", restaurantName: {} }], ["id", "name", "restaurantId"]));
+  assert.deepEqual(unifiedSearchResult({ ...empty, deals: [{ id: "d", title: "Tacos", description: null, restaurant: { name: "Fixture", cuisineType: null } }] }).deals.length, 1);
 });
 
 test("a failed or malformed GET is retryable and does not become an empty result", async () => {
