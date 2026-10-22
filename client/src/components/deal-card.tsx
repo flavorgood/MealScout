@@ -800,7 +800,7 @@ export default function DealCard({ deal, popularity = null }: DealCardProps) {
                 </div>
               )}
               {deal.distance !== undefined && (
-                <span>{deal.distance.toFixed(1)} mi</span>
+                <span>{deal.distance.toFixed(1)} km</span>
               )}
               {deal.minOrderAmount && (
                 <>

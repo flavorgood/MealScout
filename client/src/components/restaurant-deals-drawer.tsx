@@ -253,7 +253,7 @@ export default function RestaurantDealsDrawer({
                     <div className="flex items-center gap-1">
                       <MapPin className="w-3 h-3" />
                       <span>
-                        {deals[currentDealIndex].distance.toFixed(1)} mi
+                        {deals[currentDealIndex].distance.toFixed(1)} km
                       </span>
                     </div>
                   )}
