@@ -135,6 +135,7 @@ async function capture(page: Page, info: TestInfo) {
   writeFileSync(path.join(dir, `${stem}.json`), JSON.stringify({
     revision: process.env.SYNTHETIC_REVISION ?? "unspecified", url: page.url(),
     project: info.project.name, title: info.title, status: info.status,
+    syntheticOnly: true, renderedApp: await page.locator("#root > *").count(),
     fixture: fixtureByPage.get(page), bodyText: (await page.locator("body").innerText().catch(() => "")).slice(0, 16000),
   }, null, 2));
 }
