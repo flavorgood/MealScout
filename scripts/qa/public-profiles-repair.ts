@@ -96,17 +96,66 @@ try{
       const shell=page.locator('.mealscout-public-profile');check(kind+' native brand '+viewport.width,await shell.count()===1);
       check(kind+' no horizontal overflow '+viewport.width,await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));
       const filename=`${kind}-${viewport.width}.png`;await page.screenshot({path:path.join(output,filename),fullPage:true});report.screens.push(filename);
-      if(kind==='supplier'&&viewport.width>700)check('supplier desktop actions',await page.locator('main a[href="https://harbor.example.invalid"]').isVisible());
-      if(kind==='truck'){check('truck schedule anchor',await page.locator('#truck-schedule').count()===1);check('scheduled stop is not a live broadcast',!(await page.locator('[data-public-profile-decision-bar]').innerText()).includes('Live now'));}
+      if(kind==='supplier'&&viewport.width>700)check('supplier desktop actions',await page.locator('main a[href="https://harbor.example.invalid"]').first().isVisible());
+      if(kind==='truck'){check('truck schedule anchor',await page.locator('#truck-schedule').count()===1);check('scheduled stop is not a live broadcast',!(await page.locator('[data-public-profile-decision-bar]').innerText()).toLowerCase().includes('live now'));}
       const canonical=await page.locator('link[rel="canonical"]').getAttribute('href');check(kind+' canonical origin '+viewport.width,canonical===row.dto.seo.canonicalUrl,canonical);
     }
     report.checks.push({label:'browser external requests blocked '+viewport.width,ok:true,detail:blocked});await context.close();
   }
   const truck=rows.get('truck');
+  const metadataBefore=truck.dto.seo;
+  await db.insert(schema.restaurantSubscriptions).values({id:'synthetic-paid',restaurantId:truck.id,tier:'yearly',status:'active',priceCents:0});
+  check('free and paid public metadata parity',JSON.stringify((await (await fetch(`${base}/api/public/profiles/truck/${truck.id}`)).json()).seo)===JSON.stringify(metadataBefore));
+  await db.delete(schema.restaurantSubscriptions).where(eq(schema.restaurantSubscriptions.id,'synthetic-paid'));
+  const retryContext=await browser.newContext({viewport:{width:390,height:844},serviceWorkers:'block'});
+  await retryContext.route('**/*',route=>{const u=new URL(route.request().url());if(u.origin!==base)return route.abort();if(!['GET','HEAD','OPTIONS'].includes(route.request().method()))return route.fulfill({status:204});return route.continue();});
+  const retryPage=await retryContext.newPage();retryPage.setDefaultTimeout(30000);
+  await retryPage.goto(base+truck.dto.profilePath+'?view=app',{waitUntil:'networkidle'});
+  await retryPage.getByRole('link',{name:'Full schedule',exact:true}).click();
+  check('full schedule link reaches its target',new URL(retryPage.url()).hash==='#truck-schedule');
+  check('posted manual address supports directions',await retryPage.locator('#truck-schedule a[href*="maps.google.com"]').count()>=2);
+  check('menu item and photo render',await retryPage.locator('[data-public-menu-item]').count()>=1&&await retryPage.getByText('Coastal rice bowl',{exact:true}).first().isVisible());
+  failRead=true;await retryPage.reload({waitUntil:'domcontentloaded'});
+  await retryPage.getByRole('button',{name:'Retry profile',exact:true}).waitFor();
+  check('failed read clears public structured data',await retryPage.locator('script[data-page-schema]').count()===0);
+  check('failed read metadata is unavailable',await retryPage.title()==='Profile unavailable | MealScout');
+  failRead=false;await retryPage.getByRole('button',{name:'Retry profile',exact:true}).click();
+  await retryPage.getByRole('heading',{name:truck.dto.displayName,exact:true}).waitFor();
+  check('read retry restores public schema',await retryPage.locator('script[data-page-schema]').count()===1);
+  await retryPage.screenshot({path:path.join(output,'retry-recovered-390.png'),fullPage:true});
+  await retryContext.close();
+  await db.update(schema.users).set({publicProfileSettings:{showAddress:false,showContact:false}}).where(eq(schema.users.id,ownerId));
+  for(const kind of kinds){const row=rows.get(kind);const api=await fetch(`${base}/api/public/profiles/${kind}/${row.id}`);const text=await api.text();check(kind+' private fields redacted',api.status===200&&!text.includes('101 Public Market Street')&&!text.includes('+18505550199'));const html=await(await fetch(base+row.dto.profilePath)).text();check(kind+' private SSR fields redacted',!html.includes('101 Public Market Street')&&!html.includes('+18505550199'));}
+  await db.update(schema.users).set({publicProfileSettings:{showAddress:true,showContact:true}}).where(eq(schema.users.id,ownerId));
   const patch=async(body:any)=>fetch(`${base}/api/restaurants/${truck.id}/profile-basics`,{method:'PATCH',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
   check('logged-out editing rejected',(await patch({description:'Unauthorized'})).status===401);
   signedIn=true;
+  const foreign=await fetch(`${base}/api/restaurants/${rows.get('restaurant').id}/profile-basics`,{method:'PATCH',headers:{'content-type':'application/json'},body:JSON.stringify({description:'Cross-business edit'})});
+  check('foreign owner edit rejected',foreign.status===403);
+  failSave=true;check('save failure is retryable',(await patch({description:'Must not persist'})).status===503);failSave=false;
   const save=await patch({isActive:true,description:'Owner saved coastal description'});check('already-public unverified owner can save',save.status===200,{status:save.status,body:await save.json()});
+  check('owner text persists in public API',(await (await fetch(`${base}/api/public/profiles/truck/${truck.id}`)).json()).description==='Owner saved coastal description');
+  const ownerContext=await browser.newContext({viewport:{width:390,height:844},serviceWorkers:'block'});
+  await ownerContext.route('**/*',route=>{const u=new URL(route.request().url());if(u.origin!==base)return route.abort();if(!['GET','HEAD','OPTIONS'].includes(route.request().method())&&!u.pathname.endsWith('/profile-basics'))return route.fulfill({status:204});return route.continue();});
+  const editor=await ownerContext.newPage();editor.setDefaultTimeout(30000);
+  await editor.addInitScript(()=>{navigator.geolocation.getCurrentPosition=()=>{throw Error('Owner device coordinates must not be used');};});
+  await editor.goto(base+`/restaurant-owner-dashboard?setup=profile&restaurantId=${truck.id}`,{waitUntil:'networkidle'});
+  const dismiss=editor.getByRole('button',{name:/got it/i});if(await dismiss.isVisible())await dismiss.click();
+  await editor.getByRole('heading',{name:'What customers see',exact:true}).waitFor();
+  const about=editor.getByLabel(/^About your business/);
+  await about.fill('Owner edited from mobile profile');
+  failSave=true;await editor.getByTestId('button-save-profile').click();
+  await editor.getByText('Unable to save profile',{exact:true}).waitFor();
+  check('owner failed save retains draft',await about.inputValue()==='Owner edited from mobile profile');
+  failSave=false;await editor.getByTestId('button-save-profile').click();
+  await editor.getByText('Business Profile Updated',{exact:true}).waitFor();
+  const manual=editor.getByRole('link',{name:'Add a dated stop manually',exact:true});
+  check('manual fallback preserves selected business',(await manual.getAttribute('href'))===`/restaurant-owner-dashboard?setup=schedule&restaurantId=${truck.id}`);
+  await editor.screenshot({path:path.join(output,'owner-editor-390.png'),fullPage:true});
+  await editor.reload({waitUntil:'networkidle'});await editor.getByRole('heading',{name:'What customers see',exact:true}).waitFor();
+  check('owner save survives reload',await about.inputValue()==='Owner edited from mobile profile');
+  check('owner AI remains optional',await editor.getByTestId('owner-profile-workspace').isVisible());
+  await ownerContext.close();
   await db.update(schema.restaurants).set({isActive:false}).where(eq(schema.restaurants.id,truck.id));
   check('unpublished API stays private',(await fetch(`${base}/api/public/profiles/truck/${truck.id}`)).status===404);
   check('unpublished HTML stays private',(await fetch(base+truck.dto.profilePath+'?view=app')).status===404);

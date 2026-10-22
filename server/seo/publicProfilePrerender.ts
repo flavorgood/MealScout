@@ -1511,7 +1511,7 @@ export function registerPublicProfilePrerenderRoutes(
     async (req: Request, res: Response, next: NextFunction) => {
       try {
         const id = idFromRequest(req);
-        const expected = expectedProfileType === "location"
+        const expected: PrerenderPage | null = expectedProfileType === "location"
           ? await loadHostPage(canonicalBaseUrl, id)
           : expectedProfileType === "supplier"
             ? await loadSupplierPage(canonicalBaseUrl, id)
@@ -1721,7 +1721,7 @@ export function registerPublicProfilePrerenderRoutes(
       if (String(req.params.slug || "").trim().toLowerCase() === "dashboard") {
         return next();
       }
-      return supplierDetailGate(req, res);
+      return supplierDetailGate(req, res, next);
     },
   );
   app.get(

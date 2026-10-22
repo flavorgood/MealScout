@@ -3027,6 +3027,9 @@ export default function PublicProfilePage() {
         className="mealscout-public-profile flex min-h-screen items-center justify-center px-4"
         data-testid={unavailable ? "public-profile-unavailable" : "public-profile-not-found"}
       >
+        <SEOHead title="Profile unavailable | MealScout"
+          description="This profile is unavailable or could not be loaded. Return to Scout or retry the profile."
+          canonicalUrl={`https://www.mealscout.us${pathname}`} noIndex />
         <div className="profile-surface w-full max-w-lg rounded-[1.75rem] p-6 text-center sm:p-8">
           <p className="profile-section-label">MealScout</p>
           <h1 className="mt-2 text-3xl font-black tracking-tight text-[color:var(--profile-ink)]">
@@ -3109,6 +3112,23 @@ export default function PublicProfilePage() {
         canonicalUrl={canonicalUrl}
         ogType="profile"
         ogImage={ogImage}
+        schemaData={{
+          "@context": "https://schema.org",
+          "@type": "ProfilePage",
+          "@id": `${canonicalUrl}#webpage`,
+          name: data.displayName,
+          url: canonicalUrl,
+          mainEntity: {
+            "@type": data.profileType === "restaurant" ? "Restaurant"
+              : data.profileType === "bar" ? "BarOrPub" : "LocalBusiness",
+            "@id": `${canonicalUrl}#business`,
+            name: data.displayName,
+            url: canonicalUrl,
+            image: new URL(ogImage, canonicalUrl).toString(),
+            ...(data.addressPublicLabel ? { address: data.addressPublicLabel } : {}),
+            ...(phoneLine(data) ? { telephone: phoneLine(data) } : {}),
+          },
+        }}
       />
 
       <header className="sticky top-0 z-40 border-b border-[color:var(--profile-border)] bg-[#fffaf4]/92 backdrop-blur-xl">

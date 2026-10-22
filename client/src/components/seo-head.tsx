@@ -201,8 +201,9 @@ export function SEOHead({
 
     // Cleanup function
     return () => {
-      // Optional: Clean up when component unmounts
-      // Usually not needed for SPAs, but good practice
+      // Route changes and failed/private reads must not retain the previous
+      // public entity's structured data in the shared document head.
+      pageSchema?.remove();
     };
   }, [title, description, keywords, canonicalUrl, ogImage, ogType, schemaData, noIndex]);
 
