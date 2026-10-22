@@ -1,0 +1,117 @@
+import assert from 'node:assert/strict';
+import { mkdir, writeFile, readFile } from 'node:fs/promises';
+import { createRequire } from 'node:module';
+import path from 'node:path';
+import { build } from 'esbuild';
+import express from 'express';
+import { PGlite } from '@electric-sql/pglite';
+import { drizzle } from 'drizzle-orm/pglite';
+import { getTableConfig } from 'drizzle-orm/pg-core';
+import { eq } from 'drizzle-orm';
+import * as schema from '../../shared/schema';
+import { createServer } from 'vite';
+import { chromium } from '@playwright/test';
+
+// Native Express registrars, native projections, isolated relational data, actual App router.
+// Only authentication and storage/provider boundaries are fixture substitutes. Never uses a real DB.
+const root=process.cwd();
+const output=path.resolve(process.env.PROFILE_EVIDENCE_DIR || '../mealscout-profile-evidence/before');
+const strict=process.env.PROFILE_CANDIDATE==='1';
+await mkdir(output,{recursive:true}); await mkdir('.tmp-tests',{recursive:true});
+for(const key of Object.keys(process.env)) if(/DATABASE_URL|STRIPE|BREVO|ANTHROPIC|OPENAI|GOOGLE.*KEY|FACEBOOK.*SECRET/.test(key)) delete process.env[key];
+process.env.NODE_ENV='development'; process.env.EMAIL_NOTIFICATIONS_MODE='off';
+const pg=new PGlite();
+const seen=new Set<string>();
+for(const table of Object.values(schema)) {
+  let config; try{config=getTableConfig(table as any);}catch{continue;}
+  if(!config?.name || seen.has(config.name))continue;seen.add(config.name);
+  await pg.exec(`create table "${config.name}" (${config.columns.map(c=>`"${c.name}" ${(c as any).enumValues?.length?'text':c.getSQLType()}${c.primary?' primary key':''}`).join(',')})`);
+}
+const db=drizzle(pg,{schema});
+const ownerId='profile-owner';
+await db.insert(schema.users).values({id:ownerId,email:'profile-owner@example.invalid',isDisabled:false,emailVerified:true,userType:'food_truck',publicProfileSettings:{showAddress:true,showContact:true}});
+await db.insert(schema.cities).values({id:'profile-city',name:'Pensacola',state:'FL',slug:'pensacola-fl',isActive:true});
+const kinds=['restaurant','truck','bar','caterer','private_chef','location','supplier'] as const;
+const rows=new Map<string,any>();
+for(const [i,kind] of kinds.entries()) {
+  const id=`a0000000-0000-4000-8000-00000000000${i+1}`;
+  const row={id,ownerId,userId:ownerId,name:`Harbor ${kind.replace('_',' ')} Kitchen`,businessName:`Harbor ${kind} Kitchen`,businessType:kind==='truck'?'food_truck':kind,isFoodTruck:kind==='truck',isActive:true,isVerified:false,city:'Pensacola',state:'FL',address:'101 Public Market Street',latitude:null,longitude:null,cuisineType:'Coastal food',description:'Fresh coastal food and friendly service.',phone:'+18505550199',contactPhone:'+18505550199',websiteUrl:'https://harbor.example.invalid',logoUrl:'/fixture/photo.svg',coverImageUrl:'/fixture/photo.svg',updatedAt:new Date('2026-10-22T12:00:00Z'),rawData:{},socialAutopostSettings:{publicGalleryImages:[{id:'photo-a',url:'/fixture/photo.svg',publicApproved:true,category:'food'}]}};
+  rows.set(kind,row);
+  await db.insert(schema.publicBusinessSlugOwnerships).values({id:'slug-'+kind,slug:'harbor-'+kind.replace('_','-')+'-kitchen',entityType:kind,entityId:id,assignmentStatus:'assigned'});
+  if(kind==='location')await db.insert(schema.hosts).values(row);
+  else if(kind==='supplier') await db.insert(schema.suppliers).values(row);
+  else {
+    await db.insert(schema.restaurants).values(row);
+    const menuId=`b0000000-0000-4000-8000-00000000000${i+1}`;
+    await db.insert(schema.menus).values({id:menuId,restaurantId:id,name:'Lunch',isActive:true});
+    await db.insert(schema.menuItems).values({id:`c0000000-0000-4000-8000-00000000000${i+1}`,menuId,name:'Coastal rice bowl',description:'Rice, vegetables and coastal flavors.',restaurantId:id,priceCents:1200,price:'1200',isAvailable:true,category:'Bowls',imageUrl:'/fixture/photo.svg'});
+  }
+}
+const today=new Date();today.setUTCHours(0,0,0,0);
+for(const [i,name] of ['Public Market','Harbor Square'].entries()){
+  const date=new Date(today.getTime()+i*86400000);
+  await db.insert(schema.truckManualSchedules).values({id:'manual-'+i,truckId:rows.get('truck').id,date,startTime:'00:00',endTime:'23:59',timezone:'UTC',locationName:name,address:'202 Public Venue Street',city:'Pensacola',state:'FL',isPublic:true,status:'open',sourceType:'owner',sourceConfidence:'high',ownerSubmittedEquivalent:true,mapEligible:true,liveFeedEligible:true,lastConfirmedAt:new Date(),updatedAt:new Date(),expiresAt:new Date(today.getTime()+3*86400000)});
+}
+const owner=async()=> (await db.select().from(schema.users).where(eq(schema.users.id,ownerId)))[0];
+let failRead=false,failSave=false;
+const storage={getUser:owner,getRestaurant:async(id:string)=>{if(failRead)throw Error('isolated failure');return(await db.select().from(schema.restaurants).where(eq(schema.restaurants.id,id)))[0]},getHost:async(id:string)=>(await db.select().from(schema.hosts).where(eq(schema.hosts.id,id)))[0],getDealsByRestaurant:async(id:string)=>db.select().from(schema.deals).where(eq(schema.deals.restaurantId,id)),verifyRestaurantOwnership:async(id:string,userId:string)=>rows.get('truck').id===id&&userId===ownerId};
+(globalThis as any).__profileFixture={db,storage};
+const bundle=path.resolve('.tmp-tests/profile-native.cjs');
+await build({absWorkingDir:root,stdin:{contents:`export {registerPublicProfilePrerenderRoutes} from './server/seo/publicProfilePrerender'; export {registerPublicDiscoveryRoutes} from './server/routes/publicDiscoveryRoutes'; export {registerRestaurantOperationsRoutes} from './server/routes/restaurantOperationsRoutes';`,resolveDir:root,loader:'ts'},outfile:bundle,bundle:true,platform:'node',format:'cjs',packages:'external',tsconfig:root+'/tsconfig.json',plugins:[{name:'isolated-boundaries',setup(b){
+  b.onResolve({filter:/.*/},a=>{const p=path.resolve(a.resolveDir,a.path);if(p===root+'/server/db')return{path:'db',namespace:'fixture'};if(p===root+'/server/unifiedAuth')return{path:'auth',namespace:'fixture'};if(p===root+'/server/storage')return{path:'storage',namespace:'fixture'};});
+  b.onLoad({filter:/.*/,namespace:'fixture'},a=>({loader:'js',contents:a.path==='db'?`export const db=globalThis.__profileFixture.db; export const pool=undefined;`:a.path==='storage'?`export const storage=globalThis.__profileFixture.storage;`:`export const isAuthenticated=(req,res,next)=>req.user?next():res.status(401).json({message:'Sign in required'}); export const isAdmin=isAuthenticated; export const isStaffOrAdmin=isAuthenticated; export const isRestaurantOwner=isAuthenticated; export const isAdminOrSuperAdmin=isAuthenticated; export const requireSuperAdmin=isAuthenticated;`}));
+}}]});
+const native=createRequire(import.meta.url)(bundle);
+const app=express();app.use(express.json());
+let signedIn=false;
+app.use(async(req:any,res,next)=>{req.isAuthenticated=()=>signedIn; if(signedIn)req.user=await owner();if(req.method!=='GET'&&req.method!=='HEAD'&&!req.path.endsWith('/profile-basics'))return res.status(405).json({message:'Fixture blocks unrelated writes'}); if(failSave&&req.method==='PATCH')return res.status(503).json({message:'Temporary save failure'});next();});
+app.get('/api/auth/user',async(_req,res)=>signedIn?res.json(await owner()):res.status(401).json({message:'Logged out'}));
+app.get('/api/restaurants/my-restaurants',async(_req,res)=>res.json(await db.select().from(schema.restaurants).where(eq(schema.restaurants.ownerId,ownerId))));
+app.get('/api/business-access/me',(_req,res)=>res.json({hasAnyAccess:true,permissions:{manageProfile:true,manageParkingPass:true,manageDeals:true},restaurants:[...rows.values()].filter(r=>!['location','supplier'].includes(r.businessType)).map(r=>({id:r.id,isOwner:true,permissions:{manageProfile:true,manageParkingPass:true,manageDeals:true}}))}));
+native.registerPublicDiscoveryRoutes(app);
+native.registerRestaurantOperationsRoutes(app,{validateProfileAnalyticsAccess:async()=>({hasAccess:true}),hasCompleteProfileAccess:async()=>true});
+app.use('/api',(_req,res)=>res.json({}));
+native.registerPublicProfilePrerenderRoutes(app,'https://www.mealscout.us');
+app.get('/fixture/photo.svg',(_req,res)=>res.type('svg').send('<svg xmlns="http://www.w3.org/2000/svg" width="800" height="400"><rect width="800" height="400" fill="#ffb777"/><circle cx="400" cy="200" r="120" fill="#fff8ef"/><text x="290" y="210" font-size="24" fill="#7b321f">Synthetic food photo</text></svg>'));
+const vite=await createServer({configFile:path.resolve('vite.config.ts'),server:{middlewareMode:true,hmr:false},appType:'spa'});
+app.use(vite.middlewares);
+const server=app.listen(0,'127.0.0.1');await new Promise<void>(r=>server.once('listening',r));
+const base=`http://127.0.0.1:${(server.address() as any).port}`;
+const report:any={base,mode:strict?'candidate':'baseline',tables:seen.size,checks:[],defects:[],screens:[],scope:'Loopback synthetic PGlite, real profile API/SSR registrars and actual routed React. Synthetic owner auth/storage boundaries. No provider, production data or publication.'};
+function check(label:string,ok:boolean,detail?:unknown){report.checks.push({label,ok,detail});if(!ok){report.defects.push(label);if(strict)throw Error(label+': '+JSON.stringify(detail));}}
+let browser:any;
+try{
+  for(const kind of kinds){const row=rows.get(kind);const response=await fetch(`${base}/api/public/profiles/${kind}/${row.id}`);const dto:any=await response.json();check(kind+' logged-out API',response.status===200,{status:response.status,dto});if(response.status===200)row.dto=dto;
+    if(response.status===200){const htmlRes=await fetch(base+dto.profilePath);const html=await htmlRes.text();check(kind+' server HTML/canonical',htmlRes.status===200&&html.includes('rel="canonical"')&&html.includes(dto.displayName),htmlRes.status);await writeFile(path.join(output,kind+'-ssr.html'),html);if(kind==='location'||kind==='supplier')check(kind+' opens interactive profile',html.includes('?view=app'));}}
+  browser=await chromium.launch({headless:true,executablePath:process.env.PROFILE_CHROMIUM_PATH||'/usr/bin/chromium',args:['--no-sandbox']});
+  for(const viewport of [{width:1365,height:900},{width:390,height:844}]){
+    const context=await browser.newContext({viewport,serviceWorkers:'block'});let blocked=0;
+    await context.route('**/*',async route=>{const u=new URL(route.request().url());if(u.origin!==base){blocked++;return route.abort();}if(!['GET','HEAD','OPTIONS'].includes(route.request().method())&&!u.pathname.endsWith('/profile-basics'))return route.fulfill({status:204});return route.continue();});
+    const page=await context.newPage();page.setDefaultTimeout(30000);
+    for(const kind of kinds){const row=rows.get(kind);if(!row.dto)continue;
+      await page.goto(base+row.dto.profilePath+'?view=app',{waitUntil:'networkidle'});
+      // The baseline host/supplier response loops at SSR; also inspect their actual existing App route via Vite directly.
+      if((kind==='location'||kind==='supplier')&&!strict){await page.route(base+row.dto.profilePath+'?view=app',async route=>route.fulfill({contentType:'text/html',body:await vite.transformIndexHtml(row.dto.profilePath,await readFile('client/index.html','utf8'))}));await page.reload({waitUntil:'networkidle'});}
+      check(kind+' routed heading '+viewport.width,await page.getByRole('heading',{name:row.dto.displayName,exact:true}).isVisible());
+      const shell=page.locator('.mealscout-public-profile');check(kind+' native brand '+viewport.width,await shell.count()===1);
+      check(kind+' no horizontal overflow '+viewport.width,await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));
+      const filename=`${kind}-${viewport.width}.png`;await page.screenshot({path:path.join(output,filename),fullPage:true});report.screens.push(filename);
+      if(kind==='supplier'&&viewport.width>700)check('supplier desktop actions',await page.locator('main a[href="https://harbor.example.invalid"]').isVisible());
+      if(kind==='truck'){check('truck schedule anchor',await page.locator('#truck-schedule').count()===1);check('scheduled stop is not a live broadcast',!(await page.locator('[data-public-profile-decision-bar]').innerText()).includes('Live now'));}
+      const canonical=await page.locator('link[rel="canonical"]').getAttribute('href');check(kind+' canonical origin '+viewport.width,canonical===row.dto.seo.canonicalUrl,canonical);
+    }
+    report.checks.push({label:'browser external requests blocked '+viewport.width,ok:true,detail:blocked});await context.close();
+  }
+  const truck=rows.get('truck');
+  const patch=async(body:any)=>fetch(`${base}/api/restaurants/${truck.id}/profile-basics`,{method:'PATCH',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
+  check('logged-out editing rejected',(await patch({description:'Unauthorized'})).status===401);
+  signedIn=true;
+  const save=await patch({isActive:true,description:'Owner saved coastal description'});check('already-public unverified owner can save',save.status===200,{status:save.status,body:await save.json()});
+  await db.update(schema.restaurants).set({isActive:false}).where(eq(schema.restaurants.id,truck.id));
+  check('unpublished API stays private',(await fetch(`${base}/api/public/profiles/truck/${truck.id}`)).status===404);
+  check('unpublished HTML stays private',(await fetch(base+truck.dto.profilePath+'?view=app')).status===404);
+  check('unverified cannot publish',(await patch({isActive:true})).status!==200);
+}finally{await browser?.close();server.closeAllConnections();await new Promise<void>(r=>server.close(()=>r()));await vite.close();await pg.close();await writeFile(path.join(output,'receipt.json'),JSON.stringify(report,null,2));delete(globalThis as any).__profileFixture;}
+console.log(JSON.stringify({mode:report.mode,checks:report.checks.length,defects:report.defects,output}));
+
+process.exit(0);

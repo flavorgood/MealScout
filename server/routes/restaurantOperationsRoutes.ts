@@ -900,7 +900,9 @@ export function registerRestaurantOperationsRoutes(
         const updatedRestaurant = await withLockedRestaurantSettings(
           restaurantId,
           async (tx, lockedRestaurant) => {
-            if (parsed.isActive === true && lockedRestaurant.isVerified !== true) {
+            // Saving an already-public listing is not a new publication. Keep the
+            // claimed/verified gate on the hidden -> public transition only.
+            if (parsed.isActive === true && lockedRestaurant.isActive !== true && lockedRestaurant.isVerified !== true) {
               throw Object.assign(
                 new Error("Only a verified claimed profile can be published"),
                 { statusCode: 409 },
@@ -940,9 +942,11 @@ export function registerRestaurantOperationsRoutes(
           "Restaurant profile basics update failed",
           safePersistenceErrorContext(error),
         );
-        res.status(400).json({
-          message:
-            error instanceof z.ZodError
+        const publicationBlocked = asRecord(error).statusCode === 409;
+        res.status(publicationBlocked ? 409 : 400).json({
+          message: publicationBlocked
+            ? "Only a verified claimed profile can be published"
+            : error instanceof z.ZodError
               ? "Invalid business profile fields"
               : "Failed to update business profile",
         });

@@ -2,6 +2,8 @@ import type { PublicSupplierProfile } from "@shared/publicProfiles";
 import { toPublicProfileSeo } from "./toPublicProfileSeo";
 import {
   buildPublicCta,
+  buildPublicDirectionsUrl,
+  resolvePublicCoordinatePair,
   buildPublicProfilePath,
   joinedAddressLabel,
   normalizePublicUrl,
@@ -28,14 +30,10 @@ export function toPublicSupplierProfile(input: {
     input.showAddress === false
       ? null
       : joinedAddressLabel(row.address, row.city, row.state);
-  const publicLatitude =
-    input.showAddress !== false && Number.isFinite(Number(row.latitude))
-      ? Number(row.latitude)
-      : null;
-  const publicLongitude =
-    input.showAddress !== false && Number.isFinite(Number(row.longitude))
-      ? Number(row.longitude)
-      : null;
+  const coordinates = input.showAddress !== false
+    ? resolvePublicCoordinatePair(row.latitude, row.longitude) : null;
+  const publicLatitude = coordinates?.latitude ?? null;
+  const publicLongitude = coordinates?.longitude ?? null;
   const phonePublic =
     input.showContact === false ? null : String(row.contactPhone || "").trim() || null;
   const websiteUrl =
@@ -47,6 +45,10 @@ export function toPublicSupplierProfile(input: {
   const cta = [
     buildPublicCta({ label: "View supplier", href: canonicalPath, type: "internal" }),
     buildPublicCta({ label: "Website", href: websiteUrl, type: "external" }),
+    buildPublicCta({ label: "Get directions", href: buildPublicDirectionsUrl({
+      latitude: publicLatitude, longitude: publicLongitude,
+      addressPublicLabel: String(row.address || "").trim() ? addressPublicLabel : null,
+    }), type: "map" }),
     buildPublicCta({ label: "Call", href: phonePublic ? `tel:${phonePublic}` : null, type: "phone" }),
   ].filter(Boolean) as PublicSupplierProfile["cta"];
 
