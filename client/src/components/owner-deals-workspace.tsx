@@ -200,13 +200,13 @@ export default function OwnerDealsWorkspace({
     onSuccess: async () => {
       await refreshDeals();
       toast({
-        title: "Special deleted",
-        description: "The special and its claims have been removed.",
+        title: "Special removed from customers",
+        description: "Issued claim receipts are kept. Specials with receipts remain paused in your history.",
       });
     },
     onError: (mutationError: Error) => {
       toast({
-        title: "Unable to delete special",
+        title: "Unable to remove special",
         description: mutationError.message || "Please try again.",
         variant: "destructive",
       });
@@ -434,15 +434,15 @@ export default function OwnerDealsWorkspace({
                           ) : null}
                           <AlertDialog>
                             <AlertDialogTrigger asChild>
-                              <Button type="button" variant="ghost" size="icon" aria-label={`Delete ${deal.title}`}>
+                              <Button type="button" variant="ghost" size="icon" aria-label={`Remove ${deal.title}`}>
                                 <Trash2 className="h-4 w-4" aria-hidden="true" />
                               </Button>
                             </AlertDialogTrigger>
                             <AlertDialogContent>
                               <AlertDialogHeader>
-                                <AlertDialogTitle>Delete this special?</AlertDialogTitle>
+                                <AlertDialogTitle>Remove this special from customers?</AlertDialogTitle>
                                 <AlertDialogDescription>
-                                  “{deal.title}” and its existing claims will be permanently removed. This cannot be undone.
+                                  Customers will no longer see “{deal.title}”. Issued claim receipts are kept, so specials with receipts remain paused in your history. Specials without receipts are deleted.
                                 </AlertDialogDescription>
                               </AlertDialogHeader>
                               <AlertDialogFooter>
@@ -452,7 +452,7 @@ export default function OwnerDealsWorkspace({
                                   onClick={() => deleteMutation.mutate(deal.id)}
                                   className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
                                 >
-                                  {deletePending ? "Deleting…" : "Delete special"}
+                                  {deletePending ? "Removing…" : "Remove special"}
                                 </AlertDialogAction>
                               </AlertDialogFooter>
                             </AlertDialogContent>

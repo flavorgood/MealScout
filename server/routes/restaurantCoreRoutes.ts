@@ -28,6 +28,7 @@ import { recordFollowJourneyOutcome } from "../services/discoveryObservatory";
 import {
   toPublicRestaurantListingArrayWithVisibility,
   toPublicRestaurantListingWithVisibility,
+  toPublicRestaurantRelationshipArrayWithVisibility,
 } from "../publicProfiles/toPublicRestaurantListingWithVisibility";
 import { deriveProfileEvidenceQuarantineVisibility } from "../services/profileEvidenceQuarantine";
 import {
@@ -1159,22 +1160,7 @@ export function registerRestaurantCoreRoutes(
       try {
         const userId = req.user.id;
         const favorites = await storage.getUserRestaurantFavorites(userId);
-        // Saving is not consent to reveal an owner's private profile fields.
-        // Apply the same visibility and allowlist as public discovery before
-        // returning the nested business to this non-owner consumer screen.
-        const eligible = favorites.filter((favorite: any) =>
-          favorite.restaurant?.isActive === true &&
-          isPublicBusinessVisible(favorite.restaurant) &&
-          !deriveProfileEvidenceQuarantineVisibility(favorite.restaurant).isQuarantined,
-        );
-        const publicRestaurants = await toPublicRestaurantListingArrayWithVisibility(
-          eligible.map((favorite: any) => favorite.restaurant),
-        );
-        const publicById = new Map(publicRestaurants.map((restaurant: any) => [restaurant.id, restaurant]));
-        res.json(eligible.flatMap((favorite: any) => {
-          const restaurant = publicById.get(favorite.restaurantId);
-          return restaurant ? [{ id: favorite.id, restaurantId: favorite.restaurantId, favoritedAt: favorite.favoritedAt, createdAt: favorite.createdAt, restaurant }] : [];
-        }));
+        res.json(await toPublicRestaurantRelationshipArrayWithVisibility(favorites));
       } catch (error) {
         console.error("Error fetching user restaurant favorites:", error);
         res.status(500).json({ message: "Failed to fetch favorites" });
@@ -1286,10 +1272,11 @@ export function registerRestaurantCoreRoutes(
     "/api/following/restaurants",
     isAuthenticated,
     async (req: any, res) => {
+      res.setHeader("Cache-Control", "private, no-store");
       try {
         const userId = req.user.id;
         const follows = await storage.getUserRestaurantFollows(userId);
-        res.json(follows);
+        res.json(await toPublicRestaurantRelationshipArrayWithVisibility(follows));
       } catch (error) {
         console.error("Error fetching user restaurant follows:", error);
         res.status(500).json({ message: "Failed to fetch follows" });
@@ -1695,11 +1682,12 @@ export function registerRestaurantCoreRoutes(
     "/api/recommendations/restaurants",
     isAuthenticated,
     async (req: any, res) => {
+      res.setHeader("Cache-Control", "private, no-store");
       try {
         const userId = req.user.id;
         const recommendations =
           await storage.getUserRestaurantRecommendations(userId);
-        res.json(recommendations);
+        res.json(await toPublicRestaurantRelationshipArrayWithVisibility(recommendations));
       } catch (error) {
         console.error("Error fetching user restaurant recommendations:", error);
         res.status(500).json({ message: "Failed to fetch recommendations" });
