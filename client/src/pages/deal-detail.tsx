@@ -47,6 +47,7 @@ export default function DealDetail() {
   const [newClaim, setNewClaim] = useState<DealClaimReceipt>();
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState("");
+  const [saveContinuation, setSaveContinuation] = useState(false);
   const saveBusy = useRef(false);
   const saveGeneration = useRef(0);
   const [now, setNow] = useState(Date.now());
@@ -101,7 +102,7 @@ export default function DealDetail() {
   const endTime = timeLabel(deal?.endTime);
 
   useEffect(() => {
-    setNewClaim(undefined); setShowClaimModal(false); setSaveError("");
+    setNewClaim(undefined); setShowClaimModal(false); setSaveError(""); setSaveContinuation(false);
     saveGeneration.current += 1; saveBusy.current = false; setSaving(false);
     return () => { saveGeneration.current += 1; };
   }, [dealId, user?.id]);
@@ -122,6 +123,14 @@ export default function DealDetail() {
     url.searchParams.delete("intent");
     window.history.replaceState({}, "", url.pathname + url.search + url.hash);
   }, [isAuthenticated, deal?.id, claimsQuery.isLoading, claimsQuery.isError]);
+  useEffect(() => {
+    if (!isAuthenticated || !deal || favoritesQuery.isLoading || favoritesQuery.isError) return;
+    const url = new URL(window.location.href);
+    if (url.searchParams.get("intent") !== "save") return;
+    setSaveContinuation(true);
+    url.searchParams.delete("intent");
+    window.history.replaceState({}, "", url.pathname + url.search + url.hash);
+  }, [isAuthenticated, deal?.id, favoritesQuery.isLoading, favoritesQuery.isError]);
 
   const startClaim = () => {
     if (!isAuthenticated) {
@@ -182,6 +191,7 @@ export default function DealDetail() {
       </div>
       {deal.imageUrl && <img src={deal.imageUrl} alt="" className="h-56 w-full object-cover sm:h-72" />}
       <main className="space-y-5 px-4 py-6 sm:px-6">
+        {saveContinuation && <div role="status" className="rounded-xl border border-orange-200 bg-orange-50 p-4 text-sm text-stone-900">{saved ? "This place is already in your saved places." : "You’re back at your special. Tap Save place to keep this business in your saved places."}</div>}
         <div>
           <p className="text-sm font-bold text-orange-700" data-testid="text-discount-badge">{deal.dealType === "percentage" ? `${deal.discountValue}% off` : `$${deal.discountValue} off`}</p>
           <h1 className="mt-1 text-3xl font-black" data-testid="text-deal-title">{deal.title}</h1>
