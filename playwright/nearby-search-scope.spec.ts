@@ -35,6 +35,11 @@ const menuRows = restaurantRows.map((restaurant) => ({
   restaurantState: restaurant.state, priceCents: 700,
   distanceMiles: restaurant.distanceMiles,
 }));
+const distantParkingHosts = Array.from({ length: 12 }, (_, index) => ({
+  hostId: `synthetic-distant-parking-${index}`, businessName: `Synthetic distant parking ${index + 1}`,
+  latitude: "31", longitude: "-97", address: `${index + 1} Synthetic Parking Lane`,
+  city: "Distant Fixture Town", state: "TX",
+}));
 
 type Source = "unified" | "restaurants" | "menus" | "deals";
 type Scenario = {
@@ -43,6 +48,7 @@ type Scenario = {
   malformed?: Source[];
   menuGate?: Promise<void>;
   deniedLocation?: boolean;
+  parkingHosts?: typeof distantParkingHosts;
 };
 type RequestRecord = { method: string; pathname: string; params: Record<string, string> };
 type Proof = { requests: RequestRecord[]; unexpectedApi: string[]; blockedExternal: string[]; pageErrors: string[] };
@@ -107,7 +113,7 @@ async function installSyntheticApi(page: Page, scenario: Scenario = {}) {
       if (source === "unified") return json({
         deals: scenario.empty ? [] : dealRows,
         restaurants: scenario.empty ? [] : restaurantRows,
-        parkingPassHosts: [], videos: [], events: [],
+        parkingPassHosts: scenario.parkingHosts ?? [], videos: [], events: [],
       });
       if (source === "restaurants") return json(scopedRows(restaurantRows));
       if (source === "menus") return json({ items: scopedRows(menuRows) });
@@ -239,6 +245,26 @@ test.describe("Synthetic nearby search scope", () => {
     await page.getByTestId("button-clear-search").click();
     await expect(page.getByTestId("input-smart-search")).toHaveValue("");
     await expect(page).not.toHaveURL(/q=taco/);
+  });
+
+  test("capped wider parking does not claim complete nearby coverage when food has no matches", async ({ page }) => {
+    await installSyntheticApi(page, { empty: true, parkingHosts: distantParkingHosts });
+    await page.goto(`${FRONTEND}/search`, { waitUntil: "domcontentloaded" });
+    await page.getByTestId("button-search-quick-location").click();
+    await expect(page.locator('[aria-label="Search radius"]').getByRole("slider")).toBeVisible();
+    await page.getByTestId("input-smart-search").fill("taco");
+    await page.getByTestId("button-search").click();
+    await expect(page.getByRole("heading", { name: "No nearby food matches found", exact: true })).toBeVisible();
+    await expect(page.getByText("No food matches in your selected radius", { exact: true })).toBeVisible();
+    await expect(page.getByTestId("search-parking-coverage")).toHaveText(
+      "Parking coverage is limited to spots included in wider search; other nearby spots may be missing. Search all locations to browse the available parking results.",
+    );
+    await expect(page.locator('[data-testid^="card-parking-pass-"]')).toHaveCount(0);
+    await expect(page.getByTestId("card-restaurant-synthetic-inside")).toHaveCount(0);
+    await expect(page.getByTestId("card-menu-item-menu-synthetic-inside")).toHaveCount(0);
+    await expect(page.getByText("Taco fixture deal inside", { exact: true })).toHaveCount(0);
+    await expect(page.getByTestId("button-search-wider")).toBeVisible();
+    await expect(page.getByTestId("search-source-errors")).toHaveCount(0);
   });
 
   test("total source outage is recoverable and never presented as no matches", async ({ page }) => {
