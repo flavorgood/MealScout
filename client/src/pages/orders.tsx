@@ -21,7 +21,7 @@ import { SEOHead } from "@/components/seo-head";
 import { useAuth } from "@/hooks/useAuth";
 import { apiRequest } from "@/lib/queryClient";
 import DealClaimModal from "@/components/deal-claim-modal";
-import { dealClaimStatus, displayClaimStatus, readClaimList, type DealClaimReceipt } from "@/lib/deal-claim-state";
+import { dealClaimStatus, displayClaimStatus, receiptDateLabel, readClaimList, type DealClaimReceipt } from "@/lib/deal-claim-state";
 
 type ActivityTab = "orders" | "deals";
 
@@ -315,7 +315,7 @@ function ConsumerActivity() {
                           {formatDiscount(claim)}
                         </p>
                         <p className="mt-1 break-all text-xs text-muted-foreground">Receipt: {claim.id}</p>
-                        {claim.endDate && <p className="mt-1 text-xs text-muted-foreground">Expires {new Date(claim.endDate).toLocaleString()}</p>}
+                        {claim.endDate && <p className="mt-1 text-xs text-muted-foreground">Expires {receiptDateLabel(claim.endDate)}</p>}
                         <p className="mt-0.5 text-xs text-[color:var(--text-muted)]">
                           {formatClaimMoney(claim.orderAmount)
                             ? `${formatClaimMoney(claim.orderAmount)} order · `

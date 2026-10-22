@@ -40,6 +40,14 @@ export function displayClaimStatus(status: ClaimStatus) {
   return status === "Active" ? "Claimed — check offer hours" : status;
 }
 
+export function isDealAuthenticationError(message: string) {
+  return /unauthor|not authenticated|authentication required/i.test(message);
+}
+
+export function receiptDateLabel(value: string) {
+  return Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleString() : "Date unavailable";
+}
+
 function isReceipt(value: any): value is DealClaimReceipt {
   return !!value && typeof value.id === "string" && value.id.trim().length > 0 && typeof value.dealId === "string" && value.dealId.trim().length > 0 && typeof value.claimedAt === "string" && Number.isFinite(Date.parse(value.claimedAt)) && typeof value.isUsed === "boolean";
 }

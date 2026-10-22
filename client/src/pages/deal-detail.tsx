@@ -13,7 +13,7 @@ import DealShareModal from "@/components/deal-share-modal";
 import { BackHeader } from "@/components/back-header";
 import { SEOHead } from "@/components/seo-head";
 import { extractUuidFromSlug } from "@/lib/seo-slug";
-import { dealClaimStatus, displayClaimStatus, dealDirectionsHref, dealIntentPath, dealPhoneHref, readClaimList, type DealClaimReceipt } from "@/lib/deal-claim-state";
+import { dealClaimStatus, displayClaimStatus, isDealAuthenticationError, dealDirectionsHref, dealIntentPath, dealPhoneHref, readClaimList, type DealClaimReceipt } from "@/lib/deal-claim-state";
 
 type Restaurant = { id: string; name: string; address?: string | null; phone?: string | null; cuisineType?: string | null; };
 type Deal = {
@@ -44,7 +44,7 @@ export default function DealDetail() {
   const queryClient = useQueryClient();
   const [showClaimModal, setShowClaimModal] = useState(false);
   const [showShareModal, setShowShareModal] = useState(false);
-  const [newClaim, setNewClaim] = useState<DealClaimReceipt>();
+  const [newClaim, setNewClaim] = useState<{ userId: string; claim: DealClaimReceipt }>();
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState("");
   const [saveContinuation, setSaveContinuation] = useState(false);
@@ -89,7 +89,7 @@ export default function DealDetail() {
     enabled: isAuthenticated, retry: false, staleTime: 0,
   });
   const saved = favoritesQuery.data?.some((row) => (row.restaurantId || row.restaurant?.id) === deal?.restaurantId) || false;
-  const existingClaim = newClaim || claimsQuery.data?.find((claim) => claim.dealId === dealId);
+  const existingClaim = (newClaim?.userId === user?.id && newClaim?.claim.dealId === dealId ? newClaim.claim : undefined) || claimsQuery.data?.find((claim) => claim.dealId === dealId);
   const end = deal?.endDate ? Date.parse(deal.endDate) : null;
   const start = deal?.startDate ? Date.parse(deal.startDate) : null;
   const unavailable = !deal || deal.isActive !== true ||
@@ -157,7 +157,7 @@ export default function DealDetail() {
     } catch (error) {
       if (generation !== saveGeneration.current) return;
       const message = error instanceof Error ? error.message : "Save not confirmed";
-      if (/unauthor|not authenticated/i.test(message)) {
+      if (isDealAuthenticationError(message)) {
         window.location.href = `/login?redirect=${encodeURIComponent(dealIntentPath(currentPath(), "save"))}`;
         return;
       }
@@ -235,7 +235,7 @@ export default function DealDetail() {
         </div>
         <p className="mt-2 text-center text-xs text-muted-foreground">No purchase or social post is made by claiming.</p>
       </div>
-      <DealClaimModal key={`${dealId}:${user?.id || "guest"}`} dealId={dealId} isOpen={showClaimModal} onClose={() => setShowClaimModal(false)} existingClaim={existingClaim} onClaimed={setNewClaim} />
+      <DealClaimModal key={`${dealId}:${user?.id || "guest"}`} dealId={dealId} isOpen={showClaimModal} onClose={() => setShowClaimModal(false)} existingClaim={existingClaim} onClaimed={(claim) => { if (user?.id) setNewClaim({ userId: user.id, claim }); }} />
       <DealShareModal isOpen={showShareModal} onClose={() => setShowShareModal(false)} deal={{ id: deal.id, title: deal.title, description: deal.description || "", discountValue: deal.discountValue, minOrderAmount: deal.minOrderAmount || undefined, restaurant: { name: restaurant?.name || "Food business", cuisineType: restaurant?.cuisineType || undefined } }} />
     </div>
   );
