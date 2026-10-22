@@ -18,7 +18,7 @@ const deal = {
   startDate: "2020-01-01T00:00:00.000Z", endDate: "2099-12-31T23:59:59.000Z",
   startTime: "00:00", endTime: "23:59", isOngoing: true, isActive: true,
   perCustomerLimit: 1, currentUses: 0, totalUsesLimit: 100,
-  restaurant: { id: restaurantId, name: "Synthetic Kitchen", cuisineType: "Salad", isActive: true },
+  restaurant: { id: restaurantId, name: "Synthetic Kitchen", cuisineType: "Salad", address: "100 Synthetic Lane", isActive: true },
 };
 const receipt = {
   id: claimId, dealId, claimedAt: "2026-10-22T10:00:00.000Z", usedAt: null,
@@ -35,6 +35,8 @@ type FixtureState = {
   walletFailure: boolean;
   walletMalformed: boolean;
   sessionExpired: boolean;
+  initialClaimUnauthorized: boolean;
+  initialFavoriteUnauthorized: boolean;
   unavailable: boolean;
   claimPosts: string[];
   requests: string[];
@@ -43,7 +45,7 @@ type FixtureState = {
   pageErrors: string[];
 };
 const stateFor = (): FixtureState => ({
-  authenticated: true, rows: [], claimMode: "ok", walletFailure: false, walletMalformed: false, sessionExpired: false,
+  authenticated: true, rows: [], claimMode: "ok", walletFailure: false, walletMalformed: false, sessionExpired: false, initialClaimUnauthorized: false, initialFavoriteUnauthorized: false,
   unavailable: false, claimPosts: [], requests: [], unexpected: [], blockedExternal: [], pageErrors: [],
 });
 const fixtureByPage = new WeakMap<Page, FixtureState>();
@@ -84,6 +86,7 @@ async function isolate(page: Page, state: FixtureState) {
     if (key === "GET /api/deals/featured") return route.fulfill({ status: 200, json: [deal] });
     if (key === `GET /api/deals/restaurant/${restaurantId}`) return route.fulfill({ status: 200, json: [{ ...deal, id: otherDealId, title: "Synthetic second offer" }, deal] });
     if (key === "GET /api/deals/claimed") {
+      if (state.initialClaimUnauthorized) state.sessionExpired = true;
       if (state.sessionExpired) return route.fulfill({ status: 401, json: { error: "Authentication required" } });
       return route.fulfill({ status: state.walletFailure ? 503 : 200, json: state.walletFailure ? { message: "Synthetic wallet outage" } : state.walletMalformed ? { claims: "untrusted response" } : state.rows });
     }
@@ -98,6 +101,10 @@ async function isolate(page: Page, state: FixtureState) {
     if (key === "GET /api/my/orders") return route.fulfill({ status: 200, json: { orders: [] } });
     if (key === "GET /api/business-access/me") return route.fulfill({ status: 200, json: { hasAnyAccess: false, restaurants: [] } });
     if (key === "GET /api/affiliate/tag") return route.fulfill({ status: 200, json: { tag: "", sharePath: "/scout" } });
+    if (key === "GET /api/favorites/restaurants" && state.initialFavoriteUnauthorized) {
+      state.sessionExpired = true;
+      return route.fulfill({ status: 401, json: { error: "Authentication required" } });
+    }
     if (["/api/hosts", "/api/following/restaurants", "/api/favorites/restaurants", "/api/recommendations/restaurants", "/api/geo-ads"].includes(url.pathname) && request.method() === "GET") return route.fulfill({ status: 200, json: [] });
     if (["/api/telemetry/track", "/api/analytics/track", "/api/funnel/events", "/api/funnel/track", "/api/geo/ping"].includes(url.pathname) && request.method() === "POST") return route.fulfill({ status: 200, json: { ok: true } });
     if (/^\/api\/deals\/[^/]+\/view$/.test(url.pathname) && request.method() === "POST") return route.fulfill({ status: 200, json: { ok: true } });
@@ -143,7 +150,7 @@ function confirmClaim(page: Page) {
 }
 
 test.describe("Synthetic rendered deal receipt and wallet recovery", () => {
-  test.use({ actionTimeout: 8_000, navigationTimeout: 15_000 });
+  test.use({ actionTimeout: 8_000, navigationTimeout: 15_000, serviceWorkers: "block" });
   test.setTimeout(35_000);
   test.afterEach(async ({ page }, info) => {
     await capture(page, info);
@@ -172,7 +179,7 @@ test.describe("Synthetic rendered deal receipt and wallet recovery", () => {
     // Returning to the original deal may reopen confirmation, but never POSTs automatically.
     expect(state.claimPosts).toEqual([]);
     const confirm = page.getByTestId("button-confirm-claim");
-    if (!(await confirm.isVisible())) await page.getByTestId("button-claim-deal").click();
+    await expect(confirm).toBeVisible();
     await confirm.click();
     await expect(page.getByTestId("claim-receipt")).toContainText(claimId);
     await expect(page.getByTestId("claim-receipt")).toContainText(deal.title);
@@ -259,10 +266,11 @@ test.describe("Synthetic rendered deal receipt and wallet recovery", () => {
     await page.goto(`${FRONTEND}/deal/${dealId}?fixture=expired-session#offer`);
     await expect(page.getByTestId("button-claim-deal")).toBeVisible();
     // The detail status lookup succeeds; only the subsequent fresh preflight expires.
-    // Older detail code has no such lookup, so the click itself still provides the baseline.
-    await page.waitForTimeout(300);
+    await expect.poll(() => state.requests.filter((request) => request === "GET /api/deals/claimed").length).toBeGreaterThan(0);
     state.sessionExpired = true;
     await page.getByTestId("button-claim-deal").click();
+    await expect(confirmClaim(page)).toBeVisible();
+    await confirmClaim(page).click();
     await expect(page).toHaveURL(/\/login\?/);
     const redirect = new URL(new URL(page.url()).searchParams.get("redirect")!, FRONTEND);
     expect(redirect.pathname).toBe(`/deal/${dealId}`);
@@ -272,13 +280,35 @@ test.describe("Synthetic rendered deal receipt and wallet recovery", () => {
     expect(state.claimPosts).toEqual([]);
   });
 
+  for (const intent of ["claim", "save"] as const) {
+    test(`initial ${intent} status 401 recovers through a fresh login document`, async ({ page }) => {
+      const state = stateFor();
+      if (intent === "claim") state.initialClaimUnauthorized = true;
+      else state.initialFavoriteUnauthorized = true;
+      await isolate(page, state);
+      await page.goto(`${FRONTEND}/deal/${dealId}?fixture=initial-${intent}#offer`);
+      const recovery = page.getByTestId(`link-login-${intent}`);
+      await expect(recovery).toBeVisible();
+      await recovery.click();
+      await expect(page).toHaveURL(/\/login\?/);
+      await expect(page.getByTestId("button-email-login")).toBeVisible();
+      const redirect = new URL(new URL(page.url()).searchParams.get("redirect")!, FRONTEND);
+      expect(redirect.pathname).toBe(`/deal/${dealId}`);
+      expect(redirect.searchParams.get("fixture")).toBe(`initial-${intent}`);
+      expect(redirect.searchParams.get("intent")).toBe(intent);
+      expect(redirect.hash).toBe("#offer");
+      expect(state.requests.filter((request) => request === "GET /api/auth/user").length).toBeGreaterThanOrEqual(2);
+      expect(state.claimPosts).toEqual([]);
+    });
+  }
+
   for (const mode of ["malformed", "failed"] as const) {
     test(`${mode} claim API cannot report a receipt and allows explicit retry`, async ({ page }) => {
       const state = stateFor(); state.claimMode = mode;
       await isolate(page, state);
       await openClaim(page);
       await confirmClaim(page).click();
-      await expect(page.getByTestId("text-claim-error")).toBeVisible();
+      await expect(page.getByRole("alert")).toBeVisible();
       await expect(page.getByTestId("claim-receipt")).not.toBeVisible();
       await expect(page.getByTestId("button-confirm-claim")).toBeEnabled();
       expect(state.rows).toHaveLength(0);
