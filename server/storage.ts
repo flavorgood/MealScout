@@ -151,6 +151,8 @@ import { createUsersRepository } from "./storage/usersRepository";
 import { createPaymentsSubscriptionsRepository } from "./storage/paymentsSubscriptionsRepository";
 import { createAnalyticsRepository } from "./storage/analyticsRepository";
 import { createParkingPassRepository } from "./storage/parkingPassRepository";
+import { claimDealWithReceipt, getUserDealClaimReceipts, type DealClaimResult } from "./services/dealClaimLifecycle";
+import { getLocatedActiveDealCandidates, type LocatedDealScope } from "./services/locatedDealCandidates";
 
 // Interface for storage operations
 export interface IStorage {
@@ -340,7 +342,7 @@ export interface IStorage {
   createDeal(deal: InsertDeal): Promise<Deal>;
   getDeal(id: string): Promise<Deal | undefined>;
   getDealsByRestaurant(restaurantId: string): Promise<Deal[]>;
-  getActiveDeals(): Promise<Deal[]>;
+  getActiveDeals(scope?: LocatedDealScope): Promise<Deal[]>;
   getFilteredDeals(showLimitedTimeOnly?: boolean): Promise<Deal[]>;
   getNearbyDeals(lat: number, lng: number, radiusKm: number): Promise<Deal[]>;
   searchDeals(filters: {
@@ -365,10 +367,7 @@ export interface IStorage {
     dealId: string,
     userId: string,
     perCustomerLimit: number,
-  ): Promise<
-    | { ok: true; claim: DealClaim }
-    | { ok: false; reason: "already_claimed" | "sold_out" }
-  >;
+  ): Promise<DealClaimResult>;
   getUserDealClaims(userId: string): Promise<DealClaim[]>;
   getUserDealClaimsWithDetails(userId: string): Promise<any[]>;
   getDealClaimsCount(dealId: string, userId?: string): Promise<number>;
@@ -2125,7 +2124,10 @@ export class DatabaseStorage implements IStorage {
     return this.restaurantsDealsRepository.getAllDeals();
   }
 
-  async getActiveDeals(): Promise<Deal[]> {
+  async getActiveDeals(scope?: LocatedDealScope): Promise<Deal[]> {
+    if (scope) {
+      return this.filterDealsByOperatingHours(await getLocatedActiveDealCandidates(db, scope));
+    }
     const now = new Date();
     const currentTime = now.toTimeString().slice(0, 5); // "HH:MM"
 
@@ -2794,60 +2796,13 @@ export class DatabaseStorage implements IStorage {
     return newClaim;
   }
 
-  // Claiming a deal previously read currentUses/totalUsesLimit and the
-  // per-user claim count, then separately inserted the claim and
-  // incremented currentUses -- two concurrent claims near the cap could
-  // both pass the check before either write landed, overselling a
-  // limited deal. This does the limit check and the increment as a
-  // single conditional UPDATE inside a transaction, so only as many
-  // claims as the deal's totalUsesLimit actually allows can ever
-  // succeed, regardless of concurrent requests.
   async claimDealAtomic(
     dealId: string,
     userId: string,
-    perCustomerLimit: number,
-  ): Promise<
-    | { ok: true; claim: DealClaim }
-    | { ok: false; reason: "already_claimed" | "sold_out" }
-  > {
-    return await db.transaction(async (tx: any) => {
-      const [existingCountRow] = await tx
-        .select({ count: sql<number>`count(*)` })
-        .from(dealClaims)
-        .where(and(eq(dealClaims.dealId, dealId), eq(dealClaims.userId, userId)));
-      if (Number(existingCountRow?.count || 0) >= perCustomerLimit) {
-        return { ok: false, reason: "already_claimed" as const };
-      }
-
-      const [reserved] = await tx
-        .update(deals)
-        .set({
-          currentUses: sql`${deals.currentUses} + 1`,
-          updatedAt: new Date(),
-        })
-        .where(
-          and(
-            eq(deals.id, dealId),
-            or(
-              isNull(deals.totalUsesLimit),
-              lt(deals.currentUses, deals.totalUsesLimit),
-            ),
-          ),
-        )
-        .returning({ id: deals.id });
-
-      if (!reserved) {
-        return { ok: false, reason: "sold_out" as const };
-      }
-
-      const [newClaim] = await tx
-        .insert(dealClaims)
-        .values({ dealId, userId })
-        .returning();
-      return { ok: true, claim: newClaim };
-    });
+    _perCustomerLimit: number,
+  ): Promise<DealClaimResult> {
+    return claimDealWithReceipt(db, dealId, userId);
   }
-
   async getUserDealClaims(userId: string): Promise<DealClaim[]> {
     return await db
       .select()
@@ -2857,27 +2812,8 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getUserDealClaimsWithDetails(userId: string): Promise<any[]> {
-    return await db
-      .select({
-        id: dealClaims.id,
-        dealId: dealClaims.dealId,
-        claimedAt: dealClaims.claimedAt,
-        usedAt: dealClaims.usedAt,
-        isUsed: dealClaims.isUsed,
-        orderAmount: dealClaims.orderAmount,
-        dealTitle: deals.title,
-        dealType: deals.dealType,
-        discountValue: deals.discountValue,
-        restaurantId: deals.restaurantId,
-        restaurantName: restaurants.name,
-      })
-      .from(dealClaims)
-      .innerJoin(deals, eq(dealClaims.dealId, deals.id))
-      .innerJoin(restaurants, eq(deals.restaurantId, restaurants.id))
-      .where(eq(dealClaims.userId, userId))
-      .orderBy(desc(dealClaims.claimedAt));
+    return getUserDealClaimReceipts(db, userId);
   }
-
   async getDealClaimsCount(dealId: string, userId?: string): Promise<number> {
     const conditions = [eq(dealClaims.dealId, dealId)];
     if (userId) {
