@@ -42,7 +42,7 @@ jobs:
         run: node scripts/mealscout-owner-orders-state.test.cjs
 
       - name: Deals Receipt and Nearby Search Behavior
-        run: node --import tsx --test scripts/deal-claim-lifecycle.behavior.test.ts scripts/deal-claim-state.behavior.test.ts scripts/located-deal-discovery.behavior.test.ts scripts/nearby-search-scope.behavior.test.ts scripts/public-local-menu-location.behavior.test.ts
+        run: node --import tsx --test scripts/deal-claim-lifecycle.behavior.test.ts scripts/deal-claim-state.behavior.test.ts scripts/located-deal-discovery.behavior.test.ts scripts/nearby-search-scope.behavior.test.ts scripts/public-local-menu-location.behavior.test.ts scripts/saved-place-privacy.behavior.test.ts
 
       - name: Parking Pass Source Contracts
         run: node scripts/qa/parking-source-contracts.cjs
