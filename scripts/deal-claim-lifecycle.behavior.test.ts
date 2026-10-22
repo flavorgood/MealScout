@@ -184,9 +184,35 @@ test("wallet and claim receipts never expose the raw private business address", 
   assert.ok(!JSON.stringify(receipts).includes("do not publish"));
   const walletRead = f.state.queries.find((query) => /left join/.test(query.text));
   assert.ok(walletRead);
-  assert.doesNotMatch(walletRead.text, /"restaurants"\."address"/);
   assert.ok(!JSON.stringify(receipts).includes("restaurantVisibility"));
   assert.ok(!JSON.stringify(receipts).includes("ownerIsDisabled"));
+});
+
+test("canonical hard identity anchors keep fresh claims and wallet availability consistent", async () => {
+  const anchors = [
+    { field: "phone", value: "+1 (202) 555-0101", extracted: { phone: "12025550101" } },
+    { field: "websiteUrl", value: "https://kitchen.invalid/menu", extracted: { website: "kitchen.invalid" } },
+    { field: "address", value: "77 Lantern Path", extracted: { address: "77 Lantern Path" } },
+  ];
+  for (const anchor of anchors) {
+    const f = fixture();
+    f.state.restaurant[anchor.field] = anchor.value;
+    f.state.restaurant.rawData = { evidenceIngest: { extracted: {
+      business_name: "Entirely different identity",
+      ...anchor.extracted,
+    } } };
+    const claim = await f.claim();
+    assert.equal(claim.ok, true, `${anchor.field} is a canonical hard identity anchor`);
+    const receipts = await getUserDealClaimReceipts(f.database, "synthetic-user");
+    assert.equal(receipts[0].restaurantIsActive, true, `${anchor.field} must be retained for private wallet policy evaluation`);
+    assert.equal(receipts[0].restaurantAddress, null);
+    assert.ok(!JSON.stringify(receipts).includes(anchor.value), `${anchor.field} must not leave the server`);
+    assert.ok(!JSON.stringify(receipts).includes("evidenceIngest"));
+
+    delete f.state.restaurant[anchor.field];
+    assert.deepEqual(await f.claim("new-user"), { ok: false, reason: "unavailable" });
+    assert.equal((await getUserDealClaimReceipts(f.database, "synthetic-user"))[0].restaurantIsActive, false);
+  }
 });
 
 test("canonical hidden business policy blocks new claims while issued receipts remain recoverable", async () => {

@@ -34,6 +34,12 @@ export async function getUserDealClaimReceipts(database: any, userId: string) {
       description: restaurants.description,
       city: restaurants.city,
       state: restaurants.state,
+      // Canonical quarantine evaluates name mismatches against these hard
+      // identity anchors. Keep the same inputs as the fresh-claim path, then
+      // discard this entire private object before returning the receipt.
+      phone: restaurants.phone,
+      websiteUrl: restaurants.websiteUrl,
+      address: restaurants.address,
       rawData: restaurants.rawData,
       isActive: restaurants.isActive,
     },
