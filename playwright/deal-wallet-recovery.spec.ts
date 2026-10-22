@@ -1,6 +1,7 @@
 import { expect, test, type Page, type TestInfo } from "@playwright/test";
 import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { createDealClaimHandler } from "../server/routes/dealClaimHandler";
 
 // These are synthetic receipts and people. Every API request is handled below;
 // the compiled application runs in Vite, with no backend or provider connection.
@@ -27,7 +28,7 @@ const receipt = {
   id: claimId, dealId, claimedAt: "2026-10-22T10:00:00.000Z", usedAt: null,
   isUsed: false, orderAmount: null, dealTitle: deal.title, dealType: deal.dealType,
   discountValue: deal.discountValue, restaurantId, restaurantName: "Synthetic Kitchen",
-  restaurantAddress: "100 Synthetic Lane", startDate: deal.startDate, endDate: deal.endDate,
+  restaurantAddress: null, startDate: deal.startDate, endDate: deal.endDate,
   startTime: "00:00", endTime: "23:59", availableDuringBusinessHours: false,
   isOngoing: true, isActive: true, restaurantIsActive: true,
 };
@@ -41,6 +42,9 @@ type FixtureState = {
   sessionExpired: boolean;
   initialClaimUnauthorized: boolean;
   initialFavoriteUnauthorized: boolean;
+  nativeReplay: boolean;
+  nativeResponses: Array<{ status: number; body: Record<string, unknown>; headers: Record<string, string> }>;
+  syntheticNotifications: number;
   unavailable: boolean;
   claimPosts: string[];
   requests: string[];
@@ -49,10 +53,46 @@ type FixtureState = {
   pageErrors: string[];
 };
 const stateFor = (): FixtureState => ({
-  authenticated: true, rows: [], claimMode: "ok", walletFailure: false, walletMalformed: false, sessionExpired: false, initialClaimUnauthorized: false, initialFavoriteUnauthorized: false,
+  authenticated: true, rows: [], claimMode: "ok", walletFailure: false, walletMalformed: false, sessionExpired: false, initialClaimUnauthorized: false, initialFavoriteUnauthorized: false, nativeReplay: false, nativeResponses: [], syntheticNotifications: 0,
   unavailable: false, claimPosts: [], requests: [], unexpected: [], blockedExternal: [], pageErrors: [],
 });
 const fixtureByPage = new WeakMap<Page, FixtureState>();
+
+async function nativeClaimResponse(state: FixtureState) {
+  // This is the production HTTP handler with a disposable in-memory adapter.
+  // Its lifecycle import is type-only; no database or provider module executes.
+  const handler = createDealClaimHandler({
+    getDeal: async () => deal,
+    getRestaurant: async () => deal.restaurant,
+    claimDealAtomic: async (requestedDeal, userId, limit) => {
+      expect([requestedDeal, userId, limit]).toEqual([dealId, "synthetic-customer", 1]);
+      // A concurrent synthetic request can create a receipt after preflight.
+      if (state.nativeReplay && state.rows.length === 0) state.rows.push({ ...receipt });
+      const previous = state.rows.find((row) => row.dealId === requestedDeal && !row.isUsed && !row.usedAt);
+      const saved = previous ?? { ...receipt };
+      if (!previous) state.rows.push(saved);
+      return { ok: true, replayed: Boolean(previous), claim: {
+        id: String(saved.id), dealId: requestedDeal, userId,
+        claimedAt: new Date(String(saved.claimedAt)), usedAt: null, isUsed: false, orderAmount: null,
+      } };
+    },
+    getUserDealClaimsWithDetails: async () => state.rows,
+  }, async () => { state.syntheticNotifications += 1; });
+  let status = 200;
+  let body: Record<string, unknown> = {};
+  const headers: Record<string, string> = {};
+  const response = {
+    status(code: number) { status = code; return response; },
+    setHeader(name: string, value: string) { headers[name] = value; return response; },
+    json(payload: Record<string, unknown>) { body = payload; return response; },
+  };
+  await handler({ params: { dealId }, user: { id: "synthetic-customer" } }, response);
+  expect(status).toBe(200);
+  expect(headers["Cache-Control"]).toBe("no-store");
+  const result = { status, body, headers };
+  state.nativeResponses.push(result);
+  return result;
+}
 
 async function isolate(page: Page, state: FixtureState) {
   fixtureByPage.set(page, state);
@@ -102,9 +142,8 @@ async function isolate(page: Page, state: FixtureState) {
       state.claimPosts.push(dealId);
       if (state.claimMode === "failed") return route.fulfill({ status: 503, json: { message: "Synthetic claim unavailable. Try again." } });
       if (state.claimMode === "malformed") return route.fulfill({ status: 200, json: { success: true } });
-      const replayed = state.rows.some((row) => row.id === claimId);
-      if (!replayed) state.rows.push({ ...receipt });
-      return route.fulfill({ status: 200, json: { success: true, claimId, claim: receipt, replayed, dealTitle: deal.title, restaurantName: receipt.restaurantName, restaurantAddress: receipt.restaurantAddress } });
+      const result = await nativeClaimResponse(state);
+      return route.fulfill({ status: result.status, json: result.body, headers: result.headers });
     }
     if (key === "GET /api/my/orders") return route.fulfill({ status: 200, json: { orders: [] } });
     if (key === "GET /api/business-access/me") return route.fulfill({ status: 200, json: { hasAnyAccess: false, restaurants: [] } });
@@ -201,6 +240,9 @@ test.describe("Synthetic rendered deal receipt and wallet recovery", () => {
     await expect(page.getByTestId(`claimed-deal-${claimId}`)).toContainText(deal.title);
     expect(state.rows).toHaveLength(1);
     expect(state.claimPosts).toHaveLength(1);
+    expect(state.nativeResponses).toHaveLength(1);
+    expect(state.nativeResponses[0].body.replayed).toBe(false);
+    expect(state.syntheticNotifications).toBe(1);
   });
 
   test("guest drawer preserves the selected offer through login", async ({ page }) => {
@@ -225,6 +267,19 @@ test.describe("Synthetic rendered deal receipt and wallet recovery", () => {
     await page.goto(`${FRONTEND}${walletPath}`);
     await expect(page.getByTestId(`claimed-deal-${claimId}`)).toContainText(claimId);
     expect(state.claimPosts).toEqual([]);
+  });
+
+  test("native handler replay response renders one receipt without another notification", async ({ page }) => {
+    const state = stateFor(); state.nativeReplay = true;
+    await isolate(page, state);
+    await openClaim(page);
+    await confirmClaim(page).click();
+    await expect(page.getByTestId("claim-receipt")).toContainText(claimId);
+    expect(state.nativeResponses).toHaveLength(1);
+    expect(state.nativeResponses[0].body.replayed).toBe(true);
+    expect(state.syntheticNotifications).toBe(0);
+    expect(state.rows).toHaveLength(1);
+    expect(state.claimPosts).toEqual([dealId]);
   });
 
   test("wallet separates active used expired and unavailable receipts", async ({ page }) => {
