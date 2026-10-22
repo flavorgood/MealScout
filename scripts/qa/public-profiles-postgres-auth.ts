@@ -15,7 +15,8 @@ import * as schema from "../../shared/schema";
 // Requires an explicitly owned, empty Docker PostgreSQL fixture with the native
 // schema applied using drizzle-kit push. Accepts a port, never a database URL.
 // Native auth, Passport, PostgreSQL session store, storage, ownership and route
-// policies are retained. Only the Neon transport is adapted to local TCP pg.
+// policies are retained. The server/db module's Neon driver/Drizzle binding
+// is replaced by local node-postgres/Drizzle; Neon setup remains unproved.
 const port = Number(process.env.PROFILE_QA_POSTGRES_PORT);
 assert.ok(Number.isInteger(port) && port > 1024 && port < 65536, "Owned local PostgreSQL port required");
 for (const key of Object.keys(process.env)) {
@@ -31,7 +32,7 @@ const output = path.resolve("../mealscout-profile-evidence/postgres-auth");
 await mkdir(output, { recursive: true }); await mkdir(".tmp-tests", { recursive: true });
 const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL, max: 8 });
 const db = drizzle(pool, { schema });
-const report: any = { checks: [], scope: "Disposable PostgreSQL with native Drizzle schema/constraints, bcrypt login, Passport, native PostgreSQL sessions, real storage and API registrars; local TCP adapter replaces Neon transport only. No production, OAuth, providers, payments or deployment." };
+const report: any = { checks: [], scope: "Disposable PostgreSQL with native schema/constraints, bcrypt login, Passport, native PostgreSQL sessions, real storage and API registrars. The server/db module uses a test-only node-postgres/Drizzle binding; native Neon setup and migration upgrades are not exercised. No production, OAuth, providers, payments or deployment." };
 const check = (label: string, value: unknown) => { assert.ok(value, label); report.checks.push(label); };
 let browser: any, server: any, vite: any, sessionStore: any;
 try {
