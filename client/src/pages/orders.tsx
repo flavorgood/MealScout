@@ -19,6 +19,9 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { SEOHead } from "@/components/seo-head";
 import { useAuth } from "@/hooks/useAuth";
+import { apiRequest } from "@/lib/queryClient";
+import DealClaimModal from "@/components/deal-claim-modal";
+import { dealClaimStatus, readClaimList, type DealClaimReceipt } from "@/lib/deal-claim-state";
 
 type ActivityTab = "orders" | "deals";
 
@@ -32,18 +35,7 @@ type ConsumerOrder = {
   createdAt: string;
 };
 
-type ClaimedDeal = {
-  id: string;
-  dealId: string;
-  claimedAt: string;
-  usedAt?: string | null;
-  isUsed?: boolean | null;
-  orderAmount?: string | number | null;
-  dealTitle?: string | null;
-  dealType?: string | null;
-  discountValue?: string | number | null;
-  restaurantName?: string | null;
-};
+type ClaimedDeal = DealClaimReceipt;
 
 const ORDER_STATUS: Record<
   string,
@@ -100,6 +92,10 @@ function formatDiscount(claim: ClaimedDeal) {
 }
 
 function ConsumerActivity() {
+  const { user, isAuthenticated } = useAuth();
+  const [selectedClaim, setSelectedClaim] = useState<ClaimedDeal>();
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => { const timer = window.setInterval(() => setNow(Date.now()), 30000); return () => window.clearInterval(timer); }, []);
   const search = useSearch();
   const requestedView = new URLSearchParams(search).get("view");
   const [activeTab, setActiveTab] = useState<ActivityTab>(
@@ -112,18 +108,24 @@ function ConsumerActivity() {
 
   const ordersQuery = useQuery<{ orders: ConsumerOrder[] }>({
     queryKey: ["/api/my/orders"],
+    enabled: isAuthenticated,
     retry: false,
   });
   const dealsQuery = useQuery<ClaimedDeal[]>({
-    queryKey: ["/api/deals/claimed"],
+    queryKey: ["/api/deals/claimed", user?.id],
+    queryFn: async () => readClaimList(await (await apiRequest("GET", "/api/deals/claimed")).json()),
+    enabled: isAuthenticated,
+    staleTime: 0,
     retry: false,
   });
   const orders = Array.isArray(ordersQuery.data?.orders)
     ? ordersQuery.data.orders
     : [];
   const claims = Array.isArray(dealsQuery.data) ? dealsQuery.data : [];
-  const activeClaims = claims.filter((claim) => !claim.isUsed);
-  const completedClaims = claims.filter((claim) => claim.isUsed);
+  const activeClaims = claims.filter((claim) => dealClaimStatus(claim, now) === "Active");
+  const expiredClaims = claims.filter((claim) => dealClaimStatus(claim, now) === "Expired");
+  const unavailableClaims = claims.filter((claim) => ["Unavailable", "Upcoming"].includes(dealClaimStatus(claim, now)));
+  const completedClaims = claims.filter((claim) => dealClaimStatus(claim, now) === "Used");
   const isLoading = activeTab === "orders" ? ordersQuery.isLoading : dealsQuery.isLoading;
   const error = activeTab === "orders" ? ordersQuery.error : dealsQuery.error;
 
@@ -206,10 +208,14 @@ function ConsumerActivity() {
             <span className="rounded-full bg-stone-100 px-3 py-1.5 font-semibold text-stone-700">
               {completedClaims.length} used
             </span>
+            <span>{expiredClaims.length} expired</span>
+            <span>{unavailableClaims.length} unavailable or upcoming</span>
           </div>
         ) : null}
 
-        {isLoading ? (
+        {!isAuthenticated ? (
+          <Card className="mt-6"><CardContent className="space-y-3 p-6 text-center"><h2 className="font-bold">Sign in to see your activity</h2><Button asChild><Link href="/login?redirect=%2Forders%3Fview%3Ddeals">Sign in</Link></Button></CardContent></Card>
+        ) : isLoading ? (
           <div className="mt-6 space-y-3">
             {[0, 1, 2].map((item) => (
               <div
@@ -228,6 +234,7 @@ function ConsumerActivity() {
               <p className="mt-1 text-sm text-red-800">
                 {(error as Error).message || "Please try again."}
               </p>
+              <Button className="mt-4" data-testid="button-retry-deals" onClick={() => void (activeTab === "deals" ? dealsQuery.refetch() : ordersQuery.refetch())}>Retry</Button>
             </CardContent>
           </Card>
         ) : activeTab === "orders" && orders.length > 0 ? (
@@ -277,8 +284,9 @@ function ConsumerActivity() {
           <div className="mt-6 space-y-3">
             {claims.map((claim) => {
               const claimedAt = new Date(claim.claimedAt);
+              const claimStatus = dealClaimStatus(claim, now);
               return (
-                <Card key={claim.id} className="border-[color:var(--border-subtle)] bg-[var(--bg-surface)] shadow-clean">
+                <Card key={claim.id} data-testid={`claimed-deal-${claim.id}`} className="border-[color:var(--border-subtle)] bg-[var(--bg-surface)] shadow-clean">
                   <CardContent className="p-5">
                     <div className="flex items-start justify-between gap-3">
                       <div>
@@ -292,12 +300,12 @@ function ConsumerActivity() {
                       <Badge
                         variant="outline"
                         className={
-                          claim.isUsed
+                          claimStatus !== "Active"
                             ? "border-stone-200 bg-stone-100 text-stone-700"
                             : "border-orange-200 bg-orange-50 text-orange-800"
                         }
                       >
-                        {claim.isUsed ? "Used" : "Active"}
+                        <span data-testid={`claim-status-${claim.id}`}>{claimStatus}</span>
                       </Badge>
                     </div>
                     <div className="mt-4 flex items-end justify-between gap-3 border-t border-[color:var(--border-subtle)] pt-4">
@@ -305,6 +313,8 @@ function ConsumerActivity() {
                         <p className="font-black text-orange-800">
                           {formatDiscount(claim)}
                         </p>
+                        <p className="mt-1 break-all text-xs text-muted-foreground">Receipt: {claim.id}</p>
+                        {claim.endDate && <p className="mt-1 text-xs text-muted-foreground">Expires {new Date(claim.endDate).toLocaleString()}</p>}
                         <p className="mt-0.5 text-xs text-[color:var(--text-muted)]">
                           {formatClaimMoney(claim.orderAmount)
                             ? `${formatClaimMoney(claim.orderAmount)} order · `
@@ -314,9 +324,7 @@ function ConsumerActivity() {
                             : format(claimedAt, "MMM d, yyyy")}
                         </p>
                       </div>
-                      <Button asChild variant="outline" size="sm">
-                        <Link href={`/deal/${claim.dealId}`}>View deal</Link>
-                      </Button>
+                      <Button variant="outline" size="sm" onClick={() => setSelectedClaim(claim)}>View receipt</Button>
                     </div>
                   </CardContent>
                 </Card>
@@ -337,7 +345,7 @@ function ConsumerActivity() {
               <p className="mx-auto mt-2 max-w-sm text-sm leading-6 text-[color:var(--text-muted)]">
                 {activeTab === "orders"
                   ? "Orders placed through a MealScout menu will appear here."
-                  : "Claimed specials will stay here until you use them."}
+                  : "Your claim receipts stay here, including used and expired specials."}
               </p>
               <Button asChild className="mt-6">
                 <Link href="/scout">Scout</Link>
@@ -346,6 +354,7 @@ function ConsumerActivity() {
           </Card>
         )}
       </main>
+      <DealClaimModal key={selectedClaim?.id || "none"} dealId={selectedClaim?.dealId || ""} isOpen={!!selectedClaim} existingClaim={selectedClaim} onClose={() => setSelectedClaim(undefined)} />
     </div>
   );
 }
@@ -365,5 +374,5 @@ export default function OrdersPage() {
     return <OwnerOrdersWorkspace view="orders" />;
   }
 
-  return <ConsumerActivity />;
+  return <ConsumerActivity key={user?.id || "guest"} />;
 }
