@@ -53,3 +53,7 @@ Known blockers/risks: independent non-author review and exact integrated CI/prev
 External side effects and retry safety: only task branch commits/push and planned draft PR/Library source packet. No production writes, communication, payment, real publishing or deployment.
 Next exact action: review this candidate, integrate under normal gates, then perform only authorized release checks.
 Actions that must NOT be repeated: denied Safari location-publication probe; any production publication without new authority; held PR mutation; Deals/search duplication; TradeScout edits; robots policy changes.
+
+## Blocked external action
+
+The attempt to create a draft PR titled “Repair native public profile access, actions and owner continuity” from `fix/public-profiles-20261022` to `flavorgood/MealScout:main` was denied by automatic approval review on 2026-10-22. The stated reason was that preparing and pushing the source candidate did not explicitly authorize opening a PR. The tool reported rejection; no PR was created. Do not retry that action through GitHub CLI, another connector, executor or indirect method. Explicit user approval is required before retrying. The source branch push and the Library source/evidence bundle succeeded independently.
