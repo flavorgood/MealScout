@@ -1,560 +1,248 @@
-import { useState, useEffect, useRef } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useEffect, useRef, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useParams } from "wouter";
+import { Heart, MapPin, Phone, Share2, Tag } from "lucide-react";
 import { useAuth } from "@/hooks/useAuth";
 import { apiRequest } from "@/lib/queryClient";
 import { trackDealViewOnce } from "@/lib/dealViewTracking";
 import { useToast } from "@/hooks/use-toast";
-import { isUnauthorizedError } from "@/lib/authUtils";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import DealClaimModal from "@/components/deal-claim-modal";
 import DealShareModal from "@/components/deal-share-modal";
 import { BackHeader } from "@/components/back-header";
-import { Tag, ArrowLeft, Share2 } from "lucide-react";
 import { SEOHead } from "@/components/seo-head";
 import { extractUuidFromSlug } from "@/lib/seo-slug";
-import { authUrl } from "@/lib/api";
-import { resolveCanonicalShareUrl } from "@/lib/share";
+import { dealClaimStatus, displayClaimStatus, isDealAuthenticationError, dealDirectionsHref, dealIntentPath, dealPhoneHref, readClaimList, type DealClaimReceipt } from "@/lib/deal-claim-state";
 
-interface Deal {
-  id: string;
-  restaurantId: string;
-  title: string;
-  description: string;
-  dealType: string;
-  discountValue: string;
-  minOrderAmount?: string;
-  imageUrl?: string;
-  startDate: string;
-  endDate: string;
-  startTime: string;
-  endTime: string;
-  perCustomerLimit: number;
-  currentUses: number;
-  distance?: number;
-}
+type Restaurant = { id: string; name: string; address?: string | null; phone?: string | null; cuisineType?: string | null; };
+type Deal = {
+  id: string; restaurantId: string; title: string; description?: string | null;
+  dealType: string; discountValue: string; minOrderAmount?: string | null;
+  imageUrl?: string | null; startDate?: string | null; endDate?: string | null;
+  startTime?: string | null; endTime?: string | null; isActive?: boolean;
+  isOngoing?: boolean; availableDuringBusinessHours?: boolean; currentUses?: number;
+  totalUsesLimit?: number | null; perCustomerLimit?: number; distance?: number;
+  restaurant?: Restaurant;
+};
+type Favorite = { restaurantId?: string; restaurant?: { id: string } };
+type Review = { id: string; comment?: string | null; reviewText?: string | null; createdAt?: string; user?: { firstName?: string | null } | null };
 
-interface Restaurant {
-  id: string;
-  name: string;
-  address: string;
-  phone?: string;
-  cuisineType?: string;
+function timeLabel(value?: string | null) {
+  if (!value || !/^([01]\d|2[0-3]):[0-5]\d(?::[0-5]\d)?$/.test(value)) return null;
+  const [hours, minutes] = value.split(":");
+  const hour = Number(hours);
+  return `${hour % 12 || 12}:${minutes} ${hour >= 12 ? "PM" : "AM"}`;
 }
 
 export default function DealDetail() {
   const params = useParams() as Record<string, string | undefined>;
   const dealParam = params.id || params.slug || "";
   const dealId = extractUuidFromSlug(dealParam) || dealParam;
-  const { user, isAuthenticated } = useAuth();
+  const { user, isAuthenticated, authState } = useAuth();
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const [showClaimModal, setShowClaimModal] = useState(false);
   const [showShareModal, setShowShareModal] = useState(false);
-  const viewTimerRef = useRef<number | null>(null);
+  const [newClaim, setNewClaim] = useState<{ userId: string; claim: DealClaimReceipt }>();
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState("");
+  const [saveContinuation, setSaveContinuation] = useState(false);
+  const saveBusy = useRef(false);
+  const saveGeneration = useRef(0);
+  const [now, setNow] = useState(Date.now());
+  const currentPath = () => window.location.pathname + window.location.search + window.location.hash;
 
-  const { data: deal, isLoading: dealLoading } = useQuery({
+  const dealQuery = useQuery<Deal>({
     queryKey: ["/api/deals", dealId],
-    enabled: !!dealId,
-  });
-
-  const { data: restaurant, isLoading: restaurantLoading } = useQuery({
-    queryKey: ["/api/restaurants", (deal as Deal)?.restaurantId],
-    enabled: !!(deal as Deal)?.restaurantId,
-  });
-
-  const { data: reviews } = useQuery({
-    queryKey: ["/api/reviews/restaurant", (deal as Deal)?.restaurantId],
-    enabled: !!(deal as Deal)?.restaurantId,
-  });
-
-  const { data: affiliateTagData } = useQuery<{
-    tag: string;
-    sharePath: string;
-  }>({
-    queryKey: ["/api/affiliate/tag", "deal-detail"],
     queryFn: async () => {
-      const res = await fetch("/api/affiliate/tag", { credentials: "include" });
-      if (!res.ok) throw new Error("Not available");
-      return res.json();
+      const response = await apiRequest("GET", `/api/deals/${encodeURIComponent(dealId)}`);
+      const value = await response.json();
+      if (!value || value.id !== dealId || typeof value.restaurantId !== "string" || typeof value.title !== "string") throw new Error("Special details could not be read");
+      return value;
     },
-    enabled: isAuthenticated,
-    staleTime: 300_000,
+    enabled: !!dealId, retry: false, staleTime: 0,
   });
+  const deal = dealQuery.data;
+  const restaurant = deal?.restaurant;
+  const reviewsQuery = useQuery<Review[]>({
+    queryKey: ["/api/reviews/restaurant", deal?.restaurantId],
+    queryFn: async () => {
+      const rows = await (await apiRequest("GET", `/api/reviews/restaurant/${encodeURIComponent(deal!.restaurantId)}`)).json();
+      if (!Array.isArray(rows)) throw new Error("Reviews could not be read");
+      return rows;
+    },
+    enabled: !!deal?.restaurantId, retry: false,
+  });
+  const claimsQuery = useQuery<DealClaimReceipt[]>({
+    queryKey: ["/api/deals/claimed", user?.id],
+    queryFn: async () => readClaimList(await (await apiRequest("GET", "/api/deals/claimed")).json()),
+    enabled: isAuthenticated, retry: false, staleTime: 0,
+  });
+  const favoritesQuery = useQuery<Favorite[]>({
+    queryKey: ["/api/favorites/restaurants", user?.id],
+    queryFn: async () => {
+      const rows = await (await apiRequest("GET", "/api/favorites/restaurants")).json();
+      if (!Array.isArray(rows)) throw new Error("Saved places could not be read");
+      return rows;
+    },
+    enabled: isAuthenticated, retry: false, staleTime: 0,
+  });
+  const saved = favoritesQuery.data?.some((row) => (row.restaurantId || row.restaurant?.id) === deal?.restaurantId) || false;
+  const localClaim = newClaim?.userId === user?.id && newClaim?.claim.dealId === dealId ? newClaim.claim : undefined;
+  const dealClaims = (claimsQuery.data || []).filter((claim) => claim.dealId === dealId);
+  if (localClaim && !dealClaims.some((claim) => claim.id === localClaim.id)) dealClaims.unshift(localClaim);
+  const unusedClaim = dealClaims.find((claim) => !claim.isUsed && !claim.usedAt);
+  // Used history is a receipt, not an unused claim. Let the server authorize
+  // another claim when the offer's persisted per-customer allowance permits it.
+  const existingClaim = unusedClaim || (dealClaims.length >= (deal?.perCustomerLimit || 1) ? dealClaims[0] : undefined);
+  const end = deal?.endDate ? Date.parse(deal.endDate) : null;
+  const start = deal?.startDate ? Date.parse(deal.startDate) : null;
+  const unavailable = !deal || deal.isActive !== true ||
+    (end !== null && (!Number.isFinite(end) || end <= now)) ||
+    (start !== null && (!Number.isFinite(start) || start > now)) ||
+    (deal.totalUsesLimit != null && Number(deal.currentUses) >= deal.totalUsesLimit);
+  const phoneHref = dealPhoneHref(restaurant?.phone);
+  const directionsHref = dealDirectionsHref(restaurant?.address);
+  const startTime = timeLabel(deal?.startTime);
+  const endTime = timeLabel(deal?.endTime);
 
-  // Track deal view when deal is loaded
   useEffect(() => {
-    if (!dealId || !deal || dealLoading) return;
-    if (viewTimerRef.current !== null) return;
+    setNewClaim(undefined); setShowClaimModal(false); setSaveError(""); setSaveContinuation(false);
+    saveGeneration.current += 1; saveBusy.current = false; setSaving(false);
+    return () => { saveGeneration.current += 1; };
+  }, [dealId, user?.id]);
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 30_000);
+    return () => window.clearInterval(timer);
+  }, []);
+  useEffect(() => {
+    if (!deal) return;
+    const timer = window.setTimeout(() => { void trackDealViewOnce(dealId).catch(() => {}); }, 1000);
+    return () => window.clearTimeout(timer);
+  }, [dealId, deal?.id]);
+  useEffect(() => {
+    if (!isAuthenticated || !deal || claimsQuery.isLoading || claimsQuery.isError) return;
+    const url = new URL(window.location.href);
+    if (url.searchParams.get("intent") !== "claim") return;
+    setShowClaimModal(true);
+    url.searchParams.delete("intent");
+    window.history.replaceState({}, "", url.pathname + url.search + url.hash);
+  }, [isAuthenticated, deal?.id, claimsQuery.isLoading, claimsQuery.isError]);
+  useEffect(() => {
+    if (!isAuthenticated || !deal || favoritesQuery.isLoading || favoritesQuery.isError) return;
+    const url = new URL(window.location.href);
+    if (url.searchParams.get("intent") !== "save") return;
+    setSaveContinuation(true);
+    url.searchParams.delete("intent");
+    window.history.replaceState({}, "", url.pathname + url.search + url.hash);
+  }, [isAuthenticated, deal?.id, favoritesQuery.isLoading, favoritesQuery.isError]);
 
-    viewTimerRef.current = window.setTimeout(() => {
-      trackDealViewOnce(dealId).catch(() => {});
-      viewTimerRef.current = null;
-    }, 1000);
-
-    return () => {
-      if (viewTimerRef.current !== null) {
-        window.clearTimeout(viewTimerRef.current);
-        viewTimerRef.current = null;
-      }
-    };
-  }, [dealId, deal, dealLoading]);
-
-  const claimDealMutation = useMutation({
-    mutationFn: async () => {
-      return await apiRequest("POST", `/api/deals/${dealId}/claim`, {});
-    },
-    onSuccess: () => {
-      toast({
-        title: "Special Claimed!",
-        description:
-          "You have successfully claimed this deal. Show this to the restaurant.",
-      });
-      queryClient.invalidateQueries({ queryKey: ["/api/deals", dealId] });
-    },
-    onError: (error) => {
-      if (isUnauthorizedError(error)) {
-        toast({
-          title: "Unauthorized",
-          description: "You are logged out. Logging in again...",
-          variant: "destructive",
-        });
-        setTimeout(() => {
-          window.location.href = authUrl("/api/auth/google/customer");
-        }, 500);
+  const startClaim = () => {
+    if (!isAuthenticated) {
+      window.location.href = `/login?redirect=${encodeURIComponent(dealIntentPath(currentPath(), "claim"))}`;
+      return;
+    }
+    setShowClaimModal(true);
+  };
+  const toggleSave = async () => {
+    if (!deal) return;
+    if (!isAuthenticated) {
+      window.location.href = `/login?redirect=${encodeURIComponent(dealIntentPath(currentPath(), "save"))}`;
+      return;
+    }
+    if (saveBusy.current || !favoritesQuery.data) return;
+    saveBusy.current = true;
+    const generation = saveGeneration.current;
+    setSaving(true); setSaveError("");
+    try {
+      await apiRequest(saved ? "DELETE" : "POST", `/api/restaurants/${encodeURIComponent(deal.restaurantId)}/favorite`);
+      if (generation !== saveGeneration.current) return;
+      await queryClient.invalidateQueries({ queryKey: ["/api/favorites/restaurants"] });
+      toast({ title: saved ? "Place removed from Saved" : "Place saved", description: "Your saved places are available from Saved." });
+    } catch (error) {
+      if (generation !== saveGeneration.current) return;
+      const message = error instanceof Error ? error.message : "Save not confirmed";
+      if (isDealAuthenticationError(message)) {
+        window.location.href = `/login?redirect=${encodeURIComponent(dealIntentPath(currentPath(), "save"))}`;
         return;
       }
-      toast({
-        title: "Error",
-        description: error.message || "Failed to claim deal",
-        variant: "destructive",
-      });
-    },
-  });
-
-  if (dealLoading || restaurantLoading) {
-    return (
-      <div className="max-w-md lg:max-w-4xl xl:max-w-6xl mx-auto bg-black min-h-screen">
-        <div className="animate-pulse">
-          <div className="w-full h-64 bg-[var(--bg-surface-muted)]"></div>
-          <div className="p-4 space-y-4">
-            <div className="h-6 bg-[var(--bg-surface-muted)] rounded w-3/4"></div>
-            <div className="h-4 bg-[var(--bg-surface-muted)] rounded w-1/2"></div>
-            <div className="h-20 bg-[var(--bg-surface-muted)] rounded"></div>
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  if (!deal) {
-    return (
-      <div className="max-w-md lg:max-w-4xl xl:max-w-6xl mx-auto bg-[var(--bg-layered)] min-h-screen flex items-center justify-center">
-        <Card>
-          <CardContent className="p-6 text-center">
-            <i className="fas fa-exclamation-triangle text-muted-foreground text-3xl mb-4"></i>
-            <p className="text-muted-foreground mb-4">Special not found</p>
-            <Link href="/">
-              <Button>Back to Home</Button>
-            </Link>
-          </CardContent>
-        </Card>
-      </div>
-    );
-  }
-
-  const formatDiscount = (deal: Deal) => {
-    if (deal.dealType === "percentage") {
-      return `${deal.discountValue}% OFF`;
-    } else {
-      return `$${deal.discountValue} OFF`;
+      setSaveError(`${message}. Refresh your saved places before retrying.`);
+    } finally {
+      if (generation === saveGeneration.current) { saveBusy.current = false; setSaving(false); }
     }
   };
+  const saveDisabled = saving || authState === "loading" || (isAuthenticated && !favoritesQuery.data);
+  const saveLabel = saving ? "Saving…" : saved ? "Saved place" : "Save place";
 
-  const formatTime = (timeString: string) => {
-    const [hours, minutes] = timeString.split(":");
-    const hour = parseInt(hours);
-    const ampm = hour >= 12 ? "PM" : "AM";
-    const displayHour = hour % 12 || 12;
-    return `${displayHour}:${minutes} ${ampm}`;
-  };
-
-  const dealTitle = (deal as Deal)?.title || "Food Special";
-  const restaurantName = (restaurant as Restaurant)?.name || "Restaurant";
-  const dealDescription =
-    (deal as Deal)?.description ||
-    "Exclusive food special from a local restaurant";
-  const discountValue = (deal as Deal)?.discountValue || "";
-  const dealType = (deal as Deal)?.dealType || "";
-  const distance = (deal as Deal)?.distance;
-
-  const offerSchema = {
-    "@context": "https://schema.org",
-    "@type": "Offer",
-    name: dealTitle,
-    description: dealDescription,
-    url: `https://www.mealscout.us/deal/${dealId}`,
-    priceCurrency: "USD",
-    price: dealType === "percentage" ? "0" : discountValue,
-    discount:
-      dealType === "percentage" ? `${discountValue}%` : `$${discountValue}`,
-    seller: {
-      "@type": "Restaurant",
-      name: restaurantName,
-      address: (restaurant as Restaurant)?.address || "",
-    },
-    validFrom: (deal as Deal)?.startDate,
-    validThrough: (deal as Deal)?.endDate,
-    availability: "https://schema.org/InStock",
-  };
+  if (dealQuery.isLoading) return <div className="min-h-screen bg-[var(--bg-layered)] p-8" role="status">Loading special…</div>;
+  if (dealQuery.isError || !deal) return (
+    <div className="min-h-screen bg-[var(--bg-layered)] p-6">
+      <Card className="mx-auto max-w-md"><CardContent className="space-y-4 p-6 text-center">
+        <h1 className="text-xl font-bold">{/not found/i.test(String(dealQuery.error?.message)) ? "Special unavailable" : "Special could not be loaded"}</h1>
+        <p className="text-sm text-muted-foreground">This special may have ended, or its details may be temporarily unavailable.</p>
+        <Button onClick={() => void dealQuery.refetch()}>Retry</Button>
+        <Button asChild variant="outline"><Link href="/search">Find food</Link></Button>
+      </CardContent></Card>
+    </div>
+  );
 
   return (
-    <div className="max-w-md lg:max-w-4xl xl:max-w-6xl mx-auto bg-black min-h-screen">
-      <SEOHead
-        title={`${dealTitle} - ${restaurantName} | MealScout`}
-        description={`${dealDescription}. ${
-          dealType === "percentage"
-            ? `Get ${discountValue}% off`
-            : `Save $${discountValue}`
-        } at ${restaurantName}. Claim this exclusive special now on MealScout!`}
-        keywords={`${restaurantName}, ${dealTitle}, food special, restaurant discount, ${
-          (restaurant as Restaurant)?.cuisineType || "food"
-        }`}
-        canonicalUrl={`https://www.mealscout.us/deal/${dealId}`}
-        schemaData={offerSchema}
-      />
-      <BackHeader
-        title="Special Details"
-        fallbackHref="/"
-        icon={Tag}
-        className="bg-black/60 backdrop-blur-xl border-b border-white/5 sticky top-0 z-10"
-      />
-
-      {/* Action Buttons */}
-      <div className="bg-black/40 backdrop-blur-xl px-4 py-2 border-b border-white/5 sticky top-16 z-10">
-        <div className="flex justify-end gap-2">
-          <Button
-            variant="ghost"
-            size="icon"
-            onClick={() => setShowShareModal(true)}
-            data-testid="button-share"
-            aria-label="Share special"
-          >
-            <i className="fas fa-share text-white/60"></i>
-          </Button>
-          <Button
-            variant="ghost"
-            size="icon"
-            data-testid="button-favorite"
-            aria-label="Save special"
-          >
-            <i className="fas fa-heart text-white/60 hover:text-primary"></i>
-          </Button>
-        </div>
+    <div className="mx-auto min-h-screen max-w-3xl bg-[var(--bg-layered)] pb-36 lg:pt-16">
+      <SEOHead title={`${deal.title} | MealScout`} description={deal.description || "View this MealScout special."} canonicalUrl={`https://www.mealscout.us/deal/${dealId}`} />
+      <BackHeader title="Special details" fallbackHref="/search" icon={Tag} />
+      <div className="flex items-center justify-end gap-2 px-4 py-3">
+        <Button variant="outline" onClick={() => setShowShareModal(true)} data-testid="button-share"><Share2 className="mr-2 h-4 w-4" />Share</Button>
+        <Button variant="outline" disabled={saveDisabled} onClick={() => void toggleSave()} aria-pressed={saved} data-testid="button-favorite"><Heart className={`mr-2 h-4 w-4 ${saved ? "fill-current" : ""}`} />{saveLabel}</Button>
       </div>
-
-      {/* Deal Hero */}
-      <div className="relative">
-        <div className="w-full h-64 bg-gradient-to-br from-amber-900/40 via-black to-black flex items-end justify-start overflow-hidden">
-          {(deal as Deal)?.imageUrl ? (
-            <img
-              src={(deal as Deal).imageUrl}
-              alt={(deal as Deal).title}
-              className="absolute inset-0 w-full h-full object-cover opacity-60"
-              data-testid="img-deal"
-              loading="lazy"
-              decoding="async"
-              referrerPolicy="no-referrer"
-            />
-          ) : (
-            <div className="absolute inset-0 flex items-center justify-center">
-              <i className="fas fa-utensils text-primary/20 text-6xl"></i>
-            </div>
-          )}
-          <div className="absolute inset-0 bg-gradient-to-t from-black via-black/40 to-transparent" />
-          <div className="relative z-10 p-6">
-            <span
-              className="inline-block bg-primary text-black px-3 py-1 rounded-full font-black text-sm uppercase tracking-widest shadow-[0_0_20px_rgba(245,158,11,0.5)] mb-2"
-              data-testid="text-discount-badge"
-            >
-              {formatDiscount(deal as Deal)}
-            </span>
-          </div>
+      {deal.imageUrl && <img src={deal.imageUrl} alt="" className="h-56 w-full object-cover sm:h-72" />}
+      <main className="space-y-5 px-4 py-6 sm:px-6">
+        {saveContinuation && <div role="status" className="rounded-xl border border-orange-200 bg-orange-50 p-4 text-sm text-stone-900">{saved ? "This place is already in your saved places." : "You’re back at your special. Tap Save place to keep this business in your saved places."}</div>}
+        <div>
+          <p className="text-sm font-bold text-orange-700" data-testid="text-discount-badge">{deal.dealType === "percentage" ? `${deal.discountValue}% off` : `$${deal.discountValue} off`}</p>
+          <h1 className="mt-1 text-3xl font-black" data-testid="text-deal-title">{deal.title}</h1>
+          {restaurant?.name && <p className="mt-2 font-semibold" data-testid="text-restaurant-name">{restaurant.name}</p>}
+          {deal.description && <p className="mt-3 text-sm leading-6 text-muted-foreground" data-testid="text-deal-description">{deal.description}</p>}
         </div>
+        <Card><CardContent className="space-y-3 p-5 text-sm">
+          <p data-testid="text-deal-time">{startTime && endTime ? `Offer hours: ${startTime} – ${endTime}` : deal.availableDuringBusinessHours ? "Available during business hours" : "Offer hours not provided"}</p>
+          {deal.minOrderAmount && <p data-testid="text-min-order">Minimum order: ${deal.minOrderAmount}</p>}
+          <p data-testid="text-pickup-time">Pickup timing: confirm with the business</p>
+          <p data-testid="text-deal-expires">{deal.endDate && Number.isFinite(Date.parse(deal.endDate)) ? `Ends ${new Date(deal.endDate).toLocaleString()}` : deal.isOngoing ? "Ongoing special" : "Expiry not provided"}</p>
+          {unavailable && <p role="status" className="font-semibold text-red-700">This special is not currently available to claim.</p>}
+        </CardContent></Card>
+        <div className="grid gap-3 sm:grid-cols-2">
+          <Card><CardContent className="p-4">
+            {phoneHref ? <a href={phoneHref} className="inline-flex min-h-11 items-center gap-2 font-bold" data-testid="button-call"><Phone className="h-4 w-4" />Call business</a> : <p className="font-semibold">Phone not provided</p>}
+            {phoneHref && <p className="text-sm text-muted-foreground" data-testid="text-restaurant-phone">{restaurant?.phone}</p>}
+          </CardContent></Card>
+          <Card><CardContent className="p-4">
+            {directionsHref ? <a href={directionsHref} target="_blank" rel="noopener noreferrer" className="inline-flex min-h-11 items-center gap-2 font-bold" data-testid="button-directions"><MapPin className="h-4 w-4" />Directions</a> : <p className="font-semibold">Address not provided</p>}
+            {restaurant?.address && <p className="text-sm text-muted-foreground" data-testid="text-directions">{restaurant.address}</p>}
+          </CardContent></Card>
+        </div>
+        <p className="text-sm text-muted-foreground">Saving keeps this business in your <Link href="/favorites" className="underline">saved places</Link>. Claiming keeps a receipt in <Link href="/orders?view=deals" className="underline">claimed deals</Link>.</p>
+        {reviewsQuery.data && reviewsQuery.data.length > 0 && <section aria-labelledby="deal-reviews-heading" className="space-y-3">
+          <h2 id="deal-reviews-heading" className="text-lg font-bold">Recent recommendations</h2>
+          {reviewsQuery.data.slice(0, 2).map((review) => <Card key={review.id}><CardContent className="space-y-2 p-4">
+            <p className="text-sm font-semibold">{review.user?.firstName || "MealScout customer"}</p>
+            {(review.comment || review.reviewText) && <p className="text-sm text-muted-foreground">{review.comment || review.reviewText}</p>}
+            {review.createdAt && Number.isFinite(Date.parse(review.createdAt)) && <p className="text-xs text-muted-foreground">{new Date(review.createdAt).toLocaleDateString()}</p>}
+          </CardContent></Card>)}
+        </section>}
+        {reviewsQuery.isError && <p className="text-sm text-muted-foreground">Recommendations are temporarily unavailable.</p>}
+        {(saveError || favoritesQuery.isError) && <div role="alert" className="space-y-2 text-sm text-red-700"><p>{saveError || "Saved places could not be loaded."}</p>{isDealAuthenticationError(String(favoritesQuery.error?.message || "")) ? <Button asChild variant="outline"><a href={`/login?redirect=${encodeURIComponent(dealIntentPath(currentPath(), "save"))}`} data-testid="link-login-save">Sign in again to save</a></Button> : <Button variant="outline" onClick={() => void favoritesQuery.refetch()}>Refresh saved places</Button>}</div>}
+        {isAuthenticated && claimsQuery.isError && <div role="alert" className="space-y-2 text-sm text-red-700"><p>Claim history could not be loaded. Check it before claiming again.</p>{isDealAuthenticationError(String(claimsQuery.error?.message || "")) ? <Button asChild variant="outline"><a href={`/login?redirect=${encodeURIComponent(dealIntentPath(currentPath(), "claim"))}`} data-testid="link-login-claim">Sign in again to claim</a></Button> : <Button variant="outline" onClick={() => void claimsQuery.refetch()}>Retry claim history</Button>}</div>}
+      </main>
+      <div className="fixed bottom-0 left-1/2 z-40 w-full max-w-3xl -translate-x-1/2 border-t border-[color:var(--border-subtle)] bg-[var(--bg-popup)] px-4 py-4 shadow-clean" style={{ paddingBottom: "calc(1rem + env(safe-area-inset-bottom, 0px))" }}>
+        <div className="flex gap-3">
+          <Button className="min-h-11 flex-1" onClick={startClaim} disabled={authState === "loading" || (isAuthenticated && (claimsQuery.isLoading || claimsQuery.isError)) || (!existingClaim && unavailable)} data-testid="button-claim-deal">{existingClaim ? `View claim · ${displayClaimStatus(dealClaimStatus(existingClaim, now))}` : isAuthenticated ? "Claim special" : "Sign in to claim"}</Button>
+          <Button variant="outline" disabled={saveDisabled} onClick={() => void toggleSave()} aria-pressed={saved} data-testid="button-save-deal">{saveLabel}</Button>
+        </div>
+        <p className="mt-2 text-center text-xs text-muted-foreground">No purchase or social post is made by claiming.</p>
       </div>
-
-      {/* Deal Content */}
-      <div className="px-4 py-6 pb-32">
-        {/* Restaurant Info */}
-        <div className="flex items-start justify-between mb-6">
-          <div>
-            <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-primary mb-1">At</p>
-            <h1
-              className="text-2xl font-serif font-bold text-white mb-2"
-              data-testid="text-restaurant-name"
-            >
-              {(restaurant as Restaurant)?.name || "Restaurant"}
-            </h1>
-            <div className="flex items-center gap-4 text-xs font-bold text-white/40 uppercase tracking-widest">
-              {distance !== undefined && (
-                <span data-testid="text-restaurant-distance">
-                  <i className="fas fa-map-marker-alt mr-1 text-primary"></i>
-                  {distance.toFixed(1)} mi away
-                </span>
-              )}
-              {Array.isArray(reviews) && reviews.length > 0 ? (
-                <span data-testid="text-restaurant-recommendations">
-                  {reviews.length} recommendation{reviews.length === 1 ? "" : "s"}
-                </span>
-              ) : null}
-            </div>
-          </div>
-          <div className="w-14 h-14 bg-primary/10 border border-primary/20 rounded-2xl flex items-center justify-center">
-            <i className="fas fa-utensils text-primary text-xl"></i>
-          </div>
-        </div>
-
-        {/* Deal Description */}
-        <div className="rounded-3xl border border-white/10 bg-white/5 backdrop-blur-md p-5 mb-6">
-          <h2
-            className="text-lg font-bold text-white mb-2"
-            data-testid="text-deal-title"
-          >
-            {(deal as Deal)?.title}
-          </h2>
-          <p
-            className="text-white/50 text-sm leading-relaxed mb-4"
-            data-testid="text-deal-description"
-          >
-            {(deal as Deal)?.description}
-          </p>
-          <div className="flex items-center gap-4 text-[10px] font-bold text-white/30 uppercase tracking-widest">
-            <span data-testid="text-deal-time">
-              <i className="fas fa-clock mr-1 text-primary/60"></i>
-              {formatTime((deal as Deal)?.startTime || "11:00")} – {formatTime((deal as Deal)?.endTime || "15:00")}
-            </span>
-            {(deal as Deal)?.minOrderAmount && (
-              <span data-testid="text-min-order">
-                <i className="fas fa-dollar-sign mr-1 text-primary/60"></i>
-                Min. ${(deal as Deal).minOrderAmount}
-              </span>
-            )}
-          </div>
-        </div>
-
-        {/* Quick Actions */}
-        <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 mb-6">
-          <Card className="bg-[var(--bg-layered)] border-[color:var(--border-subtle)] shadow-clean">
-            <CardContent className="text-center p-3">
-              <i className="fas fa-clock text-secondary text-lg mb-1"></i>
-              <p
-                className="text-xs font-medium text-foreground"
-                data-testid="text-pickup-time"
-              >
-                15-25 min
-              </p>
-              <p className="text-xs text-muted-foreground">Pickup time</p>
-            </CardContent>
-          </Card>
-          <Card className="bg-[var(--bg-layered)] border-[color:var(--border-subtle)] shadow-clean">
-            <CardContent className="text-center p-3">
-              <i className="fas fa-phone text-[color:var(--accent-text)] text-lg mb-1"></i>
-              <p className="text-xs font-medium text-foreground">Call Now</p>
-              <p
-                className="text-xs text-muted-foreground"
-                data-testid="text-restaurant-phone"
-              >
-                {(restaurant as Restaurant)?.phone || "(555) 123-4567"}
-              </p>
-            </CardContent>
-          </Card>
-          <Card className="bg-[var(--bg-layered)] border-[color:var(--border-subtle)] shadow-clean">
-            <CardContent className="text-center p-3">
-              <i className="fas fa-directions text-[color:var(--accent-text)] text-lg mb-1"></i>
-              <p className="text-xs font-medium text-foreground">Directions</p>
-              {(restaurant as Restaurant)?.address && (
-                <p
-                  className="text-xs text-muted-foreground"
-                  data-testid="text-directions"
-                >
-                  {(restaurant as Restaurant).address.split(",")[0]}
-                </p>
-              )}
-            </CardContent>
-          </Card>
-        </div>
-
-        {/* Reviews */}
-        {Array.isArray(reviews) && reviews.length > 0 && (
-          <div className="mb-6">
-            <div className="flex items-center justify-between mb-3">
-              <h3
-                className="font-semibold text-foreground"
-                data-testid="text-reviews-title"
-              >
-                Recent Reviews
-              </h3>
-              <button
-                className="text-[color:var(--accent-text)] text-sm font-medium"
-                data-testid="button-see-all-reviews"
-              >
-                See all
-              </button>
-            </div>
-
-            <div className="space-y-4">
-              {(reviews as any[])
-                .slice(0, 2)
-                .map((review: any, index: number) => (
-                  <Card
-                    key={review.id}
-                    className="bg-[var(--bg-layered)] border-[color:var(--border-subtle)] shadow-clean"
-                  >
-                    <CardContent className="p-4">
-                      <div className="flex items-center space-x-3 mb-2">
-                        <div className="w-8 h-8 rounded-full bg-[var(--bg-surface-muted)] flex items-center justify-center">
-                          <i className="fas fa-user text-muted-foreground text-xs"></i>
-                        </div>
-                        <div className="flex-1">
-                          <div className="flex items-center space-x-2">
-                            <p
-                              className="font-medium text-sm text-foreground"
-                              data-testid={`text-reviewer-name-${index}`}
-                            >
-                              {review.user?.firstName || "Anonymous"}
-                            </p>
-                          </div>
-                          <p
-                            className="text-xs text-muted-foreground"
-                            data-testid={`text-review-date-${index}`}
-                          >
-                            {new Date(review.createdAt).toLocaleDateString()}
-                          </p>
-                        </div>
-                      </div>
-                      <p
-                        className="text-sm text-foreground"
-                        data-testid={`text-review-comment-${index}`}
-                      >
-                        {review.comment || "Great special!"}
-                      </p>
-                    </CardContent>
-                  </Card>
-                ))}
-            </div>
-          </div>
-        )}
-      </div>
-
-      {/* Share & Earn Credits */}
-      {isAuthenticated && (
-        <div className="mb-6">
-          <Card className="bg-[var(--bg-layered)] border-[color:var(--border-subtle)] shadow-clean">
-            <CardContent className="p-4">
-              <div className="flex items-center gap-3">
-                <div className="shrink-0 rounded-full bg-[color:var(--status-success)]/15 p-2">
-                  <Share2 className="h-4 w-4 text-[color:var(--status-success)]" />
-                </div>
-                <div className="flex-1 min-w-0">
-                  <p className="font-semibold text-sm text-foreground">
-                    Share this deal, earn credits
-                  </p>
-                  <p className="text-xs text-muted-foreground mt-0.5">
-                    Invite friends — when they join, you earn referral credits.
-                  </p>
-                </div>
-              </div>
-              <div className="mt-3">
-                <Button
-                  size="sm"
-                  className="w-full food-gradient-primary border-0 text-sm"
-                  onClick={async () => {
-                    const dealSlug = encodeURIComponent(
-                      `${(deal as Deal)?.title?.toLowerCase().replace(/[^a-z0-9]+/g, "-") || (deal as Deal)?.id}--${(deal as Deal)?.id}`,
-                    );
-                    const url = await resolveCanonicalShareUrl(
-                      `/deal/${dealSlug}`,
-                      { fallbackRef: affiliateTagData?.tag || null },
-                    );
-                    if (navigator.share) {
-                      await navigator.share({ title: (deal as Deal)?.title, url });
-                    } else {
-                      await navigator.clipboard.writeText(url);
-                      toast({
-                        title: "Link copied!",
-                        description: "Share it with friends to earn credits.",
-                      });
-                    }
-                  }}
-                >
-                  <Share2 className="h-3.5 w-3.5 mr-1.5" />
-                  Share & Earn
-                </Button>
-              </div>
-            </CardContent>
-          </Card>
-        </div>
-      )}
-
-      {/* Bottom Action Bar */}
-      <div className="fixed bottom-0 left-1/2 transform -translate-x-1/2 w-full max-w-md bg-[hsl(var(--background))/0.94] border-t border-[color:var(--border-subtle)] px-4 py-4 shadow-clean">
-        <div className="flex items-center space-x-3">
-          <Button
-            className="flex-1 py-3 font-semibold text-sm food-gradient-primary border-0 shadow-clean"
-            onClick={() => setShowClaimModal(true)}
-            disabled={!isAuthenticated}
-            data-testid="button-claim-deal"
-          >
-            <i className="fab fa-facebook-f mr-2"></i>
-            Claim & Post to Facebook
-          </Button>
-          <Button
-            variant="outline"
-            size="icon"
-            className="h-11 w-11"
-            data-testid="button-save-deal"
-          >
-            <i className="fas fa-heart text-muted-foreground"></i>
-          </Button>
-        </div>
-        <p
-          className="text-center text-xs text-muted-foreground mt-2"
-          data-testid="text-deal-expires"
-        >
-          Special expires in{" "}
-          {Math.ceil(
-            (new Date((deal as Deal)?.endDate || Date.now()).getTime() -
-              Date.now()) /
-              (1000 * 60 * 60 * 24),
-          )}{" "}
-          days
-        </p>
-      </div>
-
-      {/* Deal Claim Modal */}
-      <DealClaimModal
-        dealId={dealId || ""}
-        isOpen={showClaimModal}
-        onClose={() => setShowClaimModal(false)}
-      />
-
-      {/* Deal Share Modal */}
-      <DealShareModal
-        isOpen={showShareModal}
-        onClose={() => setShowShareModal(false)}
-        deal={{
-          id: (deal as Deal)?.id || "",
-          title: (deal as Deal)?.title || "",
-          description: (deal as Deal)?.description || "",
-          discountValue: (deal as Deal)?.discountValue || "0",
-          minOrderAmount: (deal as Deal)?.minOrderAmount,
-          restaurant: {
-            name: (restaurant as Restaurant)?.name || "Restaurant",
-            cuisineType: (restaurant as Restaurant)?.cuisineType,
-          },
-        }}
-      />
+      <DealClaimModal key={`${dealId}:${user?.id || "guest"}`} dealId={dealId} isOpen={showClaimModal} onClose={() => setShowClaimModal(false)} existingClaim={existingClaim} onClaimed={(claim) => { if (user?.id) setNewClaim({ userId: user.id, claim }); }} />
+      <DealShareModal isOpen={showShareModal} onClose={() => setShowShareModal(false)} deal={{ id: deal.id, title: deal.title, description: deal.description || "", dealType: deal.dealType, discountValue: deal.discountValue, minOrderAmount: deal.minOrderAmount || undefined, restaurant: { name: restaurant?.name || "Food business", cuisineType: restaurant?.cuisineType || undefined } }} />
     </div>
   );
 }

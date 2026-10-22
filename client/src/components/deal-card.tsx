@@ -1,4 +1,6 @@
 import { useState, useEffect, useRef } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { dealIntentPath, isDealAuthenticationError } from "@/lib/deal-claim-state";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { ToastAction } from "@/components/ui/toast";
@@ -6,7 +8,7 @@ import { Flame, Clock, Heart, UserPlus } from "lucide-react";
 import { GoldenForkIcon } from "@/components/award-badges";
 import { apiRequest } from "@/lib/queryClient";
 import { trackDealViewOnce } from "@/lib/dealViewTracking";
-import { getAffiliateShareUrl } from "@/lib/share";
+import { resolveCanonicalShareUrl } from "@/lib/share";
 import DealShareModal from "./deal-share-modal";
 import RestaurantDealsDrawer from "./restaurant-deals-drawer";
 import { useAuth } from "@/hooks/useAuth";
@@ -23,28 +25,8 @@ import {
   deriveTruckPresence,
 } from "@shared/consumerEntity";
 
-const SAVED_DEALS_KEY = "mealscout_saved_deals";
 let followSnapshotPromise: Promise<Set<string>> | null = null;
 let followSnapshotCache: Set<string> | null = null;
-
-function getSavedDeals(): string[] {
-  try {
-    const raw = localStorage.getItem(SAVED_DEALS_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
-}
-
-function persistSavedDeals(ids: string[]) {
-  try {
-    localStorage.setItem(SAVED_DEALS_KEY, JSON.stringify(ids));
-  } catch {
-    // Best effort; ignore storage failures
-  }
-}
 
 async function getFollowedRestaurantIds(): Promise<Set<string>> {
   if (followSnapshotCache) return followSnapshotCache;
@@ -227,7 +209,8 @@ const getDefaultImage = (cuisineType?: string, title?: string) => {
 };
 
 export default function DealCard({ deal, popularity = null }: DealCardProps) {
-  const { user, isGuest } = useAuth();
+  const { user, isAuthenticated, authState } = useAuth();
+  const queryClient = useQueryClient();
   const isLiveTruck = Boolean(
     deal.restaurant?.isFoodTruck &&
       deriveTruckPresence(
@@ -246,7 +229,20 @@ export default function DealCard({ deal, popularity = null }: DealCardProps) {
   );
   const [showShareModal, setShowShareModal] = useState(false);
   const [showDealsDrawer, setShowDealsDrawer] = useState(false);
-  const [isSaved, setIsSaved] = useState(false);
+  const [savePending, setSavePending] = useState(false);
+  const [saveError, setSaveError] = useState("");
+  const saveBusy = useRef(false);
+  const saveGeneration = useRef(0);
+  const favoritesQuery = useQuery<Array<{ restaurantId?: string; restaurant?: { id: string } }>>({
+    queryKey: ["/api/favorites/restaurants", user?.id],
+    queryFn: async () => {
+      const rows = await (await apiRequest("GET", "/api/favorites/restaurants")).json();
+      if (!Array.isArray(rows)) throw new Error("Saved places could not be read");
+      return rows;
+    },
+    enabled: isAuthenticated, retry: false, staleTime: 0,
+  });
+  const isSaved = favoritesQuery.data?.some((row) => (row.restaurantId || row.restaurant?.id) === deal.restaurantId) || false;
   const cardRef = useRef<HTMLDivElement>(null);
   const [hasTrackedView, setHasTrackedView] = useState(false);
   const viewTimerRef = useRef<number | null>(null);
@@ -280,11 +276,12 @@ export default function DealCard({ deal, popularity = null }: DealCardProps) {
     fallbackImageUrl,
   );
 
-  // Initialize saved state from localStorage for quick UX feedback
   useEffect(() => {
-    const saved = getSavedDeals();
-    setIsSaved(saved.includes(deal.id));
-  }, [deal.id]);
+    saveGeneration.current += 1;
+    saveBusy.current = false;
+    setSavePending(false); setSaveError("");
+    return () => { saveGeneration.current += 1; };
+  }, [deal.id, user?.id]);
 
   // Track view when card becomes visible
   useEffect(() => {
@@ -410,41 +407,26 @@ export default function DealCard({ deal, popularity = null }: DealCardProps) {
   const handleSave = async (e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
-
-    if (isGuest) {
-      window.location.href = "/login";
-      return;
-    }
-
+    const login = () => {
+      window.location.href = `/login?redirect=${encodeURIComponent(dealIntentPath(`/deal/${deal.id}`, "save"))}`;
+    };
+    if (!isAuthenticated) { login(); return; }
+    if (saveBusy.current || !favoritesQuery.data) return;
+    saveBusy.current = true;
+    const generation = saveGeneration.current;
+    setSavePending(true); setSaveError("");
     try {
-      // Toggle saved state immediately for responsiveness
-      const newSavedState = !isSaved;
-      setIsSaved(newSavedState);
-
-      // Keep a lightweight client-side record so the bookmark visibly sticks
-      const currentSaved = getSavedDeals();
-      const updatedSaved = newSavedState
-        ? Array.from(new Set([...currentSaved, deal.id]))
-        : currentSaved.filter((id) => id !== deal.id);
-      persistSavedDeals(updatedSaved);
-
-      // Try to persist server-side when the endpoint is available
-      try {
-        if (newSavedState) {
-          await apiRequest("POST", `/api/deals/${deal.id}/save`, {});
-        } else {
-          await apiRequest("DELETE", `/api/deals/${deal.id}/save`, {});
-        }
-      } catch (apiError) {
-        console.debug(
-          "Deal save API not available; kept client bookmark",
-          apiError
-        );
-      }
+      await apiRequest(isSaved ? "DELETE" : "POST", `/api/restaurants/${encodeURIComponent(deal.restaurantId)}/favorite`, {});
+      if (generation !== saveGeneration.current) return;
+      await queryClient.invalidateQueries({ queryKey: ["/api/favorites/restaurants"] });
+      toast({ title: isSaved ? "Place removed from Saved" : "Place saved", description: "Find this business in your saved places." });
     } catch (error) {
-      console.error("Failed to save deal:", error);
-      // Revert on error
-      setIsSaved(!isSaved);
+      if (generation !== saveGeneration.current) return;
+      const message = error instanceof Error ? error.message : "Save not confirmed";
+      if (isDealAuthenticationError(message)) { login(); return; }
+      setSaveError(`${message}. Refresh saved places before retrying.`);
+    } finally {
+      if (generation === saveGeneration.current) { saveBusy.current = false; setSavePending(false); }
     }
   };
 
@@ -452,7 +434,7 @@ export default function DealCard({ deal, popularity = null }: DealCardProps) {
     e.preventDefault();
     e.stopPropagation();
 
-    const shareUrl = await getAffiliateShareUrl(`/deal/${deal.id}`);
+    const shareUrl = await resolveCanonicalShareUrl(`/deal/${deal.id}`);
     const shareText = `${deal.title} at ${
       deal.restaurant?.name || "this restaurant"
     }`;
@@ -556,6 +538,7 @@ export default function DealCard({ deal, popularity = null }: DealCardProps) {
         setFavoriteSelection(false);
         setFavoriteCount((prev) => Math.max((prev ?? 1) - 1, 0));
       }
+      void queryClient.invalidateQueries({ queryKey: ["/api/favorites/restaurants"] });
       return true;
     } catch (error: any) {
       console.error("Favorite toggle failed:", error);
@@ -800,7 +783,7 @@ export default function DealCard({ deal, popularity = null }: DealCardProps) {
                 </div>
               )}
               {deal.distance !== undefined && (
-                <span>{deal.distance.toFixed(1)} mi</span>
+                <span>{deal.distance.toFixed(1)} km</span>
               )}
               {deal.minOrderAmount && (
                 <>
@@ -816,7 +799,7 @@ export default function DealCard({ deal, popularity = null }: DealCardProps) {
             <div className="flex items-center gap-2 text-[11px] text-secondary mb-2">
               <div className="flex items-center gap-0.5 text-[color:var(--accent-text)]">
                 <Clock className="w-3 h-3" />
-                <span>Available now</span>
+                <span>View offer details</span>
               </div>
               {lastUpdatedLabel && (
                 <div className="rounded-full bg-[var(--bg-surface-muted)] px-2 py-0.5 text-[10px] text-secondary">
@@ -826,7 +809,7 @@ export default function DealCard({ deal, popularity = null }: DealCardProps) {
               <div className="flex items-center gap-0.5">
                 <Flame className="w-3 h-3 text-[color:var(--accent-text)]" />
                 <span className="font-medium text-secondary">
-                  {deal.currentUses || 188} claimed
+                  {typeof deal.currentUses === "number" && Number.isFinite(deal.currentUses) && deal.currentUses >= 0 ? `${deal.currentUses} claimed` : "Claim count unavailable"}
                 </span>
               </div>
             </div>
@@ -838,9 +821,12 @@ export default function DealCard({ deal, popularity = null }: DealCardProps) {
                 size="sm"
                 className="h-7 text-[11px] px-1 text-primary border-[color:var(--border-strong)] bg-[color:var(--bg-surface-muted)] hover:bg-[color:var(--bg-surface-muted)]"
                 onClick={(e) => handleSave(e)}
-                aria-label={isSaved ? "Unsave deal" : "Save deal"}
+                disabled={savePending || authState === "loading" || (isAuthenticated && !favoritesQuery.data)}
+                aria-pressed={isSaved}
+                data-testid={`button-save-place-${deal.id}`}
+                aria-label={isSaved ? "Unsave place" : "Save place"}
               >
-                {isSaved ? "Saved" : "Save"}
+                {savePending ? "Saving…" : isSaved ? "Saved" : "Save"}
               </Button>
 
               <Button
@@ -862,6 +848,10 @@ export default function DealCard({ deal, popularity = null }: DealCardProps) {
                 {isRestaurantFollowed ? "Following" : "Follow"}
               </Button>
             </div>
+            {(saveError || favoritesQuery.isError) && <div role="alert" className="mb-2 text-xs text-red-700" onClick={(event) => event.stopPropagation()}>
+              <p>{saveError || "Saved places could not be loaded."}</p>
+              <Button variant="outline" size="sm" onClick={() => void favoritesQuery.refetch()}>Refresh saved places</Button>
+            </div>}
             {isRestaurantFollowed && (
               <div className="mb-2 flex items-center gap-1.5 rounded-full bg-[var(--bg-surface-muted)] px-2 py-1 text-[11px] text-[color:var(--text-secondary)]">
                 <UserPlus className="h-3 w-3" />

@@ -53,8 +53,10 @@ export function projectPublicLocalMenuItemRow(
       restaurantLogoUrl: restaurant.logoUrl,
       restaurantCoverImageUrl: restaurant.coverImageUrl,
       cuisineType: restaurant.cuisineType,
-      restaurantLatitude: restaurant.latitude,
-      restaurantLongitude: restaurant.longitude,
+      // Both alternatives have already passed the canonical public-location
+      // policy. A mobile business's administrative base is never a fallback.
+      restaurantLatitude: restaurant.currentLatitude ?? restaurant.latitude,
+      restaurantLongitude: restaurant.currentLongitude ?? restaurant.longitude,
       isFoodTruck: restaurant.isFoodTruck,
       businessType: restaurant.businessType,
       favoriteCount: Number(row.favoriteCount || 0),

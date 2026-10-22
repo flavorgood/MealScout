@@ -106,8 +106,8 @@ const locationAnswer = (profile: PublicRestaurantProfile) => {
 const availabilityAnswer = (profile: PublicRestaurantProfile) => {
   if (profile.profileType === "truck") {
     const primary = getTruckSchedulePrimaryStop(profile.truckSchedule);
-    if (primary.kind === "current") return { label: "Live now", value: "Here right now" };
-    if (primary.kind === "today") return { label: "Serving today", value: "Scheduled today" };
+    if (primary.kind === "current") return { label: "Schedule", value: "Scheduled here now" };
+    if (primary.kind === "today") return { label: "Schedule", value: "Scheduled today" };
     if (primary.kind === "next" || primary.kind === "upcoming") {
       return { label: "Scheduled", value: primary.label };
     }
@@ -116,6 +116,9 @@ const availabilityAnswer = (profile: PublicRestaurantProfile) => {
     return { label: "Schedule", value: "Schedule not posted yet" };
   }
 
+  if (profile.profileType === "caterer" || profile.profileType === "private_chef") {
+    return { label: "Availability", value: "Confirm your date with the business" };
+  }
   const openStatus = clean(profile.openStatus);
   if (!openStatus && !clean(profile.operatingHoursSummary)) {
     return { label: "Hours", value: "Hours not posted yet" };

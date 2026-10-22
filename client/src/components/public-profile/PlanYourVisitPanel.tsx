@@ -22,7 +22,9 @@ type PlanYourVisitPanelProps = {
 export function PlanYourVisitPanel({ profile }: PlanYourVisitPanelProps) {
   const isServiceBusiness =
     profile.profileType === "caterer" || profile.profileType === "private_chef";
-  const address = String(profile.addressPublicLabel || "").trim();
+  const isTruck = profile.profileType === "truck";
+  // A truck's administrative base is not its current customer-facing stop.
+  const address = isTruck ? "" : String(profile.addressPublicLabel || "").trim();
   const phone = String(profile.phonePublic || "").trim();
   const website = String(profile.websiteUrl || "").trim();
   const instagram = String(profile.socialLinks?.instagramUrl || "").trim();
@@ -30,9 +32,9 @@ export function PlanYourVisitPanel({ profile }: PlanYourVisitPanelProps) {
   const xUrl = String(profile.socialLinks?.xUrl || "").trim();
 
   const directionsHref =
-    profile.cta.find((action) => action.type === "map")?.href || null;
+    !isTruck ? profile.cta.find((action) => action.safe && action.type === "map")?.href || null : null;
 
-  const hasAnyData = Boolean(address || phone || website || directionsHref);
+  const hasAnyData = Boolean(address || phone || website || directionsHref || instagram || facebook || xUrl);
   if (!hasAnyData) return null;
 
   const rows: Array<{
@@ -49,6 +51,10 @@ export function PlanYourVisitPanel({ profile }: PlanYourVisitPanelProps) {
       href: directionsHref,
       external: true,
     });
+  }
+
+  if (!address && directionsHref) {
+    rows.push({ icon: MapPin, label: "Get directions", href: directionsHref, external: true });
   }
 
   if (phone) {
@@ -83,7 +89,7 @@ export function PlanYourVisitPanel({ profile }: PlanYourVisitPanelProps) {
   return (
     <section aria-label="Plan your visit" className="space-y-3">
       <p className="profile-section-label">
-        {isServiceBusiness ? "Contact and service area" : "Plan your visit"}
+        {isTruck ? "Contact this truck" : isServiceBusiness ? "Contact and service area" : "Plan your visit"}
       </p>
 
       <div className="profile-surface divide-y divide-[color:var(--profile-border)] overflow-hidden rounded-2xl">

@@ -11,6 +11,7 @@ import { SEOHead } from "@/components/seo-head";
 import { useAuth } from "@/hooks/useAuth";
 import { getDishCategoryPhoto } from "@/lib/dishCategoryPhoto";
 import { buildPublicProfilePath } from "@/lib/public-profile-path";
+import { apiRequest } from "@/lib/queryClient";
 
 type FavoriteRestaurant = Restaurant & {
   businessType?: string | null;
@@ -50,14 +51,19 @@ const getFavoriteImage = (restaurant: FavoriteRestaurant) =>
   "/backgrounds/food-truck-day.jpg";
 
 export default function FavoritesPage() {
-  const { authState, isAuthenticated } = useAuth();
+  const { user, authState, isAuthenticated } = useAuth();
   const {
     data: restaurantFavorites = [],
     isLoading,
     isError,
     refetch,
   } = useQuery<FavoriteRow[]>({
-    queryKey: ["/api/favorites/restaurants"],
+    queryKey: ["/api/favorites/restaurants", user?.id],
+    queryFn: async () => {
+      const rows = await (await apiRequest("GET", "/api/favorites/restaurants")).json();
+      if (!Array.isArray(rows) || rows.some(row => !row?.restaurant?.id)) throw new Error("Saved places could not be read");
+      return rows;
+    },
     enabled: isAuthenticated,
   });
 
