@@ -25,6 +25,7 @@ const receipt = {
   isUsed: false, orderAmount: null, dealTitle: deal.title, dealType: deal.dealType,
   discountValue: deal.discountValue, restaurantId, restaurantName: "Synthetic Kitchen",
   restaurantAddress: "100 Synthetic Lane", startDate: deal.startDate, endDate: deal.endDate,
+  startTime: "00:00", endTime: "23:59", availableDuringBusinessHours: false,
   isOngoing: true, isActive: true, restaurantIsActive: true,
 };
 type ClaimMode = "ok" | "malformed" | "failed";
@@ -150,7 +151,7 @@ function confirmClaim(page: Page) {
 }
 
 test.describe("Synthetic rendered deal receipt and wallet recovery", () => {
-  test.use({ actionTimeout: 8_000, navigationTimeout: 15_000, serviceWorkers: "block" });
+  test.use({ actionTimeout: 8_000, navigationTimeout: 15_000, serviceWorkers: "block", timezoneId: "UTC" });
   test.setTimeout(35_000);
   test.afterEach(async ({ page }, info) => {
     await capture(page, info);
