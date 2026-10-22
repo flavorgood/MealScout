@@ -236,7 +236,7 @@ function ConsumerActivity() {
                 {(error as Error).message || "Please try again."}
               </p>
               <Button className="mt-4" data-testid="button-retry-deals" onClick={() => void (activeTab === "deals" ? dealsQuery.refetch() : ordersQuery.refetch())}>Retry</Button>
-              {isDealAuthenticationError(String((error as Error).message || "")) && <Button asChild variant="outline" className="mt-3"><Link href={`/login?redirect=${encodeURIComponent(window.location.pathname + window.location.search + window.location.hash)}`}>Sign in again</Link></Button>}
+              {isDealAuthenticationError(String((error as Error).message || "")) && <Button asChild variant="outline" className="mt-3"><a href={`/login?redirect=${encodeURIComponent(window.location.pathname + window.location.search + window.location.hash)}`}>Sign in again</a></Button>}
             </CardContent>
           </Card>
         ) : activeTab === "orders" && orders.length > 0 ? (
