@@ -24,7 +24,9 @@ const restaurantRows = [insideRestaurant, outsideRestaurant];
 const dealRows = restaurantRows.map((restaurant) => ({
   id: `deal-${restaurant.id}`, title: `Taco fixture deal ${restaurant.id === insideRestaurant.id ? "inside" : "outside"}`,
   description: "Synthetic test offer only", restaurantId: restaurant.id,
-  discountType: "percentage", discountValue: "10", minOrderAmount: "0",
+  dealType: "percentage", discountValue: "10", minOrderAmount: "0",
+  imageUrl: "/images/category-fallback/craving-salad.jpg",
+  ...(restaurant.id === insideRestaurant.id ? { currentUses: 0 } : {}),
   createdAt: "2026-01-01T00:00:00.000Z", endDate: "2099-01-01T00:00:00.000Z",
   isActive: true, restaurant,
 }));
@@ -169,6 +171,9 @@ test.describe("Synthetic nearby search scope", () => {
     const proof = await installSyntheticApi(page);
     await localSearch(page);
     await expect(page.getByText("Taco fixture deal inside", { exact: true })).toBeVisible();
+    await expect(page.getByText("0 claimed", { exact: true })).toBeVisible();
+    await expect(page.getByText("188 claimed", { exact: true })).toHaveCount(0);
+    await expect(page.getByText("Available now", { exact: true })).toHaveCount(0);
     await expect(page.getByTestId("card-restaurant-synthetic-outside")).toHaveCount(0);
     await expect(page.getByTestId("card-menu-item-menu-synthetic-outside")).toHaveCount(0);
     await expect(page.getByText("Taco fixture deal outside", { exact: true })).toHaveCount(0);
@@ -187,6 +192,8 @@ test.describe("Synthetic nearby search scope", () => {
     await page.getByTestId("button-search-wider").click();
     await expect(page.getByTestId("card-restaurant-synthetic-outside")).toBeVisible();
     await expect(page.getByText("Taco fixture deal outside", { exact: true })).toBeVisible();
+    await expect(page.getByText("Claim count unavailable", { exact: true })).toBeVisible();
+    await expect(page.getByText("188 claimed", { exact: true })).toHaveCount(0);
     await expect(page.getByTestId("search-scope")).toContainText(/wider|all|anywhere/i);
   });
 
