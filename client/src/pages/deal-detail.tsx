@@ -26,6 +26,7 @@ type Deal = {
   restaurant?: Restaurant;
 };
 type Favorite = { restaurantId?: string; restaurant?: { id: string } };
+type Review = { id: string; comment?: string | null; reviewText?: string | null; createdAt?: string; user?: { firstName?: string | null } | null };
 
 function timeLabel(value?: string | null) {
   if (!value || !/^([01]\d|2[0-3]):[0-5]\d(?::[0-5]\d)?$/.test(value)) return null;
@@ -63,6 +64,15 @@ export default function DealDetail() {
   });
   const deal = dealQuery.data;
   const restaurant = deal?.restaurant;
+  const reviewsQuery = useQuery<Review[]>({
+    queryKey: ["/api/reviews/restaurant", deal?.restaurantId],
+    queryFn: async () => {
+      const rows = await (await apiRequest("GET", `/api/reviews/restaurant/${encodeURIComponent(deal!.restaurantId)}`)).json();
+      if (!Array.isArray(rows)) throw new Error("Reviews could not be read");
+      return rows;
+    },
+    enabled: !!deal?.restaurantId, retry: false,
+  });
   const claimsQuery = useQuery<DealClaimReceipt[]>({
     queryKey: ["/api/deals/claimed", user?.id],
     queryFn: async () => readClaimList(await (await apiRequest("GET", "/api/deals/claimed")).json()),
@@ -137,7 +147,12 @@ export default function DealDetail() {
       toast({ title: saved ? "Place removed from Saved" : "Place saved", description: "Your saved places are available from Saved." });
     } catch (error) {
       if (generation !== saveGeneration.current) return;
-      setSaveError(error instanceof Error ? error.message : "Save not confirmed. Refresh your saved places before retrying.");
+      const message = error instanceof Error ? error.message : "Save not confirmed";
+      if (/unauthor|not authenticated/i.test(message)) {
+        window.location.href = `/login?redirect=${encodeURIComponent(dealIntentPath(currentPath(), "save"))}`;
+        return;
+      }
+      setSaveError(`${message}. Refresh your saved places before retrying.`);
     } finally {
       if (generation === saveGeneration.current) { saveBusy.current = false; setSaving(false); }
     }
@@ -191,6 +206,15 @@ export default function DealDetail() {
           </CardContent></Card>
         </div>
         <p className="text-sm text-muted-foreground">Saving keeps this business in your <Link href="/favorites" className="underline">saved places</Link>. Claiming keeps a receipt in <Link href="/orders?view=deals" className="underline">claimed deals</Link>.</p>
+        {reviewsQuery.data && reviewsQuery.data.length > 0 && <section aria-labelledby="deal-reviews-heading" className="space-y-3">
+          <h2 id="deal-reviews-heading" className="text-lg font-bold">Recent recommendations</h2>
+          {reviewsQuery.data.slice(0, 2).map((review) => <Card key={review.id}><CardContent className="space-y-2 p-4">
+            <p className="text-sm font-semibold">{review.user?.firstName || "MealScout customer"}</p>
+            {(review.comment || review.reviewText) && <p className="text-sm text-muted-foreground">{review.comment || review.reviewText}</p>}
+            {review.createdAt && Number.isFinite(Date.parse(review.createdAt)) && <p className="text-xs text-muted-foreground">{new Date(review.createdAt).toLocaleDateString()}</p>}
+          </CardContent></Card>)}
+        </section>}
+        {reviewsQuery.isError && <p className="text-sm text-muted-foreground">Recommendations are temporarily unavailable.</p>}
         {(saveError || favoritesQuery.isError) && <div role="alert" className="space-y-2 text-sm text-red-700"><p>{saveError || "Saved places could not be loaded."}</p><Button variant="outline" onClick={() => void favoritesQuery.refetch()}>Refresh saved places</Button></div>}
         {isAuthenticated && claimsQuery.isError && <div role="alert" className="space-y-2 text-sm text-red-700"><p>Claim history could not be loaded. Check it before claiming again.</p><Button variant="outline" onClick={() => void claimsQuery.refetch()}>Retry claim history</Button></div>}
       </main>

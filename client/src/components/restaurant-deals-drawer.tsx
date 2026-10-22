@@ -13,6 +13,7 @@ import { Button } from "@/components/ui/button";
 import DealClaimModal from "./deal-claim-modal";
 import { useAuth } from "@/hooks/useAuth";
 import { useLocation } from "wouter";
+import { dealIntentPath } from "@/lib/deal-claim-state";
 
 interface Deal {
   id: string;
@@ -98,7 +99,7 @@ export default function RestaurantDealsDrawer({
 }: RestaurantDealsDrawerProps) {
   const [currentDealIndex, setCurrentDealIndex] = useState(0);
   const [showClaimModal, setShowClaimModal] = useState(false);
-  const { isAuthenticated } = useAuth();
+  const { isAuthenticated, user } = useAuth();
   const [, setLocation] = useLocation();
 
   const { data: deals, isLoading } = useQuery<Deal[]>({
@@ -150,9 +151,10 @@ export default function RestaurantDealsDrawer({
   };
 
   const handleClaimDeal = () => {
+    const selectedDeal = deals?.[currentDealIndex];
+    if (!selectedDeal) return;
     if (!isAuthenticated) {
-      // Redirect to login page if user is not authenticated
-      setLocation("/login");
+      setLocation(`/login?redirect=${encodeURIComponent(dealIntentPath(`/deal/${selectedDeal.id}`, "claim"))}`);
       return;
     }
     setShowClaimModal(true);
@@ -451,6 +453,7 @@ export default function RestaurantDealsDrawer({
       {/* Deal Claim Modal */}
       {deals && deals[currentDealIndex] && (
         <DealClaimModal
+          key={`${deals[currentDealIndex].id}:${user?.id || "guest"}`}
           isOpen={showClaimModal}
           onClose={() => setShowClaimModal(false)}
           dealId={deals[currentDealIndex].id}
