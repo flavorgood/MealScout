@@ -45,7 +45,7 @@ type Scenario = {
   deniedLocation?: boolean;
 };
 type RequestRecord = { method: string; pathname: string; params: Record<string, string> };
-type Proof = { requests: RequestRecord[]; unexpectedApi: string[]; blockedExternal: string[] };
+type Proof = { requests: RequestRecord[]; unexpectedApi: string[]; blockedExternal: string[]; pageErrors: string[] };
 const proofs = new WeakMap<Page, Proof>();
 
 test.use({ serviceWorkers: "block" });
@@ -53,7 +53,8 @@ test.use({ serviceWorkers: "block" });
 async function installSyntheticApi(page: Page, scenario: Scenario = {}) {
   page.setDefaultTimeout(10_000);
   await page.clock.setFixedTime(new Date("2026-10-22T12:00:00.000Z"));
-  const proof: Proof = { requests: [], unexpectedApi: [], blockedExternal: [] };
+  const proof: Proof = { requests: [], unexpectedApi: [], blockedExternal: [], pageErrors: [] };
+  page.on("pageerror", (error) => proof.pageErrors.push(error.message));
   proofs.set(page, proof);
   await page.routeWebSocket("**/*", (socket) => {
     proof.blockedExternal.push(`WebSocket blocked: ${socket.url()}`);
@@ -152,6 +153,7 @@ async function captureProof(page: Page, info: TestInfo) {
     url: page.url(), syntheticOnly: true, ...proof }, null, 2));
   await info.attach("synthetic-request-evidence", { path: evidence, contentType: "application/json" });
   expect(proof.unexpectedApi, "Every API must have an explicit synthetic response").toEqual([]);
+  expect(proof.pageErrors, "The rendered application must have no uncaught errors").toEqual([]);
 }
 
 test.afterEach(async ({ page }, info) => captureProof(page, info));

@@ -5,6 +5,9 @@ import path from "node:path";
 // These are synthetic receipts and people. Every API request is handled below;
 // the compiled application runs in Vite, with no backend or provider connection.
 const FRONTEND = process.env.FRONTEND_URL ?? "http://127.0.0.1:5187";
+if (!["127.0.0.1", "localhost", "[::1]"].includes(new URL(FRONTEND).hostname)) {
+  throw new Error("Synthetic deal proof requires a loopback FRONTEND_URL");
+}
 const dealId = "synthetic-original-deal";
 const otherDealId = "synthetic-other-deal";
 const restaurantId = "synthetic-kitchen";
@@ -55,6 +58,10 @@ async function isolate(page: Page, state: FixtureState) {
   fixtureByPage.set(page, state);
   page.on("pageerror", (error) => state.pageErrors.push(error.message));
   await page.clock.setFixedTime(new Date("2026-10-22T12:00:00.000Z"));
+  await page.routeWebSocket("**/*", (socket) => {
+    state.blockedExternal.push(`WebSocket blocked: ${socket.url()}`);
+    socket.close();
+  });
   await page.context().route("**/*", async (route) => {
     const request = route.request();
     const url = new URL(request.url());
