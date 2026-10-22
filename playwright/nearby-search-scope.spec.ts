@@ -26,6 +26,7 @@ const dealRows = restaurantRows.map((restaurant) => ({
   description: "Synthetic test offer only", restaurantId: restaurant.id,
   dealType: "percentage", discountValue: "10", minOrderAmount: "0",
   imageUrl: "/images/category-fallback/craving-salad.jpg",
+  distance: restaurant.distance,
   ...(restaurant.id === insideRestaurant.id ? { currentUses: 0 } : {}),
   createdAt: "2026-01-01T00:00:00.000Z", endDate: "2099-01-01T00:00:00.000Z",
   isActive: true, restaurant,
@@ -171,6 +172,8 @@ test.describe("Synthetic nearby search scope", () => {
     const proof = await installSyntheticApi(page);
     await localSearch(page);
     await expect(page.getByText("Taco fixture deal inside", { exact: true })).toBeVisible();
+    await expect(page.getByTestId("card-deal-deal-synthetic-inside").getByText("1.1 km", { exact: true })).toBeVisible();
+    await expect(page.getByTestId("card-menu-item-menu-synthetic-inside").getByText("0.7 mi", { exact: true })).toBeVisible();
     await expect(page.getByText("0 claimed", { exact: true })).toBeVisible();
     await expect(page.getByText("188 claimed", { exact: true })).toHaveCount(0);
     await expect(page.getByText("Available now", { exact: true })).toHaveCount(0);
