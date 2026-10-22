@@ -1115,7 +1115,7 @@ function LocationTruckOptionsSection({
   profile: PublicLocationProfile;
 }) {
   const hostId = String(profile.id || "").trim();
-  const { data: nowData, isLoading: nowLoading } =
+  const { data: nowData, isLoading: nowLoading, isError: nowError, refetch: retryNow } =
     useQuery<LocationDiscoveryPayload>({
       queryKey: ["/api/public/discovery/location", hostId, "now"],
       enabled: Boolean(hostId),
@@ -1125,12 +1125,14 @@ function LocationTruckOptionsSection({
             `/api/public/discovery/location/${encodeURIComponent(hostId)}/time/now`,
           ),
         );
-        if (!res.ok) return { totalTrucks: 0, trucks: [] };
-        return res.json();
+        if (!res.ok) throw new Error("Current truck availability is unavailable");
+        const payload = await res.json();
+        if (!Array.isArray(payload?.trucks)) throw new Error("Current truck availability is unavailable");
+        return payload;
       },
     });
 
-  const { data: tonightData, isLoading: tonightLoading } =
+  const { data: tonightData, isLoading: tonightLoading, isError: tonightError, refetch: retryTonight } =
     useQuery<LocationDiscoveryPayload>({
       queryKey: ["/api/public/discovery/location", hostId, "tonight"],
       enabled: Boolean(hostId),
@@ -1140,13 +1142,15 @@ function LocationTruckOptionsSection({
             `/api/public/discovery/location/${encodeURIComponent(hostId)}/time/tonight`,
           ),
         );
-        if (!res.ok) return { totalTrucks: 0, trucks: [] };
-        return res.json();
+        if (!res.ok) throw new Error("Tonight's truck availability is unavailable");
+        const payload = await res.json();
+        if (!Array.isArray(payload?.trucks)) throw new Error("Tonight's truck availability is unavailable");
+        return payload;
       },
     });
 
-  const nowTrucks = Array.isArray(nowData?.trucks) ? nowData!.trucks! : [];
-  const tonightTrucks = Array.isArray(tonightData?.trucks)
+  const nowTrucks = !nowError && Array.isArray(nowData?.trucks) ? nowData!.trucks! : [];
+  const tonightTrucks = !tonightError && Array.isArray(tonightData?.trucks)
     ? tonightData!.trucks!
     : [];
 
@@ -1157,6 +1161,7 @@ function LocationTruckOptionsSection({
 
   const hasCards = nowTrucks.length > 0 || tonightOnly.length > 0;
   const loading = nowLoading || tonightLoading;
+  const unavailable = nowError || tonightError;
   const featuredCurrent = nowTrucks.length > 0 ? nowTrucks[0] : null;
   const remainingCurrent = nowTrucks.length > 1 ? nowTrucks.slice(1) : [];
 
@@ -1253,7 +1258,7 @@ function LocationTruckOptionsSection({
   };
 
   return (
-    <Card className="border-white/10 bg-[#0f0d0b]">
+    <Card className="border-white/10 bg-[#0f0d0b]" data-location-truck-options>
       <CardHeader>
         <CardTitle className="text-xl text-white">Food options here</CardTitle>
       </CardHeader>
@@ -1306,7 +1311,17 @@ function LocationTruckOptionsSection({
           </div>
         ) : null}
 
-        {!loading && !hasCards ? (
+        {unavailable ? (
+          <div role="alert" className="rounded-lg border border-orange-400/25 bg-black/20 p-4 text-sm text-white/75">
+            <p>Truck availability could not be loaded. Try again for the latest food options.</p>
+            <Button type="button" variant="outline" className="mt-3" onClick={() => {
+              if (nowError) void retryNow();
+              if (tonightError) void retryTonight();
+            }}>Retry truck availability</Button>
+          </div>
+        ) : null}
+
+        {!loading && !unavailable && !hasCards ? (
           <div className="rounded-lg border border-white/10 bg-black/20 p-4 text-sm text-white/75">
             <p>No trucks listed right now.</p>
             <p className="mt-1">Check back soon or explore nearby food.</p>
@@ -3117,14 +3132,17 @@ export default function PublicProfilePage() {
         ogImage={ogImage}
         schemaData={{
           "@context": "https://schema.org",
-          "@type": "ProfilePage",
+          "@type": "WebPage",
           "@id": `${canonicalUrl}#webpage`,
           name: data.displayName,
           url: canonicalUrl,
           mainEntity: {
             "@type": data.profileType === "restaurant" ? "Restaurant"
-              : data.profileType === "bar" ? "BarOrPub" : "LocalBusiness",
-            "@id": `${canonicalUrl}#business`,
+              : data.profileType === "truck" ? "FoodTruck"
+              : data.profileType === "bar" ? "BarOrPub"
+              : data.profileType === "caterer" || data.profileType === "private_chef" ? "FoodEstablishment"
+              : "LocalBusiness",
+            "@id": `${canonicalUrl}#${data.profileType === "location" ? "location" : data.profileType === "supplier" ? "supplier" : "business"}`,
             name: data.displayName,
             url: canonicalUrl,
             image: new URL(ogImage, canonicalUrl).toString(),

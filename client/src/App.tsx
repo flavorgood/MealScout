@@ -691,7 +691,7 @@ function App() {
   const isPublicProfilePath =
     currentPath.startsWith("/p/") ||
     Boolean(parseCleanAffiliateBusinessRoute(currentPath)) ||
-    /^\/(restaurant|truck|bar|location|supplier)\/[^/]+(?:\/[^/]+)?$/i.test(
+    /^\/(restaurant|truck|bar|caterer|private-chef|location|supplier)\/[^/]+(?:\/[^/]+)?$/i.test(
       currentPath,
     );
   const usesSelfContainedConsumerShell =

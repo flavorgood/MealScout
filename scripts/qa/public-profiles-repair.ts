@@ -87,7 +87,7 @@ function check(label:string,ok:boolean,detail?:unknown){report.checks.push({labe
 let browser:any;
 try{
   for(const kind of kinds){const row=rows.get(kind);const response=await fetch(`${base}/api/public/profiles/${kind}/${row.id}`);const dto:any=await response.json();check(kind+' logged-out API',response.status===200,{status:response.status,dto});if(response.status===200)row.dto=dto;
-    if(response.status===200){const htmlRes=await fetch(base+dto.profilePath);const html=await htmlRes.text();check(kind+' server HTML/canonical',htmlRes.status===200&&html.includes('rel="canonical"')&&html.includes(dto.displayName),htmlRes.status);await writeFile(path.join(output,kind+'-ssr.html'),html);if(kind==='location'||kind==='supplier')check(kind+' opens interactive profile',html.includes('?view=app'));}}
+    if(response.status===200){const htmlRes=await fetch(base+dto.profilePath);const html=await htmlRes.text();check(kind+' server HTML/canonical',htmlRes.status===200&&html.includes('rel="canonical"')&&html.includes(dto.displayName),htmlRes.status);row.ssrSchemas=[...html.matchAll(/<script[^>]*type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/g)].map(match=>JSON.parse(match[1]));await writeFile(path.join(output,kind+'-ssr.html'),html);if(kind==='location'||kind==='supplier')check(kind+' opens interactive profile',html.includes('?view=app'));}}
   browser=await chromium.launch({headless:true,executablePath:process.env.PROFILE_CHROMIUM_PATH||'/usr/bin/chromium',args:['--no-sandbox']});
   for(const viewport of [{width:1365,height:900},{width:390,height:844}]){
     const context=await browser.newContext({viewport,serviceWorkers:'block'});let blocked=0;
@@ -100,6 +100,11 @@ try{
       check(kind+' routed heading '+viewport.width,await page.getByRole('heading',{name:row.dto.displayName,exact:true}).isVisible());
       const shell=page.locator('.mealscout-public-profile');check(kind+' native brand '+viewport.width,await shell.count()===1);
       check(kind+' no horizontal overflow '+viewport.width,await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));
+      if(viewport.width===390){const targets=await page.locator('[data-mobile-action-dock] a').evaluateAll(links=>links.map(link=>{const r=link.getBoundingClientRect();return {label:link.textContent?.trim(),reachable:document.elementFromPoint(r.x+r.width/2,r.y+r.height/2)?.closest('a')===link};}));check(kind+' mobile actions accept taps',targets.length>0&&targets.every(target=>target.reachable),targets);}
+      const appSchema=JSON.parse(await page.locator('script[data-page-schema]').innerText());
+      const ssrPage=row.ssrSchemas.find((entry:any)=>entry['@id']===appSchema['@id']);
+      const ssrEntity=row.ssrSchemas.find((entry:any)=>entry['@id']===appSchema.mainEntity?.['@id']);
+      check(kind+' HTML/app schema identity '+viewport.width,ssrPage?.['@type']===appSchema['@type']&&ssrPage?.mainEntity?.['@id']===appSchema.mainEntity?.['@id']&&ssrEntity?.['@type']===appSchema.mainEntity?.['@type'],{app:appSchema,ssrPage,ssrEntity});
       const filename=`${kind}-${viewport.width}.png`;await page.screenshot({path:path.join(output,filename),fullPage:true});report.screens.push(filename);
       if(kind==='supplier'&&viewport.width>700)check('supplier desktop actions',await page.locator('main a[href="https://harbor.example.invalid"]').first().isVisible());
       if(kind==='location')check('unknown host activity is not zero',!(await page.locator('#menu').innerText()).includes('No trucks listed right now'));
@@ -109,6 +114,32 @@ try{
     report.checks.push({label:'browser external requests blocked '+viewport.width,ok:true,detail:blocked});await context.close();
   }
   const truck=rows.get('truck');
+  const discoveryContext=await browser.newContext({viewport:{width:390,height:844},serviceWorkers:'block'});
+  let discoveryState:'failed'|'empty'|'malformed'|'partial'='failed';
+  await discoveryContext.route('**/*',route=>{
+    const u=new URL(route.request().url());if(u.origin!==base)return route.abort();
+    if(u.pathname.startsWith('/api/public/discovery/location/')&&/\/time\/(now|tonight)$/.test(u.pathname)){
+      if(discoveryState==='failed'||discoveryState==='partial'&&u.pathname.endsWith('/tonight'))return route.fulfill({status:503,json:{message:'Synthetic discovery unavailable'}});
+      return route.fulfill({json:discoveryState==='malformed'?{}:{totalTrucks:discoveryState==='partial'?1:0,trucks:discoveryState==='partial'?[{id:truck.id,name:truck.dto.displayName,truckPath:truck.dto.profilePath}]:[]}});
+    }
+    return ['GET','HEAD','OPTIONS'].includes(route.request().method())?route.continue():route.abort();
+  });
+  const discovery=await discoveryContext.newPage();discovery.setDefaultTimeout(30000);
+  await discovery.goto(base+rows.get('location').dto.profilePath+'?view=app',{waitUntil:'networkidle'});
+  const foodOptions=discovery.locator('[data-location-truck-options]');
+  await foodOptions.getByRole('button',{name:'Retry truck availability',exact:true}).waitFor();
+  check('failed host discovery is unknown, not zero',await foodOptions.getByRole('alert').isVisible()&&!(await foodOptions.innerText()).includes('No trucks listed right now.'));
+  await discovery.screenshot({path:path.join(output,'location-discovery-failed-390.png'),fullPage:true});
+  discoveryState='empty';await foodOptions.getByRole('button',{name:'Retry truck availability',exact:true}).click();
+  await foodOptions.getByText('No trucks listed right now.',{exact:true}).waitFor();
+  check('host discovery retry can confirm an empty result',await foodOptions.getByRole('alert').count()===0);
+  discoveryState='malformed';await discovery.reload({waitUntil:'networkidle'});await foodOptions.getByRole('button',{name:'Retry truck availability',exact:true}).waitFor();
+  check('malformed host discovery remains unknown',!(await foodOptions.innerText()).includes('No trucks listed right now.'));
+  discoveryState='partial';await discovery.reload({waitUntil:'networkidle'});await foodOptions.getByRole('button',{name:'Retry truck availability',exact:true}).waitFor();
+  check('partial host discovery retains successful food options',await foodOptions.getByText(truck.dto.displayName,{exact:true}).isVisible()&&!(await foodOptions.innerText()).includes('No trucks listed right now.'));
+  discoveryState='empty';await foodOptions.getByRole('button',{name:'Retry truck availability',exact:true}).click();await foodOptions.getByRole('alert').waitFor({state:'detached'});
+  check('partial host discovery retry preserves successful results',await foodOptions.getByText(truck.dto.displayName,{exact:true}).isVisible());
+  await discoveryContext.close();
   const catalogContext=await browser.newContext({viewport:{width:390,height:844},serviceWorkers:'block'});
   await catalogContext.route('**/*',route=>{const u=new URL(route.request().url());return u.origin===base&&['GET','HEAD','OPTIONS'].includes(route.request().method())?route.continue():route.abort();});
   const catalog=await catalogContext.newPage();catalog.setDefaultTimeout(30000);
