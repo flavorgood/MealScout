@@ -4,7 +4,7 @@ import { Link } from "wouter";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { apiRequest } from "@/lib/queryClient";
-import { dealClaimStatus, dealIntentPath, readClaimList, readClaimResponse, type DealClaimReceipt } from "@/lib/deal-claim-state";
+import { dealClaimStatus, dealIntentPath, displayClaimStatus, readClaimList, readClaimResponse, type DealClaimReceipt } from "@/lib/deal-claim-state";
 
 interface DealClaimModalProps {
   dealId: string;
@@ -84,13 +84,14 @@ export default function DealClaimModal({ dealId, onClose, isOpen, existingClaim,
             <div className="rounded-2xl border border-orange-200 bg-orange-50 p-4 text-stone-900">
               <p className="font-bold">{receipt.dealTitle || "Claimed special"}</p>
               {receipt.restaurantName && <p className="mt-1 text-sm">{receipt.restaurantName}</p>}
-              <p className="mt-3 font-bold" data-testid="claim-status">{status}</p>
+              <p className="mt-3 font-bold" data-testid="claim-status">{status && displayClaimStatus(status)}</p>
               <p className="mt-1 break-all text-xs">Receipt: <span data-testid="text-claim-id">{receipt.id}</span></p>
               <p className="mt-1 text-xs">Claimed {new Date(receipt.claimedAt).toLocaleString()}</p>
               {receipt.endDate && <p className="mt-1 text-xs">Expires {new Date(receipt.endDate).toLocaleString()}</p>}
+              <p className="mt-1 text-xs">{receipt.availableDuringBusinessHours ? "Offer hours: business hours" : receipt.startTime && receipt.endTime ? `Offer hours: ${receipt.startTime} – ${receipt.endTime}` : "Offer hours: confirm with the business"}</p>
             </div>
             <p className="text-sm text-muted-foreground">
-              {status === "Active" ? "Show this receipt to the business. The business confirms redemption and any offer terms." : "This receipt is kept for your records and is not currently redeemable."}
+              {status === "Active" ? "A claim does not confirm redemption now. Check the offer hours and terms with the business, and show this receipt when you visit." : "This receipt is kept for your records and is not currently redeemable."}
             </p>
             <Button asChild className="w-full"><Link href="/orders?view=deals" data-testid="link-claimed-deals">Open claimed deals</Link></Button>
             <Button variant="outline" className="w-full" onClick={onClose}>Done</Button>

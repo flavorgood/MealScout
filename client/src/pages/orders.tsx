@@ -21,7 +21,7 @@ import { SEOHead } from "@/components/seo-head";
 import { useAuth } from "@/hooks/useAuth";
 import { apiRequest } from "@/lib/queryClient";
 import DealClaimModal from "@/components/deal-claim-modal";
-import { dealClaimStatus, readClaimList, type DealClaimReceipt } from "@/lib/deal-claim-state";
+import { dealClaimStatus, displayClaimStatus, readClaimList, type DealClaimReceipt } from "@/lib/deal-claim-state";
 
 type ActivityTab = "orders" | "deals";
 
@@ -84,6 +84,7 @@ function formatClaimMoney(value?: string | number | null) {
 }
 
 function formatDiscount(claim: ClaimedDeal) {
+  if (claim.discountValue == null || claim.discountValue === "") return "Deal claimed";
   const value = Number(claim.discountValue);
   if (!Number.isFinite(value)) return "Deal claimed";
   return claim.dealType === "fixed"
@@ -203,7 +204,7 @@ function ConsumerActivity() {
         {activeTab === "deals" && claims.length > 0 ? (
           <div className="mt-4 flex flex-wrap gap-2 text-xs text-[color:var(--text-muted)]">
             <span className="rounded-full bg-orange-50 px-3 py-1.5 font-semibold text-orange-900">
-              {activeClaims.length} active
+              {activeClaims.length} current claims
             </span>
             <span className="rounded-full bg-stone-100 px-3 py-1.5 font-semibold text-stone-700">
               {completedClaims.length} used
@@ -305,7 +306,7 @@ function ConsumerActivity() {
                             : "border-orange-200 bg-orange-50 text-orange-800"
                         }
                       >
-                        <span data-testid={`claim-status-${claim.id}`}>{claimStatus}</span>
+                        <span data-testid={`claim-status-${claim.id}`}>{displayClaimStatus(claimStatus)}</span>
                       </Badge>
                     </div>
                     <div className="mt-4 flex items-end justify-between gap-3 border-t border-[color:var(--border-subtle)] pt-4">

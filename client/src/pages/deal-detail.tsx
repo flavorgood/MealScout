@@ -13,7 +13,7 @@ import DealShareModal from "@/components/deal-share-modal";
 import { BackHeader } from "@/components/back-header";
 import { SEOHead } from "@/components/seo-head";
 import { extractUuidFromSlug } from "@/lib/seo-slug";
-import { dealClaimStatus, dealDirectionsHref, dealIntentPath, dealPhoneHref, readClaimList, type DealClaimReceipt } from "@/lib/deal-claim-state";
+import { dealClaimStatus, displayClaimStatus, dealDirectionsHref, dealIntentPath, dealPhoneHref, readClaimList, type DealClaimReceipt } from "@/lib/deal-claim-state";
 
 type Restaurant = { id: string; name: string; address?: string | null; phone?: string | null; cuisineType?: string | null; };
 type Deal = {
@@ -230,7 +230,7 @@ export default function DealDetail() {
       </main>
       <div className="fixed bottom-0 left-1/2 z-40 w-full max-w-3xl -translate-x-1/2 border-t border-[color:var(--border-subtle)] bg-[var(--bg-popup)] px-4 py-4 shadow-clean">
         <div className="flex gap-3">
-          <Button className="min-h-11 flex-1" onClick={startClaim} disabled={authState === "loading" || (isAuthenticated && (claimsQuery.isLoading || claimsQuery.isError)) || (!existingClaim && unavailable)} data-testid="button-claim-deal">{existingClaim ? `View claim · ${dealClaimStatus(existingClaim, now)}` : isAuthenticated ? "Claim special" : "Sign in to claim"}</Button>
+          <Button className="min-h-11 flex-1" onClick={startClaim} disabled={authState === "loading" || (isAuthenticated && (claimsQuery.isLoading || claimsQuery.isError)) || (!existingClaim && unavailable)} data-testid="button-claim-deal">{existingClaim ? `View claim · ${displayClaimStatus(dealClaimStatus(existingClaim, now))}` : isAuthenticated ? "Claim special" : "Sign in to claim"}</Button>
           <Button variant="outline" disabled={saveDisabled} onClick={() => void toggleSave()} aria-pressed={saved} data-testid="button-save-deal">{saveLabel}</Button>
         </div>
         <p className="mt-2 text-center text-xs text-muted-foreground">No purchase or social post is made by claiming.</p>

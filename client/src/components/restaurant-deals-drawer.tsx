@@ -237,26 +237,9 @@ export default function RestaurantDealsDrawer({
               {/* Restaurant Info */}
               <div className="flex-1 min-w-0">
                 <div className="flex items-center gap-2 mb-1">
-                  <div className="flex items-center gap-1">
-                    <svg
-                      width="14"
-                      height="14"
-                      viewBox="0 0 24 24"
-                      fill="currentColor"
-                      className="text-yellow-500"
-                    >
-                      <path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z" />
-                    </svg>
-                    <span className="text-sm font-semibold text-[color:var(--text-primary)]">
-                      4.5
-                    </span>
-                  </div>
                   <span className="text-sm text-[color:var(--text-muted)]">•</span>
                   <span className="text-sm text-[color:var(--text-muted)]">
                     {deals[0].restaurant.cuisineType || "Restaurant"}
-                  </span>
-                  <span className="px-2 py-0.5 bg-[color:var(--status-success)]/12 text-[color:var(--status-success)] text-xs font-medium rounded-full">
-                    Open now
                   </span>
                 </div>
 
@@ -275,10 +258,6 @@ export default function RestaurantDealsDrawer({
                       </span>
                     </div>
                   )}
-                  <div className="flex items-center gap-1">
-                    <Clock className="w-3 h-3" />
-                    <span>Open until 10:00 PM</span>
-                  </div>
                 </div>
               </div>
             </div>
@@ -400,8 +379,7 @@ export default function RestaurantDealsDrawer({
                               off
                             </span>
                             <p className="text-[color:var(--status-error)] text-sm">
-                              orders $
-                              {deals[currentDealIndex].minOrderAmount || "15"}+
+                              {deals[currentDealIndex].minOrderAmount ? `Minimum order ${deals[currentDealIndex].minOrderAmount}` : "Minimum order not provided"}
                             </p>
                           </div>
                         </div>
