@@ -50,6 +50,8 @@ Record one entry before merge and one entry after deploy verification for each r
 | 2026-04-17 | PR-10 | phase-7-slo-protection | before | PASS | PASS | PASS | <100ms | PASS | PASS | baseline | Stabilization sweep started after PR-9 verification and hotspot refresh |
 | 2026-04-17 | PR-10 | phase-7-slo-protection | after | PASS | PASS | PASS | <100ms | PASS | PASS | no change | Stabilization sweep complete after PR-3 and PR-5 extraction completion; no additional regressions identified in typecheck/build/flow verification pass (known env-gated failures unchanged). |
 
+| 2026-10-22 | PR-434 / PR-435 | critical-bug-fix | before | Not measured in production | Not measured | Not measured | Not measured | Local fixtures only | Provider reports base live | Not measured | Before combined release: profiles `2b1fe1e8` plus published Deals/search `741179d9`, both based on `2a49c732`. Existing Render deploy `dep-dbbcap6i0phs738brqr0` reports base live. Prior profile source has 146 isolated routed checks and 43 native PostgreSQL/password-session checks; combined exact-head review/CI remains pending. No real claims, orders, payments, publishing or access changes used as metrics. See `docs/evidence/public-profile-local-release-proof-20261022.md`. |
+
 ## Usage Rules
 
 - `Snapshot` must be `before` or `after`.
