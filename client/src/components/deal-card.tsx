@@ -816,7 +816,7 @@ export default function DealCard({ deal, popularity = null }: DealCardProps) {
             <div className="flex items-center gap-2 text-[11px] text-secondary mb-2">
               <div className="flex items-center gap-0.5 text-[color:var(--accent-text)]">
                 <Clock className="w-3 h-3" />
-                <span>Available now</span>
+                <span>View offer details</span>
               </div>
               {lastUpdatedLabel && (
                 <div className="rounded-full bg-[var(--bg-surface-muted)] px-2 py-0.5 text-[10px] text-secondary">
@@ -826,7 +826,7 @@ export default function DealCard({ deal, popularity = null }: DealCardProps) {
               <div className="flex items-center gap-0.5">
                 <Flame className="w-3 h-3 text-[color:var(--accent-text)]" />
                 <span className="font-medium text-secondary">
-                  {deal.currentUses || 188} claimed
+                  {typeof deal.currentUses === "number" && Number.isFinite(deal.currentUses) && deal.currentUses >= 0 ? `${deal.currentUses} claimed` : "Claim count unavailable"}
                 </span>
               </div>
             </div>
