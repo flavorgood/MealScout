@@ -881,7 +881,7 @@ export default function SearchPage() {
                   : searchQuery && totalStructuredMatches > 0
                     ? "Showing restaurants, trucks, and deals that match your search"
                     : searchQuery
-                      ? "No matches yet"
+                      ? localLocation ? "No food matches in your selected radius" : "No matches yet"
                       : "Use location for nearby results or browse featured deals"}
             </p>
           </div>
@@ -941,9 +941,14 @@ export default function SearchPage() {
             </Button>
           )}
           {localLocation && searchQuery.trim() && (
-            <p className="text-xs text-muted-foreground">
-              Videos and events do not provide a nearby location in search. Choose Search all locations to include them.
-            </p>
+            <div className="space-y-2 text-xs text-muted-foreground">
+              <p data-testid="search-parking-coverage">
+                Parking coverage is limited to spots included in wider search; other nearby spots may be missing. Search all locations to browse the available parking results.
+              </p>
+              <p>
+                Videos and events do not provide a nearby location in search. Choose Search all locations to include them.
+              </p>
+            </div>
           )}
           <form className="flex gap-2" onSubmit={(event) => { event.preventDefault(); void findManualLocation(); }}>
             <div className="min-w-0 flex-1">
@@ -1481,7 +1486,7 @@ export default function SearchPage() {
             <div className="w-20 h-20 bg-[var(--bg-surface-muted)] rounded-2xl flex items-center justify-center mx-auto mb-4">
               <Search className="w-8 h-8 text-muted-foreground" />
             </div>
-            <h3 className="font-bold text-lg text-foreground mb-2">
+            <h3 className="font-bold text-lg text-foreground mb-2" data-testid="search-empty-message">
               {searchQuery.trim().length === 1
                 ? "Enter at least two characters"
                 : dealsUnavailable
@@ -1491,7 +1496,7 @@ export default function SearchPage() {
                     : searchQuery && totalStructuredMatches > 0
                 ? "No deals found"
                 : hasSearchIntent
-                  ? "No matches found"
+                  ? localLocation ? "No nearby food matches found" : "No matches found"
                   : "Start with what sounds good"}
             </h3>
             <p className="text-muted-foreground">
@@ -1504,7 +1509,11 @@ export default function SearchPage() {
                     : searchQuery && totalStructuredMatches > 0
                 ? "Other matching results are listed above even without active deals."
                 : hasSearchIntent
-                  ? "Try another dish, place, truck, or category."
+                  ? localLocation
+                    ? searchQuery.trim()
+                      ? "No matching restaurants, menu items, or deals returned within your radius. Parking coverage is limited; other nearby spots may be missing. Use Search all locations to browse available parking results."
+                      : "No deals match your current filters within your radius. Try another dish, place, truck, or category."
+                    : "Try another dish, place, truck, or category."
                   : "Search for a dish or place, choose a category, or scout."}
             </p>
             {didYouMean && (
