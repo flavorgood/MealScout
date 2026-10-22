@@ -5,7 +5,7 @@ import { createDealClaimHandler } from "../server/routes/dealClaimHandler";
 
 // These are synthetic receipts and people. Every API request is handled below;
 // the compiled application runs in Vite, with no backend or provider connection.
-const FRONTEND = process.env.FRONTEND_URL ?? "http://127.0.0.1:5187";
+const FRONTEND = process.env.FRONTEND_URL ?? "http://127.0.0.1:5174";
 if (!["127.0.0.1", "localhost", "[::1]"].includes(new URL(FRONTEND).hostname)) {
   throw new Error("Synthetic deal proof requires a loopback FRONTEND_URL");
 }
@@ -35,6 +35,12 @@ const receipt = {
 type ClaimMode = "ok" | "malformed" | "failed";
 type FixtureState = {
   authenticated: boolean;
+  userType?: string;
+  userId?: string;
+  offer?: Partial<typeof deal>;
+  saved?: boolean;
+  saveFailure?: boolean;
+  saveWrites?: number;
   rows: Array<Record<string, unknown>>;
   claimMode: ClaimMode;
   walletFailure: boolean;
@@ -62,10 +68,10 @@ async function nativeClaimResponse(state: FixtureState) {
   // This is the production HTTP handler with a disposable in-memory adapter.
   // Its lifecycle import is type-only; no database or provider module executes.
   const handler = createDealClaimHandler({
-    getDeal: async () => deal,
+    getDeal: async () => ({ ...deal, ...state.offer }),
     getRestaurant: async () => deal.restaurant,
     claimDealAtomic: async (requestedDeal, userId, limit) => {
-      expect([requestedDeal, userId, limit]).toEqual([dealId, "synthetic-customer", 1]);
+      expect([requestedDeal, userId, limit]).toEqual([dealId, "synthetic-customer", state.offer?.perCustomerLimit || 1]);
       // A concurrent synthetic request can create a receipt after preflight.
       if (state.nativeReplay && state.rows.length === 0) state.rows.push({ ...receipt });
       const previous = state.rows.find((row) => row.dealId === requestedDeal && !row.isUsed && !row.usedAt);
@@ -116,7 +122,7 @@ async function isolate(page: Page, state: FixtureState) {
     if (key === "GET /api/auth/user") {
       const hasSession = state.authenticated && !state.sessionExpired;
       return route.fulfill({ status: hasSession ? 200 : 401, json: hasSession ? {
-        id: "synthetic-customer", email: "synthetic@example.invalid", userType: "customer",
+        id: state.userId || "synthetic-customer", email: "synthetic@example.invalid", userType: state.userType || "customer",
         firstName: "Synthetic", lastName: "Customer", profileComplete: true,
         accountOnboardingComplete: true, emailVerified: true, nextRequiredStep: "complete",
       } : { message: "Guest fixture" } });
@@ -128,7 +134,7 @@ async function isolate(page: Page, state: FixtureState) {
       state.sessionExpired = false;
       return route.fulfill({ status: 200, json: { success: true } });
     }
-    if (key === `GET /api/deals/${dealId}`) return route.fulfill({ status: state.unavailable ? 404 : 200, json: state.unavailable ? { message: "Special unavailable" } : deal });
+    if (key === `GET /api/deals/${dealId}`) return route.fulfill({ status: state.unavailable ? 404 : 200, json: state.unavailable ? { message: "Special unavailable" } : { ...deal, ...state.offer } });
     if (key === `GET /api/restaurants/${restaurantId}`) return route.fulfill({ status: 200, json: { ...deal.restaurant, address: "100 Synthetic Lane", latitude: 30.42, longitude: -87.22 } });
     if (key === `GET /api/reviews/restaurant/${restaurantId}`) return route.fulfill({ status: 200, json: [] });
     if (key === "GET /api/deals/featured") return route.fulfill({ status: 200, json: [deal] });
@@ -148,9 +154,17 @@ async function isolate(page: Page, state: FixtureState) {
     if (key === "GET /api/my/orders") return route.fulfill({ status: 200, json: { orders: [] } });
     if (key === "GET /api/business-access/me") return route.fulfill({ status: 200, json: { hasAnyAccess: false, restaurants: [] } });
     if (key === "GET /api/affiliate/tag") return route.fulfill({ status: 200, json: { tag: "", sharePath: "/scout" } });
+    if (key === "POST /api/share/generate") return route.fulfill({ status: 503, json: { message: "Synthetic attribution outage" } });
     if (key === "GET /api/favorites/restaurants" && state.initialFavoriteUnauthorized) {
       state.sessionExpired = true;
       return route.fulfill({ status: 401, json: { error: "Authentication required" } });
+    }
+    if (key === "GET /api/favorites/restaurants") return route.fulfill({ status: 200, json: state.saved ? [{ id: "synthetic-favorite", restaurantId, restaurant: deal.restaurant }] : [] });
+    if ([`POST /api/restaurants/${restaurantId}/favorite`, `DELETE /api/restaurants/${restaurantId}/favorite`].includes(key)) {
+      state.saveWrites = (state.saveWrites || 0) + 1;
+      if (state.saveFailure) return route.fulfill({ status: 503, json: { message: "Synthetic save outage" } });
+      state.saved = request.method() === "POST";
+      return route.fulfill({ status: 200, json: { success: true } });
     }
     if (["/api/hosts", "/api/following/restaurants", "/api/favorites/restaurants", "/api/recommendations/restaurants", "/api/geo-ads"].includes(url.pathname) && request.method() === "GET") return route.fulfill({ status: 200, json: [] });
     if (["/api/telemetry/track", "/api/analytics/track", "/api/funnel/events", "/api/funnel/track", "/api/geo/ping"].includes(url.pathname) && request.method() === "POST") return route.fulfill({ status: 200, json: { ok: true } });
@@ -243,6 +257,106 @@ test.describe("Synthetic rendered deal receipt and wallet recovery", () => {
     expect(state.nativeResponses).toHaveLength(1);
     expect(state.nativeResponses[0].body.replayed).toBe(false);
     expect(state.syntheticNotifications).toBe(1);
+  });
+
+  test("detail footer actions are reachable in the actual application shell", async ({ page }) => {
+    const state = stateFor();
+    await isolate(page, state);
+    await page.goto(`${FRONTEND}/deal/${dealId}`);
+    for (const id of ["button-claim-deal", "button-save-deal"]) {
+      const button = page.getByTestId(id);
+      await expect(button).toBeEnabled();
+      await expect.poll(() => button.evaluate((element) => {
+        const rect = element.getBoundingClientRect();
+        return rect.height >= 44 && [[rect.width/2,2],[rect.width/2,rect.height-2],[2,rect.height/2],[rect.width-2,rect.height/2],[rect.width/2,rect.height/2]].every(([x,y]) => element.contains(document.elementFromPoint(rect.x+x,rect.y+y)));
+      }), `${id}'s full 44px tap target must remain unobstructed`).toBe(true);
+    }
+    expect(state.claimPosts).toEqual([]);
+  });
+
+  test("used history allows a deliberate second claim within the offer allowance", async ({ page }) => {
+    const state = stateFor(); state.offer = { perCustomerLimit: 2 };
+    state.rows = [{ ...receipt, id: "synthetic-used-first", isUsed: true, usedAt: "2026-10-22T10:01:00.000Z" }];
+    await isolate(page, state);
+    await openClaim(page);
+    expect(state.claimPosts).toEqual([]);
+    await confirmClaim(page).click();
+    await expect(page.getByTestId("claim-receipt")).toContainText(claimId);
+    expect(state.rows).toHaveLength(2);
+    expect(state.claimPosts).toEqual([dealId]);
+    await page.reload();
+    await page.getByTestId("button-claim-deal").click();
+    await expect(page.getByTestId("claim-receipt")).toContainText(claimId);
+    expect(state.claimPosts).toHaveLength(1);
+  });
+
+  test("exhausted used history opens the receipt without claiming again", async ({ page }) => {
+    const state = stateFor(); state.rows = [{ ...receipt, isUsed: true, usedAt: "2026-10-22T10:01:00.000Z" }];
+    await isolate(page, state);
+    await page.goto(`${FRONTEND}/deal/${dealId}`);
+    await page.getByTestId("button-claim-deal").click();
+    await expect(page.getByTestId("claim-receipt")).toContainText("Used");
+    expect(state.claimPosts).toEqual([]);
+  });
+
+  test("merchant role follows its explicit consumer wallet link", async ({ page }) => {
+    const state = stateFor(); state.userType = "restaurant_owner"; state.rows = [{ ...receipt }];
+    await isolate(page, state);
+    await page.goto(`${FRONTEND}${walletPath}`);
+    await expect(page.getByTestId(`claimed-deal-${claimId}`)).toContainText(claimId);
+    expect(state.claimPosts).toEqual([]);
+  });
+
+  test("fixed offer share preview retains actual terms without inventing a minimum", async ({ page }) => {
+    const state = stateFor(); state.offer = { dealType: "fixed", discountValue: "4", minOrderAmount: undefined };
+    await isolate(page, state);
+    await page.goto(`${FRONTEND}/deal/${dealId}`);
+    await page.getByTestId("button-share").click();
+    const dialog = page.getByRole("dialog");
+    await expect(dialog).toContainText("$4 OFF");
+    await expect(dialog).toContainText("Minimum order not provided");
+    await expect(dialog).not.toContainText("4% OFF");
+    await expect(dialog).not.toContainText("$15");
+    await expect(page.getByTestId("input-share-url")).toHaveValue(`${FRONTEND}/deal/${dealId}`);
+  });
+
+  test("card save failures recover into the native saved list and detail", async ({ page }) => {
+    const state = stateFor(); state.saveFailure = true;
+    await isolate(page, state);
+    await page.goto(`${FRONTEND}/deals`);
+    const save = page.getByTestId(`button-save-place-${dealId}`);
+    await expect(save).toBeEnabled();
+    await save.click();
+    await expect(page.getByRole("alert")).toContainText("Synthetic save outage");
+    await expect(save).toHaveAttribute("aria-pressed", "false");
+    state.saveFailure = false;
+    await page.getByRole("button", { name: "Refresh saved places", exact: true }).click();
+    await save.click();
+    await expect(save).toHaveAttribute("aria-pressed", "true");
+    await page.goto(`${FRONTEND}/favorites`);
+    await expect(page.getByRole("heading", { name: "Synthetic Kitchen", exact: true })).toBeVisible();
+    await page.goto(`${FRONTEND}/deal/${dealId}`);
+    await expect(page.getByTestId("button-save-deal")).toHaveAttribute("aria-pressed", "true");
+    await page.getByTestId("button-save-deal").click();
+    await expect(page.getByTestId("button-save-deal")).toHaveAttribute("aria-pressed", "false");
+    expect(await page.evaluate(() => localStorage.getItem("mealscout_saved_deals"))).toBeNull();
+    expect(state.saveWrites).toBe(3);
+  });
+
+  test("saved places do not reuse another signed-in account's cached list", async ({ page }) => {
+    const state = stateFor(); state.saved = true;
+    await isolate(page, state);
+    await page.goto(`${FRONTEND}/favorites`);
+    await expect(page.getByRole("heading", { name: "Synthetic Kitchen", exact: true })).toBeVisible();
+    state.userId = "synthetic-other-customer"; state.saved = false;
+    await page.evaluate(async () => {
+      // Refresh the native auth source without reloading the application cache.
+      const { queryClient } = await import(/* @vite-ignore */ "/src/lib/queryClient.ts");
+      await queryClient.invalidateQueries({ queryKey: ["/api/auth/user"] });
+    });
+    await expect(page.getByRole("heading", { name: "Nothing saved yet", exact: true })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Synthetic Kitchen", exact: true })).not.toBeVisible();
+    expect(state.claimPosts).toEqual([]);
   });
 
   test("guest drawer preserves the selected offer through login", async ({ page }) => {

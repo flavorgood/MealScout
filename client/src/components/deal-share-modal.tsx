@@ -4,12 +4,13 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useToast } from "@/hooks/use-toast";
 import { Share2, Copy, Facebook, Twitter, MessageCircle, Mail, Check } from "lucide-react";
-import { getAffiliateShareUrl } from "@/lib/share";
+import { resolveCanonicalShareUrl } from "@/lib/share";
 
 interface Deal {
   id: string;
   title: string;
   description: string;
+  dealType?: string;
   discountValue: string;
   minOrderAmount?: string;
   restaurant?: {
@@ -37,7 +38,7 @@ export default function DealShareModal({ isOpen, onClose, deal }: DealShareModal
     let isActive = true;
 
     const loadShareUrl = async () => {
-      const url = await getAffiliateShareUrl(`/deal/${deal.id}`);
+      const url = await resolveCanonicalShareUrl(`/deal/${deal.id}`);
       if (isActive) {
         setShareUrl(url);
       }
@@ -49,8 +50,9 @@ export default function DealShareModal({ isOpen, onClose, deal }: DealShareModal
     };
   }, [deal.id, isOpen]);
   
-  // Create share text
-  const shareText = `Amazing deal at ${deal.restaurant?.name || 'this restaurant'}!\n\n${deal.title}\n${deal.discountValue}% OFF (Min order: $${deal.minOrderAmount || '15'})\n\nCheck it out on MealScout:`;
+  const discount = deal.dealType === "percentage" ? `${deal.discountValue}% OFF` : deal.dealType === "fixed" ? `$${deal.discountValue} OFF` : "View offer terms";
+  const minimum = deal.minOrderAmount != null && deal.minOrderAmount !== "" ? `Minimum order: $${deal.minOrderAmount}` : "Minimum order not provided";
+  const shareText = `Special at ${deal.restaurant?.name || 'this restaurant'}!\n\n${deal.title}\n${discount} (${minimum})\n\nCheck it out on MealScout:`;
 
   const handleCopyLink = async () => {
     try {
@@ -146,10 +148,10 @@ export default function DealShareModal({ isOpen, onClose, deal }: DealShareModal
             </p>
             <div className="flex items-center space-x-2">
               <span className="bg-primary text-primary-foreground text-xs px-2 py-1 rounded-full font-semibold">
-                {deal.discountValue}% OFF
+                {discount}
               </span>
               <span className="text-xs text-muted-foreground">
-                Min: ${deal.minOrderAmount || '15'}
+                {minimum}
               </span>
             </div>
           </div>

@@ -696,6 +696,7 @@ function App() {
     );
   const usesSelfContainedConsumerShell =
     isPublicProfilePath ||
+    currentPath.startsWith("/deal/") ||
     currentPath.startsWith("/menu/") ||
     currentPath.startsWith("/checkout/") ||
     currentPath.startsWith("/order-confirmation/");

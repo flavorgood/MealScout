@@ -89,7 +89,13 @@ export default function DealDetail() {
     enabled: isAuthenticated, retry: false, staleTime: 0,
   });
   const saved = favoritesQuery.data?.some((row) => (row.restaurantId || row.restaurant?.id) === deal?.restaurantId) || false;
-  const existingClaim = (newClaim?.userId === user?.id && newClaim?.claim.dealId === dealId ? newClaim.claim : undefined) || claimsQuery.data?.find((claim) => claim.dealId === dealId);
+  const localClaim = newClaim?.userId === user?.id && newClaim?.claim.dealId === dealId ? newClaim.claim : undefined;
+  const dealClaims = (claimsQuery.data || []).filter((claim) => claim.dealId === dealId);
+  if (localClaim && !dealClaims.some((claim) => claim.id === localClaim.id)) dealClaims.unshift(localClaim);
+  const unusedClaim = dealClaims.find((claim) => !claim.isUsed && !claim.usedAt);
+  // Used history is a receipt, not an unused claim. Let the server authorize
+  // another claim when the offer's persisted per-customer allowance permits it.
+  const existingClaim = unusedClaim || (dealClaims.length >= (deal?.perCustomerLimit || 1) ? dealClaims[0] : undefined);
   const end = deal?.endDate ? Date.parse(deal.endDate) : null;
   const start = deal?.startDate ? Date.parse(deal.startDate) : null;
   const unavailable = !deal || deal.isActive !== true ||
@@ -228,7 +234,7 @@ export default function DealDetail() {
         {(saveError || favoritesQuery.isError) && <div role="alert" className="space-y-2 text-sm text-red-700"><p>{saveError || "Saved places could not be loaded."}</p>{isDealAuthenticationError(String(favoritesQuery.error?.message || "")) ? <Button asChild variant="outline"><a href={`/login?redirect=${encodeURIComponent(dealIntentPath(currentPath(), "save"))}`} data-testid="link-login-save">Sign in again to save</a></Button> : <Button variant="outline" onClick={() => void favoritesQuery.refetch()}>Refresh saved places</Button>}</div>}
         {isAuthenticated && claimsQuery.isError && <div role="alert" className="space-y-2 text-sm text-red-700"><p>Claim history could not be loaded. Check it before claiming again.</p>{isDealAuthenticationError(String(claimsQuery.error?.message || "")) ? <Button asChild variant="outline"><a href={`/login?redirect=${encodeURIComponent(dealIntentPath(currentPath(), "claim"))}`} data-testid="link-login-claim">Sign in again to claim</a></Button> : <Button variant="outline" onClick={() => void claimsQuery.refetch()}>Retry claim history</Button>}</div>}
       </main>
-      <div className="fixed bottom-0 left-1/2 z-40 w-full max-w-3xl -translate-x-1/2 border-t border-[color:var(--border-subtle)] bg-[var(--bg-popup)] px-4 py-4 shadow-clean">
+      <div className="fixed bottom-0 left-1/2 z-40 w-full max-w-3xl -translate-x-1/2 border-t border-[color:var(--border-subtle)] bg-[var(--bg-popup)] px-4 py-4 shadow-clean" style={{ paddingBottom: "calc(1rem + env(safe-area-inset-bottom, 0px))" }}>
         <div className="flex gap-3">
           <Button className="min-h-11 flex-1" onClick={startClaim} disabled={authState === "loading" || (isAuthenticated && (claimsQuery.isLoading || claimsQuery.isError)) || (!existingClaim && unavailable)} data-testid="button-claim-deal">{existingClaim ? `View claim · ${displayClaimStatus(dealClaimStatus(existingClaim, now))}` : isAuthenticated ? "Claim special" : "Sign in to claim"}</Button>
           <Button variant="outline" disabled={saveDisabled} onClick={() => void toggleSave()} aria-pressed={saved} data-testid="button-save-deal">{saveLabel}</Button>
@@ -236,7 +242,7 @@ export default function DealDetail() {
         <p className="mt-2 text-center text-xs text-muted-foreground">No purchase or social post is made by claiming.</p>
       </div>
       <DealClaimModal key={`${dealId}:${user?.id || "guest"}`} dealId={dealId} isOpen={showClaimModal} onClose={() => setShowClaimModal(false)} existingClaim={existingClaim} onClaimed={(claim) => { if (user?.id) setNewClaim({ userId: user.id, claim }); }} />
-      <DealShareModal isOpen={showShareModal} onClose={() => setShowShareModal(false)} deal={{ id: deal.id, title: deal.title, description: deal.description || "", discountValue: deal.discountValue, minOrderAmount: deal.minOrderAmount || undefined, restaurant: { name: restaurant?.name || "Food business", cuisineType: restaurant?.cuisineType || undefined } }} />
+      <DealShareModal isOpen={showShareModal} onClose={() => setShowShareModal(false)} deal={{ id: deal.id, title: deal.title, description: deal.description || "", dealType: deal.dealType, discountValue: deal.discountValue, minOrderAmount: deal.minOrderAmount || undefined, restaurant: { name: restaurant?.name || "Food business", cuisineType: restaurant?.cuisineType || undefined } }} />
     </div>
   );
 }

@@ -261,7 +261,14 @@ export function createRestaurantsDealsRepository(
 
     async deleteDeal(id: string): Promise<void> {
       await db.transaction(async (tx: any) => {
-        await tx.delete(dealClaims).where(eq(dealClaims.dealId, id));
+        // Serialize removal with claim issuance. Issued receipts require their
+        // parent offer, so remove availability rather than the receipt history.
+        await tx.select({ id: deals.id }).from(deals).where(eq(deals.id, id)).for("update");
+        const [issued] = await tx.select({ id: dealClaims.id }).from(dealClaims).where(eq(dealClaims.dealId, id)).limit(1);
+        if (issued) {
+          await tx.update(deals).set({ isActive: false, updatedAt: new Date() }).where(eq(deals.id, id));
+          return;
+        }
         await tx.delete(dealViews).where(eq(dealViews.dealId, id));
         await tx.delete(dealFeedback).where(eq(dealFeedback.dealId, id));
         await tx.delete(deals).where(eq(deals.id, id));

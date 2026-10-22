@@ -257,6 +257,20 @@ test.describe("Synthetic nearby search scope", () => {
     await expect(page).not.toHaveURL(/q=taco/);
   });
 
+  test("browser Back restores a query on the same native search route", async ({ page }) => {
+    const proof = await installSyntheticApi(page, { empty: true });
+    await page.goto(`${FRONTEND}/search?q=taco`, { waitUntil: "domcontentloaded" });
+    await expect(page.getByTestId("input-smart-search")).toHaveValue("taco");
+    await page.getByTestId("input-smart-search").fill("soup");
+    await page.getByTestId("button-search").click();
+    await expect(page).toHaveURL(/q=soup/);
+    await expect.poll(() => proof.requests.some(request => request.params.q === "soup")).toBe(true);
+    await page.goBack();
+    await expect(page).toHaveURL(/q=taco/);
+    await expect(page.getByTestId("input-smart-search")).toHaveValue("taco");
+    await expect(page.getByRole("heading", { name: "No matches found", exact: true })).toBeVisible();
+  });
+
   test("capped wider parking does not claim complete nearby coverage when food has no matches", async ({ page }) => {
     await installSyntheticApi(page, { empty: true, parkingHosts: distantParkingHosts });
     await page.goto(`${FRONTEND}/search`, { waitUntil: "domcontentloaded" });

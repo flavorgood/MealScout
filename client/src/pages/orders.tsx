@@ -363,6 +363,8 @@ function ConsumerActivity() {
 
 export default function OrdersPage() {
   const { user, isLoading } = useAuth();
+  const search = useSearch();
+  const requestedDeals = new URLSearchParams(search).get("view") === "deals";
 
   if (isLoading) {
     return (
@@ -372,7 +374,7 @@ export default function OrdersPage() {
     );
   }
 
-  if (isBusinessOrderOperator(user?.userType)) {
+  if (isBusinessOrderOperator(user?.userType) && !requestedDeals) {
     return <OwnerOrdersWorkspace view="orders" />;
   }
 

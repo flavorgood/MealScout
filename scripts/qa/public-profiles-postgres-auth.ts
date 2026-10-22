@@ -28,7 +28,7 @@ process.env.SESSION_SECRET = "synthetic-disposable-session-secret-no-production-
 process.env.ADMIN_EMAIL = "unseeded-admin@example.invalid";
 process.env.EMAIL_NOTIFICATIONS_MODE = "off";
 const root = process.cwd();
-const output = path.resolve("../mealscout-profile-evidence/postgres-auth");
+const output = path.resolve(process.env.PROFILE_QA_EVIDENCE_DIR || "../mealscout-profile-evidence/postgres-auth");
 await mkdir(output, { recursive: true }); await mkdir(".tmp-tests", { recursive: true });
 const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL, max: 8 });
 const db = drizzle(pool, { schema });
@@ -68,14 +68,14 @@ try {
   await db.insert(schema.restaurants).values([{ ...truck, id: hiddenId, name: "Synthetic hidden kitchen", isActive: false }, { ...truck, id: foreignId, name: "Synthetic other owner", ownerId: otherId }]);
   (globalThis as any).__profilePostgres = { db, pool };
   const bundle = path.resolve(".tmp-tests/profile-postgres-native.cjs");
-  await build({ absWorkingDir: root, stdin: { contents: `export {setupUnifiedAuth,getSession} from './server/unifiedAuth'; export {registerAuthAccountRoutes} from './server/routes/authAccountRoutes'; export {registerBusinessTeamRoutes} from './server/routes/businessTeamRoutes'; export {registerPublicDiscoveryRoutes} from './server/routes/publicDiscoveryRoutes'; export {registerDiscoveryRoutes} from './server/routes/discoveryRoutes'; export {registerPublicProfilePrerenderRoutes} from './server/seo/publicProfilePrerender'; export {registerRestaurantOperationsRoutes} from './server/routes/restaurantOperationsRoutes'; export {registerBookingRoutes} from './server/routes/bookingRoutes'; export {registerMenuRoutes} from './server/routes/menuRoutes'; export {registerSupplierMarketplaceRoutes} from './server/routes/supplierMarketplaceRoutes'; export {createRouteAccessPolicyDependencies} from './server/routes/accessPolicyDependencies';`, resolveDir: root, loader: "ts" }, outfile: bundle, bundle: true, platform: "node", format: "cjs", packages: "external", plugins: [{ name: "local-postgres-transport", setup(b) {
+  await build({ absWorkingDir: root, stdin: { contents: `export {storage} from './server/storage'; export {registerClaimRoutes} from './server/routes/claimRoutes'; export {registerDealManagementRoutes} from './server/routes/dealManagementRoutes'; export {setupUnifiedAuth,getSession} from './server/unifiedAuth'; export {registerAuthAccountRoutes} from './server/routes/authAccountRoutes'; export {registerBusinessTeamRoutes} from './server/routes/businessTeamRoutes'; export {registerPublicDiscoveryRoutes} from './server/routes/publicDiscoveryRoutes'; export {registerDiscoveryRoutes} from './server/routes/discoveryRoutes'; export {registerPublicProfilePrerenderRoutes} from './server/seo/publicProfilePrerender'; export {registerRestaurantOperationsRoutes} from './server/routes/restaurantOperationsRoutes'; export {registerBookingRoutes} from './server/routes/bookingRoutes'; export {registerMenuRoutes} from './server/routes/menuRoutes'; export {registerSupplierMarketplaceRoutes} from './server/routes/supplierMarketplaceRoutes'; export {createRouteAccessPolicyDependencies} from './server/routes/accessPolicyDependencies';`, resolveDir: root, loader: "ts" }, outfile: bundle, bundle: true, platform: "node", format: "cjs", packages: "external", plugins: [{ name: "local-postgres-transport", setup(b) {
     b.onResolve({ filter: /.*/ }, args => path.resolve(args.resolveDir, args.path) === root + "/server/db" ? { path: "db", namespace: "profile-pg" } : undefined);
     b.onLoad({ filter: /.*/, namespace: "profile-pg" }, () => ({ loader: "js", contents: "export const db=globalThis.__profilePostgres.db;export const pool=globalThis.__profilePostgres.pool;" }));
   } }] });
   const native = createRequire(import.meta.url)(bundle);
   const app = express(); app.use(express.json());
   app.use((req, res, next) => {
-    if (!["GET", "HEAD", "OPTIONS"].includes(req.method) && !["/api/auth/login", "/api/auth/restaurant/login", "/api/auth/logout"].includes(req.path) && !/\/profile-basics$|\/manual-schedule$/.test(req.path)) { res.status(405).json({ message: "Unrelated fixture write blocked" }); return; }
+    if (!["GET", "HEAD", "OPTIONS"].includes(req.method) && !["/api/auth/login", "/api/auth/restaurant/login", "/api/auth/logout"].includes(req.path) && !/\/profile-basics$|\/manual-schedule$/.test(req.path) && !/^\/api\/deals\/[^/]+(?:\/claim)?$/.test(req.path)) { res.status(405).json({ message: "Unrelated fixture write blocked" }); return; }
     next();
   });
   app.use(native.getSession());
@@ -86,6 +86,9 @@ try {
   const policies = native.createRouteAccessPolicyDependencies(null);
   native.registerRestaurantOperationsRoutes(app, policies); native.registerBookingRoutes(app, policies);
   native.registerMenuRoutes(app); native.registerSupplierMarketplaceRoutes(app);
+  let syntheticClaimNotifications = 0;
+  native.registerClaimRoutes(app, { sendDealClaimedNotification: async () => { syntheticClaimNotifications += 1; } });
+  native.registerDealManagementRoutes(app, { logAudit: async () => {}, notifyNearbyDealSubscribers: async () => {}, notifyRestaurantFollowersOfDeal: async () => {}, toNumeric: (value: unknown) => Number(value), hasCompleteProfileAccess: async () => false, queueSocialPost: async () => {} });
   native.registerPublicDiscoveryRoutes(app); native.registerDiscoveryRoutes(app);
   app.use("/api", (_req, res) => res.status(404).json({ message: "Unregistered fixture API" }));
   native.registerPublicProfilePrerenderRoutes(app, "https://www.mealscout.us");
@@ -143,6 +146,30 @@ try {
   const concurrent = await Promise.all([context.request.patch(`${base}/api/restaurants/${truck.id}/profile-basics`, { data: { description: "Concurrent public description" } }), context.request.patch(`${base}/api/restaurants/${truck.id}/profile-basics`, { data: { websiteUrl: "https://concurrent.example.invalid" } })]);
   const saved = await publicDto("truck", truck.id);
   check("native locked concurrent field edits both persist", concurrent.every(response => response.status() === 200) && saved.description === "Concurrent public description" && saved.websiteUrl === "https://concurrent.example.invalid");
+  const dealData = { restaurantId: truck.id, title: "Synthetic release special", description: "Isolated local PostgreSQL fixture only", dealType: "fixed", discountValue: "4.00", imageUrl: "/fixture/photo.svg", startDate: new Date("2020-01-01"), endDate: new Date("2099-01-01"), isOngoing: false, isActive: true, perCustomerLimit: 2, totalUsesLimit: 10 };
+  const [offer] = await db.insert(schema.deals).values(dealData).returning();
+  const claims = await Promise.all(Array.from({ length: 5 }, () => context.request.post(`${base}/api/deals/${offer.id}/claim`, { data: {} })));
+  const receipts = await Promise.all(claims.map(response => response.json()));
+  const firstId = receipts[0].claim?.id;
+  check("native authenticated concurrent claim API issues one durable receipt", claims.every(response => response.status() === 200) && receipts.every(value => value.claim?.id === firstId));
+  check("PostgreSQL row lock reserves capacity once", Number((await pool.query("select current_uses from deals where id=$1", [offer.id])).rows[0].current_uses) === 1);
+  check("native replay sends only one synthetic notification", syntheticClaimNotifications === 1);
+  await pool.query("update deal_claims set is_used=true,used_at=now() where id=$1", [firstId]);
+  const second = await context.request.post(`${base}/api/deals/${offer.id}/claim`, { data: {} }); const secondReceipt = await second.json();
+  check("native PostgreSQL allows a deliberate second claim after use within limit", second.status() === 200 && secondReceipt.claim.id !== firstId && secondReceipt.replayed === false);
+  const removed = await context.request.delete(`${base}/api/deals/${offer.id}`);
+  check("native owner delete preserves issued receipts", removed.status() === 200 && Number((await pool.query("select count(*) from deal_claims where deal_id=$1", [offer.id])).rows[0].count) === 2);
+  check("removal deactivates the retained offer", (await pool.query("select is_active from deals where id=$1", [offer.id])).rows[0].is_active === false);
+  const wallet = await context.request.get(base + "/api/deals/claimed"); const walletRows = await wallet.json();
+  check("native wallet retains used and unavailable receipts after removal", wallet.status() === 200 && walletRows.some((value: any) => value.id === firstId && value.isUsed) && walletRows.some((value: any) => value.id === secondReceipt.claim.id && value.isActive === false));
+  check("receipt projection keeps private address hidden", walletRows.every((value: any) => value.restaurantAddress === null && !("restaurantVisibility" in value)));
+  const [emptyOffer] = await db.insert(schema.deals).values({ ...dealData, title: "Synthetic unclaimed removal" }).returning();
+  check("claim-free offer still deletes through native route", (await context.request.delete(`${base}/api/deals/${emptyOffer.id}`)).status() === 200 && (await pool.query("select count(*) from deals where id=$1", [emptyOffer.id])).rows[0].count === "0");
+  const [racingOffer] = await db.insert(schema.deals).values({ ...dealData, title: "Synthetic concurrent removal" }).returning();
+  const [racingClaim, racingRemoval] = await Promise.all([context.request.post(`${base}/api/deals/${racingOffer.id}/claim`, { data: {} }), context.request.delete(`${base}/api/deals/${racingOffer.id}`)]);
+  const racingClaims = (await pool.query("select id from deal_claims where deal_id=$1", [racingOffer.id])).rows;
+  const retainedOffer = (await pool.query("select is_active from deals where id=$1", [racingOffer.id])).rows;
+  check("concurrent native removal and claim cannot orphan or erase an issued receipt", racingRemoval.status() === 200 && (racingClaim.status() === 200 ? racingClaims.length === 1 && retainedOffer[0]?.is_active === false : racingClaims.length === 0));
   const originalCookie = `${sessionCookie.name}=${sessionCookie.value}`;
   check("native logout succeeds", (await context.request.post(base + "/api/auth/logout")).status() === 200);
   check("logged-out session no longer reads owner", (await context.request.get(base + "/api/auth/user")).status() === 401);

@@ -2,7 +2,7 @@ import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { apiUrl } from "@/lib/api";
 import { fetchSearchJson, searchArray, unifiedSearchResult, validSearchLocation, withinSearchRadius, type SearchLocation } from "@/lib/search-scope";
 import { useQuery } from "@tanstack/react-query";
-import { useLocation } from "wouter";
+import { useLocation, useSearch } from "wouter";
 import { Link } from "wouter";
 import Navigation from "@/components/navigation";
 import DealCard from "@/components/deal-card";
@@ -277,6 +277,7 @@ const levenshteinDistance = (a: string, b: string) => {
 export default function SearchPage() {
   const isStandalone = useIsStandalone();
   const [location, setLocation] = useLocation();
+  const search = useSearch();
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedCategory, setSelectedCategory] = useState("all");
   const [showFilters, setShowFilters] = useState(false);
@@ -324,10 +325,10 @@ export default function SearchPage() {
 
   // Parse URL query parameter
   useEffect(() => {
-    const urlParams = new URLSearchParams(window.location.search);
+    const urlParams = new URLSearchParams(search);
     const query = urlParams.get("q");
     setSearchQuery(query || "");
-  }, [location]);
+  }, [location, search]);
 
   useEffect(() => {
     const timeoutId = setTimeout(() => {
