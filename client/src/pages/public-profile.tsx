@@ -1318,9 +1318,7 @@ function LocationMapSection({ profile }: { profile: PublicLocationProfile }) {
   const hasCoords =
     typeof profile.latitude === "number" &&
     typeof profile.longitude === "number";
-  const mapHref = hasCoords
-    ? `https://maps.google.com/?q=${profile.latitude},${profile.longitude}`
-    : null;
+  const mapHref = profile.cta.find((action) => action.safe && action.type === "map")?.href || null;
 
   return (
     <Card className="border-white/10 bg-[#0f0d0b]">
@@ -3060,12 +3058,9 @@ export default function PublicProfilePage() {
     data.seo?.seoDescription ||
     data.description ||
     "Find local food coverage, public menus, and posted schedule details on MealScout.";
-  const canonicalUrl =
-    (resolvedCleanBusinessPath && typeof window !== "undefined"
-      ? new URL(resolvedCleanBusinessPath, window.location.origin).toString()
-      : null) ||
-    data.seo?.canonicalUrl ||
-    data.canonicalUrl;
+  // The server owns canonical identity for clean, typed and affiliate aliases.
+  // Rebuilding from the viewing host creates preview-port and alias duplicates.
+  const canonicalUrl = data.seo?.canonicalUrl || data.canonicalUrl;
   const citySlug =
     String((data as any).citySlug || "").trim() ||
     slugifySeoTerm(data.city) ||
@@ -3294,6 +3289,9 @@ export default function PublicProfilePage() {
             /* ── SUPPLIER PROFILE LAYOUT ── */
             <>
               <HeroBlock profile={data} />
+              <div className="hidden md:block">
+                <QuickActionRow profile={data} safeCtas={safeCtas} />
+              </div>
               <Card className="border-white/10 bg-[#0f0d0b]">
                 <CardHeader>
                   <CardTitle className="text-xl text-white">
