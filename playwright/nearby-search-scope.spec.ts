@@ -52,6 +52,7 @@ test.use({ serviceWorkers: "block" });
 
 async function installSyntheticApi(page: Page, scenario: Scenario = {}) {
   page.setDefaultTimeout(10_000);
+  await page.clock.setFixedTime(new Date("2026-10-22T12:00:00.000Z"));
   const proof: Proof = { requests: [], unexpectedApi: [], blockedExternal: [] };
   proofs.set(page, proof);
   await page.routeWebSocket("**/*", (socket) => {
@@ -156,7 +157,7 @@ async function captureProof(page: Page, info: TestInfo) {
 test.afterEach(async ({ page }, info) => captureProof(page, info));
 
 test.describe("Synthetic nearby search scope", () => {
-  test("local radius bounds restaurants menu items and deals, then wider search is explicit", async ({ page }) => {
+  test("local radius bounds restaurants menu items and deals, then wider search is explicit", async ({ page }, info) => {
     const proof = await installSyntheticApi(page);
     await localSearch(page);
     await expect(page.getByText("Taco fixture deal inside", { exact: true })).toBeVisible();
@@ -169,6 +170,12 @@ test.describe("Synthetic nearby search scope", () => {
         request.params.lat === "30" && request.params.lng === "-97" &&
         (request.params.radiusKm === "12" || request.params.radius === "12"))).toBeTruthy();
     }
+    const directory = process.env.SYNTHETIC_EVIDENCE_DIR ?? info.outputDir;
+    await fs.mkdir(directory, { recursive: true });
+    const localScopeScreenshot = path.join(directory,
+      `${info.project.name.toLowerCase().replace(/\s+/g, "-")}-nearby-local-scope.png`);
+    await page.screenshot({ path: localScopeScreenshot, fullPage: true });
+    await info.attach("nearby-local-scope", { path: localScopeScreenshot, contentType: "image/png" });
     await page.getByTestId("button-search-wider").click();
     await expect(page.getByTestId("card-restaurant-synthetic-outside")).toBeVisible();
     await expect(page.getByText("Taco fixture deal outside", { exact: true })).toBeVisible();
