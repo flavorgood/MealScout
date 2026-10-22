@@ -27,7 +27,7 @@ export function dealClaimStatus(claim: DealClaimReceipt, now = Date.now()): Clai
   if (claim.isUsed || claim.usedAt) return "Used";
   const end = claim.endDate ? Date.parse(claim.endDate) : null;
   if (end !== null && Number.isFinite(end) && end <= now) return "Expired";
-  if (claim.available === false || claim.isActive !== true || claim.restaurantIsActive !== true) return "Unavailable";
+  if (claim.isUsed == null || claim.available === false || claim.isActive !== true || claim.restaurantIsActive !== true) return "Unavailable";
   const start = claim.startDate ? Date.parse(claim.startDate) : null;
   if ((start !== null && !Number.isFinite(start)) || (end !== null && !Number.isFinite(end))) return "Unavailable";
   if (start !== null && start > now) return "Upcoming";
@@ -49,7 +49,7 @@ export function receiptDateLabel(value: string) {
 }
 
 function isReceipt(value: any): value is DealClaimReceipt {
-  return !!value && typeof value.id === "string" && value.id.trim().length > 0 && typeof value.dealId === "string" && value.dealId.trim().length > 0 && typeof value.claimedAt === "string" && Number.isFinite(Date.parse(value.claimedAt)) && typeof value.isUsed === "boolean";
+  return !!value && typeof value.id === "string" && value.id.trim().length > 0 && typeof value.dealId === "string" && value.dealId.trim().length > 0 && typeof value.claimedAt === "string" && Number.isFinite(Date.parse(value.claimedAt)) && (typeof value.isUsed === "boolean" || value.isUsed === null);
 }
 
 export function readClaimList(value: unknown): DealClaimReceipt[] {

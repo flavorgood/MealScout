@@ -17,6 +17,7 @@ test("wallet status follows persisted usage, expiry and availability rather than
   assert.equal(dealClaimStatus({ ...active, endDate: null, isOngoing: true }, now), "Active");
   assert.equal(dealClaimStatus({ ...active, endDate: null }, now), "Unavailable");
   assert.equal(dealClaimStatus({ ...active, endDate: "invalid" }, now), "Unavailable");
+  assert.equal(dealClaimStatus({ ...active, isUsed: null }, now), "Unavailable");
 });
 
 test("raw Response must be decoded and a persisted receipt validated", async () => {
@@ -29,6 +30,7 @@ test("raw Response must be decoded and a persisted receipt validated", async () 
   assert.throws(() => readClaimList([{ ...active, claimedAt: "not-a-date" }]), /could not be read/);
   assert.throws(() => readClaimResponse({ success: true, claim: { ...active, id: "" } }, active.dealId), /could not be read/);
   assert.deepEqual(readClaimList([]), []);
+  assert.deepEqual(readClaimList([{ ...active, isUsed: null }]), [{ ...active, isUsed: null }]);
 });
 
 test("canonical expired-session errors retain claim/save login continuation", () => {

@@ -21,7 +21,7 @@ import { SEOHead } from "@/components/seo-head";
 import { useAuth } from "@/hooks/useAuth";
 import { apiRequest } from "@/lib/queryClient";
 import DealClaimModal from "@/components/deal-claim-modal";
-import { dealClaimStatus, displayClaimStatus, receiptDateLabel, readClaimList, type DealClaimReceipt } from "@/lib/deal-claim-state";
+import { dealClaimStatus, displayClaimStatus, isDealAuthenticationError, receiptDateLabel, readClaimList, type DealClaimReceipt } from "@/lib/deal-claim-state";
 
 type ActivityTab = "orders" | "deals";
 
@@ -236,6 +236,7 @@ function ConsumerActivity() {
                 {(error as Error).message || "Please try again."}
               </p>
               <Button className="mt-4" data-testid="button-retry-deals" onClick={() => void (activeTab === "deals" ? dealsQuery.refetch() : ordersQuery.refetch())}>Retry</Button>
+              {isDealAuthenticationError(String((error as Error).message || "")) && <Button asChild variant="outline" className="mt-3"><Link href={`/login?redirect=${encodeURIComponent(window.location.pathname + window.location.search + window.location.hash)}`}>Sign in again</Link></Button>}
             </CardContent>
           </Card>
         ) : activeTab === "orders" && orders.length > 0 ? (
