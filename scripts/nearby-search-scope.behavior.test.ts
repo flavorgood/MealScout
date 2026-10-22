@@ -32,6 +32,8 @@ test("empty collections remain valid while malformed source responses become err
   assert.deepEqual(unifiedSearchResult(empty), empty);
   assert.throws(() => unifiedSearchResult({ restaurants: [] }));
   assert.throws(() => unifiedSearchResult({ ...empty, deals: {} }));
+  assert.throws(() => searchArray([{ id: "", name: "broken" }], ["id", "name"]));
+  assert.throws(() => unifiedSearchResult({ ...empty, restaurants: [{ id: "r", name: 42 }] }));
 });
 
 test("a failed or malformed GET is retryable and does not become an empty result", async () => {

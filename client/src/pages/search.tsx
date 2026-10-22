@@ -376,7 +376,7 @@ export default function SearchPage() {
     try {
       const data = await fetchSearchJson(apiUrl(`/api/location/search?q=${encodeURIComponent(manualLocation.trim())}&limit=5`));
       const choices = searchArray(data).filter((row) =>
-        typeof row.display_name === "string" && row.lat != null && row.lon != null &&
+        typeof row.display_name === "string" && row.lat != null && row.lon != null && String(row.lat).trim() !== "" && String(row.lon).trim() !== "" &&
         validSearchLocation({ lat: Number(row.lat), lng: Number(row.lon) }),
       );
       if (request !== locationRequest.current) return;
@@ -400,7 +400,7 @@ export default function SearchPage() {
     return params;
   };
   const fetchCollection = async (path: string, signal: AbortSignal) => {
-    return searchArray(await fetchSearchJson(apiUrl(path), signal));
+    return searchArray(await fetchSearchJson(apiUrl(path), signal), path.startsWith("/api/restaurants/") ? ["id", "name"] : ["id", "title"]);
   };
   const nearbyQuery = useQuery<any[]>({
     queryKey: ["/api/deals/nearby", ...scopeKey],
@@ -445,7 +445,7 @@ export default function SearchPage() {
       const params = scopedParams(debouncedSearchQuery, "radiusKm");
       params.set("limit", "48");
       const data = await fetchSearchJson(apiUrl(`/api/menus/local-items?${params}`), signal) as { items?: unknown };
-      return searchArray(data?.items);
+      return searchArray(data?.items, ["id", "name", "restaurantId"]);
     },
     enabled: hasCurrentSearch,
     staleTime: 30_000,
@@ -604,13 +604,12 @@ export default function SearchPage() {
   const searchedEvents = !localLocation && Array.isArray((unifiedResults as any)?.events)
     ? (unifiedResults as any).events
     : [];
-  const totalStructuredMatches =
+  const totalOtherMatches =
     menuItemSearchResults.length +
     mergedRestaurants.length +
     searchedParkingPassHosts.length +
     searchedVideos.length +
-    searchedEvents.length +
-    searchedDeals.length;
+    searchedEvents.length;
 
   const dealsForPage = searchQuery.trim() ? searchedDeals : allDeals.filter((deal: any) => !localLocation || withinSearchRadius(deal.restaurant, localLocation, discoveryRadiusKm));
   const queryGroups = buildQueryGroups(searchQuery);
@@ -684,6 +683,8 @@ export default function SearchPage() {
       sortBy,
     ],
   );
+
+  const totalStructuredMatches = totalOtherMatches + filteredDeals.length;
 
   const suggestionTerms = useMemo(() => {
     const fromCategories = Object.values(categoryConfig).flatMap((category) =>

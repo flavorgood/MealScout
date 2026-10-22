@@ -26,8 +26,9 @@ export function withinSearchRadius(row: any, location: SearchLocation, radiusKm:
   return 6371 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(Math.max(0, 1 - a))) <= radiusKm;
 }
 
-export function searchArray(value: unknown): any[] {
-  if (!Array.isArray(value) || value.some((row) => !row || typeof row !== "object" || Array.isArray(row))) {
+export function searchArray(value: unknown, requiredTextFields: string[] = []): any[] {
+  if (!Array.isArray(value) || value.some((row) => !row || typeof row !== "object" || Array.isArray(row) ||
+    requiredTextFields.some((field) => typeof row[field] !== "string" || !row[field].trim()))) {
     throw new Error("Search returned an invalid collection. Please retry.");
   }
   return value;
@@ -36,7 +37,7 @@ export function searchArray(value: unknown): any[] {
 export function unifiedSearchResult(value: unknown): Record<string, any[]> {
   if (!value || typeof value !== "object") throw new Error("Search returned an invalid response. Please retry.");
   return Object.fromEntries(["restaurants", "deals", "parkingPassHosts", "videos", "events"].map(
-    (bucket) => [bucket, searchArray((value as Record<string, unknown>)[bucket])],
+    (bucket) => [bucket, searchArray((value as Record<string, unknown>)[bucket], bucket === "parkingPassHosts" ? ["hostId", "businessName"] : bucket === "restaurants" ? ["id", "name"] : ["id"])],
   ));
 }
 
