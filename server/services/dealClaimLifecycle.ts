@@ -1,12 +1,20 @@
 import { and, desc, eq, isNull, lt, or, sql } from "drizzle-orm";
-import { dealClaims, deals, restaurants, type DealClaim } from "@shared/schema";
+import { dealClaims, deals, restaurants, users, type DealClaim } from "@shared/schema";
+import { isPublicBusinessVisible } from "../utils/publicBusinessVisibility";
+import { deriveProfileEvidenceQuarantineVisibility } from "./profileEvidenceQuarantine";
 
 export type DealClaimResult =
   | { ok: true; claim: DealClaim; replayed: boolean }
   | { ok: false; reason: "unavailable" | "sold_out" };
 
+function isClaimRestaurantAvailable(restaurant: any, ownerIsDisabled: unknown) {
+  return restaurant?.isActive === true && ownerIsDisabled === false &&
+    isPublicBusinessVisible(restaurant) &&
+    !deriveProfileEvidenceQuarantineVisibility(restaurant).isQuarantined;
+}
+
 export async function getUserDealClaimReceipts(database: any, userId: string) {
-  return database.select({
+  const rows = await database.select({
     id: dealClaims.id,
     dealId: dealClaims.dealId,
     claimedAt: dealClaims.claimedAt,
@@ -18,8 +26,17 @@ export async function getUserDealClaimReceipts(database: any, userId: string) {
     discountValue: deals.discountValue,
     restaurantId: deals.restaurantId,
     restaurantName: restaurants.name,
-    restaurantAddress: restaurants.address,
     restaurantIsActive: restaurants.isActive,
+    ownerIsDisabled: users.isDisabled,
+    restaurantVisibility: {
+      name: restaurants.name,
+      cuisineType: restaurants.cuisineType,
+      description: restaurants.description,
+      city: restaurants.city,
+      state: restaurants.state,
+      rawData: restaurants.rawData,
+      isActive: restaurants.isActive,
+    },
     startDate: deals.startDate,
     endDate: deals.endDate,
     startTime: deals.startTime,
@@ -30,8 +47,19 @@ export async function getUserDealClaimReceipts(database: any, userId: string) {
   }).from(dealClaims)
     .leftJoin(deals, eq(dealClaims.dealId, deals.id))
     .leftJoin(restaurants, eq(deals.restaurantId, restaurants.id))
+    .leftJoin(users, eq(restaurants.ownerId, users.id))
     .where(eq(dealClaims.userId, userId))
     .orderBy(desc(dealClaims.claimedAt), desc(dealClaims.id));
+  // A claim is not permission to reveal an owner's private street address.
+  // Directions use the separate canonical public restaurant projection.
+  return rows.map((row: any) => {
+    const { ownerIsDisabled, restaurantVisibility, ...receipt } = row;
+    return {
+      ...receipt,
+      restaurantIsActive: isClaimRestaurantAvailable(restaurantVisibility, ownerIsDisabled),
+      restaurantAddress: null,
+    };
+  });
 }
 
 // An issued receipt remains recoverable when a deal later closes. Capacity and
@@ -69,7 +97,11 @@ export async function claimDealWithReceipt(
     const end = deal.endDate == null ? null : new Date(deal.endDate).getTime();
     const [restaurant] = await tx.select().from(restaurants)
       .where(eq(restaurants.id, deal.restaurantId)).for("share");
-    if (deal.isActive !== true || restaurant?.isActive !== true ||
+    const [owner] = restaurant?.ownerId
+      ? await tx.select({ isDisabled: users.isDisabled }).from(users)
+        .where(eq(users.id, restaurant.ownerId)).for("share")
+      : [];
+    if (deal.isActive !== true || !isClaimRestaurantAvailable(restaurant, owner?.isDisabled) ||
         deal.startDate == null || !Number.isFinite(start) || start > now.getTime() ||
         (end === null && deal.isOngoing !== true) ||
         (end !== null && (!Number.isFinite(end) || end <= now.getTime()))) {

@@ -3,7 +3,7 @@ import { test } from "node:test";
 import express from "express";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { getTableColumns } from "drizzle-orm";
-import { deals, dealClaims, restaurants } from "../shared/schema";
+import { deals, dealClaims, restaurants, users } from "../shared/schema";
 import { claimDealWithReceipt, getUserDealClaimReceipts } from "../server/services/dealClaimLifecycle";
 import { createDealClaimHandler } from "../server/routes/dealClaimHandler";
 
@@ -21,14 +21,15 @@ const baseDeal = () => ({
 function fixture(patch: Record<string, unknown> = {}) {
   const state = {
     deal: { ...baseDeal(), ...patch } as any,
-    restaurant: { id: "synthetic-restaurant", name: "Fixture kitchen", address: null, isActive: true } as any,
+    restaurant: { id: "synthetic-restaurant", ownerId: "synthetic-owner", name: "Fixture kitchen", address: null, isActive: true } as any,
+    owner: { id: "synthetic-owner", isDisabled: false } as any,
     claims: [] as any[],
     failInsert: false,
     queries: [] as { text: string; params: any[]; client: number }[],
   };
   let nextClient = 0;
   let lockTail = Promise.resolve();
-  const tables: Record<string, any> = { deals, deal_claims: dealClaims, restaurants };
+  const tables: Record<string, any> = { deals, deal_claims: dealClaims, restaurants, users };
   const columnKeys = (table: string) => Object.fromEntries(
     Object.entries(getTableColumns(tables[table])).map(([key, column]) => [(column as any).name, key]),
   );
@@ -73,6 +74,7 @@ function fixture(patch: Record<string, unknown> = {}) {
             let rows: Record<string, any>[];
             if (table === "deals") rows = state.deal?.id === params[0] ? [{ deals: state.deal }] : [];
             else if (table === "restaurants") rows = state.restaurant?.id === params[0] ? [{ restaurants: state.restaurant }] : [];
+            else if (table === "users") rows = state.owner?.id === params[0] ? [{ users: state.owner }] : [];
             else {
               const wallet = /left join/.test(text);
               rows = state.claims.filter((claim) => wallet
@@ -81,7 +83,8 @@ function fixture(patch: Record<string, unknown> = {}) {
                 .slice().reverse().map((claim) => ({
                   deal_claims: claim,
                   deals: state.deal?.id === claim.dealId ? state.deal : null,
-                  restaurants: state.restaurant,
+                  restaurants: state.deal?.id === claim.dealId ? state.restaurant : null,
+                  users: state.restaurant ? state.owner : null,
                 }));
             }
             return { rows: rows.map((row) => rowFor(select, table, row)) };
@@ -169,7 +172,42 @@ test("existing receipt is recoverable after expiry or closure; a new claim is un
   assert.equal(receipts[0].isActive, false);
   assert.equal(receipts[0].endDate.toISOString(), "2026-10-20T00:00:00.000Z");
   f.state.restaurant = null;
-  assert.equal((await getUserDealClaimReceipts(f.database, "synthetic-user"))[0].restaurantIsActive, null);
+  assert.equal((await getUserDealClaimReceipts(f.database, "synthetic-user"))[0].restaurantIsActive, false);
+});
+
+test("wallet and claim receipts never expose the raw private business address", async () => {
+  const f = fixture();
+  f.state.restaurant.address = "Synthetic private address: do not publish";
+  await f.claim();
+  const receipts = await getUserDealClaimReceipts(f.database, "synthetic-user");
+  assert.equal(receipts[0].restaurantAddress, null);
+  assert.ok(!JSON.stringify(receipts).includes("do not publish"));
+  const walletRead = f.state.queries.find((query) => /left join/.test(query.text));
+  assert.ok(walletRead);
+  assert.doesNotMatch(walletRead.text, /"restaurants"\."address"/);
+  assert.ok(!JSON.stringify(receipts).includes("restaurantVisibility"));
+  assert.ok(!JSON.stringify(receipts).includes("ownerIsDisabled"));
+});
+
+test("canonical hidden business policy blocks new claims while issued receipts remain recoverable", async () => {
+  for (const hide of [
+    (f: ReturnType<typeof fixture>) => { f.state.owner.isDisabled = true; },
+    (f: ReturnType<typeof fixture>) => { f.state.owner = null; },
+    (f: ReturnType<typeof fixture>) => { f.state.restaurant.name = "Dummy fixture kitchen"; },
+    (f: ReturnType<typeof fixture>) => { f.state.restaurant.rawData = { evidenceQuarantine: { active: true } }; },
+  ]) {
+    const f = fixture();
+    await f.claim();
+    hide(f);
+    assert.deepEqual(await f.claim("new-user"), { ok: false, reason: "unavailable" });
+    const replay = await f.claim();
+    assert.equal(replay.ok && replay.claim.id, "synthetic-claim-1");
+    const receipts = await getUserDealClaimReceipts(f.database, "synthetic-user");
+    assert.equal(receipts.length, 1);
+    assert.equal(receipts[0].restaurantIsActive, false);
+    assert.equal(receipts[0].restaurantAddress, null);
+    assert.ok(!JSON.stringify(receipts).includes("evidenceQuarantine"));
+  }
 });
 
 test("fresh claims reject future/expired/malformed dates, inactive businesses and sold out capacity", async () => {
