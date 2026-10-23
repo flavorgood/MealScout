@@ -21,6 +21,8 @@ import { formatRelativeTime } from "@/lib/relative-time";
 
 export type ParkingScheduleItem = {
   id: string;
+  // API service days are date keys or their UTC-midnight serialization.
+  // Date objects and other ISO timestamps retain local instant semantics.
   date: string | Date;
   startTime?: string | null;
   endTime?: string | null;
@@ -70,8 +72,15 @@ const typeDotClass: Record<ParkingScheduleItem["type"], string> = {
   accepted_interest: "pp-calendar-dot pp-calendar-dot--accepted",
 };
 
-const toDate = (value: string | Date) =>
-  value instanceof Date ? value : parseISO(value);
+const toDate = (value: string | Date) => {
+  if (value instanceof Date) return value;
+  const parsed = parseISO(value);
+  if (!Number.isFinite(parsed.getTime())) return parsed;
+  // Manual-schedule and booked-stop dates are calendar days; their clock
+  // fields are separate. Only unwrap the canonical API day marker here.
+  const serviceDay = value.match(/^(\d{4}-\d{2}-\d{2})T00:00:00\.000Z$/)?.[1];
+  return serviceDay ? parseISO(serviceDay) : parsed;
+};
 
 const toDateKey = (value: string | Date) => format(toDate(value), "yyyy-MM-dd");
 
