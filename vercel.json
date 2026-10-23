@@ -58,14 +58,7 @@
     },
     {
       "source": "/",
-      "destination": "https://mealscout.onrender.com/",
-      "has": [
-        {
-          "type": "header",
-          "key": "user-agent",
-          "value": ".*([Bb][Oo][Tt]|[Cc][Rr][Aa][Ww][Ll][Ee][Rr]|[Ss][Pp][Ii][Dd][Ee][Rr]|[Ss][Ll][Uu][Rr][Pp]|[Cc][Hh][Aa][Tt][Gg][Pp][Tt]-[Uu][Ss][Ee][Rr]|[Aa][Nn][Tt][Hh][Rr][Oo][Pp][Ii][Cc]-[Aa][Ii]|[Cc][Oo][Hh][Ee][Rr][Ee]-[Aa][Ii]).*"
-        }
-      ]
+      "destination": "https://mealscout.onrender.com/"
     },
     {
       "source": "/for-food-trucks",
@@ -251,14 +244,7 @@
     },
     {
       "src": "^/$",
-      "dest": "https://mealscout.onrender.com/",
-      "has": [
-        {
-          "type": "header",
-          "key": "user-agent",
-          "value": ".*([Bb][Oo][Tt]|[Cc][Rr][Aa][Ww][Ll][Ee][Rr]|[Ss][Pp][Ii][Dd][Ee][Rr]|[Ss][Ll][Uu][Rr][Pp]|[Cc][Hh][Aa][Tt][Gg][Pp][Tt]-[Uu][Ss][Ee][Rr]|[Aa][Nn][Tt][Hh][Rr][Oo][Pp][Ii][Cc]-[Aa][Ii]|[Cc][Oo][Hh][Ee][Rr][Ee]-[Aa][Ii]).*"
-        }
-      ]
+      "dest": "https://mealscout.onrender.com/"
     },
     {
       "src": "/for-food-trucks",

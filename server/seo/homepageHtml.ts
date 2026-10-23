@@ -21,7 +21,7 @@ export function renderHomepageHtml(
   }
   const url = new URL(requestUrl, "https://www.mealscout.us");
   const noIndex = forceNoIndex || Array.from(url.searchParams.keys()).some(key => TRACKING_QUERY_KEYS.has(key.toLowerCase()));
-  const markup = renderToStaticMarkup(createElement(Router, { ssrPath: "/" }, createElement(Welcome)));
+  const markup = renderToStaticMarkup(createElement(Router, { ssrPath: "/", children: createElement(Welcome) }));
   const canonical = new URL("/", canonicalBaseUrl).toString();
   const robots = noIndex ? "noindex, nofollow" : "index, follow, max-snippet:-1, max-image-preview:large, max-video-preview:-1";
   return template

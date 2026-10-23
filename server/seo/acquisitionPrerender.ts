@@ -10,14 +10,14 @@ type AcquisitionPageConfig = {
   h1: string;
   body: string[];
   ctaLinks: Array<{ label: string; href: string }>;
-  schemaType: "WebSite" | "ProfessionalService" | "LocalBusiness";
+  schemaType: "ProfessionalService" | "LocalBusiness";
   guide?: RoleAcquisitionGuide;
 };
 
 const BOT_UA_PATTERN =
   /(bot|crawler|spider|slurp|googlebot|bingbot|duckduckbot|applebot|gptbot|oai-searchbot|chatgpt-user|claudebot|anthropic-ai|perplexitybot|bytespider|ccbot|cohere-ai)/i;
 
-const shouldServePrerender = (req: Request) => {
+export const shouldServePrerender = (req: Request) => {
   const force = String(req.query?.prerender || "").toLowerCase();
   if (force === "1" || force === "true") return true;
   const ua = String(req.get("user-agent") || "");
@@ -43,15 +43,13 @@ const buildPageHtml = (
     name: "MealScout",
     url: canonical,
     description: page.description,
-    ...(page.schemaType === "WebSite" ? {} : {
-      areaServed: "United States",
-      serviceType:
-        page.path === "/for-restaurants"
-          ? "Restaurant local discovery"
-          : page.path === "/for-food-trucks"
-            ? "Food truck profiles, schedules, and discovery"
-          : "Host location marketplace for food trucks",
-    }),
+    areaServed: "United States",
+    serviceType:
+      page.path === "/for-restaurants"
+        ? "Restaurant local discovery"
+        : page.path === "/for-food-trucks"
+          ? "Food truck profiles, schedules, and discovery"
+        : "Host location marketplace for food trucks",
   };
 
   return `<!DOCTYPE html>
@@ -109,22 +107,6 @@ export function registerAcquisitionPrerenderRoutes(
   canonicalBaseUrl: string,
 ) {
   const pages: AcquisitionPageConfig[] = [
-    {
-      path: "/",
-      title: "MealScout | Discover Local Food Near You",
-      description:
-        "Discover food trucks, restaurants, dishes, events, and local food deals near you with MealScout.",
-      h1: "Welcome to MealScout",
-      body: [
-        "Find live food trucks, deals, and what's happening in your local food scene. Log in or create your free account.",
-      ],
-      ctaLinks: [
-        { label: "Sign up", href: "/customer-signup" },
-        { label: "Log in", href: "/login" },
-        { label: "Follow The Flavor", href: "/scout" },
-      ],
-      schemaType: "WebSite",
-    },
     {
       path: "/for-restaurants",
       title: "MealScout for Restaurants",
@@ -197,24 +179,11 @@ export function registerAcquisitionPrerenderRoutes(
 
   for (const page of pages) {
     app.get(page.path, (req: Request, res: Response, next: NextFunction) => {
-      if (page.path === "/") {
-        // Root HEAD probes belong to the existing health guard.
-        if (req.method !== "GET") return next();
-        // Declare the response variants before either the crawler or SPA path.
-        res.vary("User-Agent");
-        res.vary("Accept");
-        const accept = String(req.get("Accept") || "").toLowerCase();
-        if (accept.includes("application/json") && !accept.includes("text/html")) {
-          return next();
-        }
-      }
       if (!shouldServePrerender(req)) {
         return next();
       }
       res.setHeader("Content-Type", "text/html; charset=utf-8");
-      res.setHeader("Cache-Control", page.path === "/"
-        ? "private, no-store"
-        : "public, max-age=300, s-maxage=1800");
+      res.setHeader("Cache-Control", "public, max-age=300, s-maxage=1800");
       res.send(buildPageHtml(canonicalBaseUrl, page));
     });
   }

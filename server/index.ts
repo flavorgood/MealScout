@@ -33,6 +33,7 @@ import { videoStories, restaurants, requestLogs } from "@shared/schema";
 import { parseCleanAffiliateBusinessRoute } from "@shared/cleanAffiliateLinks";
 import { and, eq } from "drizzle-orm";
 import { registerAcquisitionPrerenderRoutes } from "./seo/acquisitionPrerender";
+import { createRootHealthGuard } from "./seo/rootEntry";
 import { buildJsonLdScript } from "./seo/jsonLdScript";
 import { registerPublicProfilePrerenderRoutes } from "./seo/publicProfilePrerender";
 import { registerPublicProfileAppAssets } from "./seo/publicProfileAppAssets";
@@ -1304,88 +1305,20 @@ app.use((req, res, next) => {
   // Registered after API/prerender routes and before Vite/static SPA fallback.
   app.use(guardUnauthenticatedProtectedHtml);
 
-  // Root endpoint health guard - handles health checks while preserving SPA functionality
-  app.use("/", (req, res, next) => {
-    // Only handle root path, let other paths go through
-    if (req.path !== "/") {
-      return next();
-    }
-
-    // Handle HEAD requests (common for health checks) - always return 200
-    if (req.method === "HEAD") {
-      return res.status(200).end();
-    }
-
-    // Handle GET requests based on Accept header
-    if (req.method === "GET") {
-      const acceptHeader = req.get("Accept") || "";
-
-      // If not requesting HTML, return JSON status (for API health checks)
-      if (!acceptHeader.includes("text/html")) {
-        return res.status(200).json({
-          status: "ok",
-          service: "MealScout API",
-          timestamp: new Date().toISOString(),
-        });
-      }
-
-      // For HTML requests in development, always let Vite handle it
-      if (app.get("env") === "development") {
-        return next();
-      }
-
-      // For HTML requests in production, check if built frontend exists
-      // Use the same path logic as serveStatic function in vite.ts
-      const indexPath = path.resolve(
-        process.cwd(),
-        "dist",
-        "public",
-        "index.html"
-      );
-
-      if (fs.existsSync(indexPath)) {
-        // SPA build exists, let serveStatic handle it
-        return next();
-      } else {
-        // No build available, return minimal HTML fallback with 200 status
-        res.status(200).set({
-          "Content-Type": "text/html; charset=utf-8",
-          "Cache-Control": "no-store, no-cache, must-revalidate",
-        }).send(`
-          <!DOCTYPE html>
-          <html lang="en">
-            <head>
-              <meta charset="UTF-8">
-              <meta name="viewport" content="width=device-width, initial-scale=1.0">
-              <title>MealScout</title>
-            </head>
-            <body>
-              <h1>MealScout</h1>
-              <p>Service is running successfully.</p>
-              <p>Status: OK</p>
-              <p><a href="/health">Health Check</a></p>
-            </body>
-          </html>
-        `);
-        return;
-      }
-    }
-
-    // For other methods, continue to next middleware
-    next();
-  });
+  // Public document rendering and health negotiation share one tested root guard.
+  app.use("/", createRootHealthGuard(app));
 
   // importantly only setup vite in development and after
   // setting up all the other routes so the catch-all route
   // doesn't interfere with the other routes
   if (app.get("env") === "development") {
     const { setupVite } = await import("./vite.js");
-    await setupVite(app, server);
+    await setupVite(app, server, canonicalBaseUrl);
   } else {
     const distPath = path.resolve(process.cwd(), "dist", "public");
     if (fs.existsSync(distPath)) {
       const { serveStatic } = await import("./vite.js");
-      serveStatic(app);
+      serveStatic(app, { canonicalBaseUrl });
     } else {
       console.warn(
         "No frontend build detected at dist/public; serving API-only."
