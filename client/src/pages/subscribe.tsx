@@ -2,6 +2,7 @@ import { Link, useLocation, useSearch } from "wouter";
 import { Check, Clock3, CreditCard, ShieldCheck, Store } from "lucide-react";
 
 import { BackHeader } from "@/components/back-header";
+import ProfileLegacyBilling from "@/components/profile-legacy-billing";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { useAuth } from "@/hooks/useAuth";
@@ -18,11 +19,11 @@ const includedProfileTools = [
 const accessPromises = [
   { icon: Clock3, label: "No expiration" },
   { icon: CreditCard, label: "No card required" },
-  { icon: ShieldCheck, label: "No monthly bill" },
+  { icon: ShieldCheck, label: "No monthly bill for profile tools" },
 ];
 
 export default function ProfileAccess() {
-  const { isAuthenticated, isLoading } = useAuth();
+  const { user, isAuthenticated, isLoading } = useAuth();
   const search = useSearch();
   const [, setLocation] = useLocation();
   const params = new URLSearchParams(search);
@@ -120,6 +121,8 @@ export default function ProfileAccess() {
             ))}
           </div>
         </section>
+
+        {user?.id ? <ProfileLegacyBilling key={user.id} userId={user.id} /> : null}
 
         <Card className="border-[color:var(--border-subtle)] bg-[var(--bg-surface)] shadow-clean">
           <CardHeader>
