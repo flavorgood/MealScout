@@ -17,7 +17,7 @@ type AcquisitionPageConfig = {
 const BOT_UA_PATTERN =
   /(bot|crawler|spider|slurp|googlebot|bingbot|duckduckbot|applebot|gptbot|oai-searchbot|chatgpt-user|claudebot|anthropic-ai|perplexitybot|bytespider|ccbot|cohere-ai)/i;
 
-const shouldServePrerender = (req: Request) => {
+export const shouldServePrerender = (req: Request) => {
   const force = String(req.query?.prerender || "").toLowerCase();
   if (force === "1" || force === "true") return true;
   const ua = String(req.get("user-agent") || "");

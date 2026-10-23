@@ -1,0 +1,5 @@
+/* Keep the native Welcome image in the compiled graph so first-response HTML
+   works under the existing production style-src policy and API asset bridge. */
+.mealscout-welcome-background {
+  background-image: url("../../public/atmospheric/mealscout-welcome-map-night.png");
+}

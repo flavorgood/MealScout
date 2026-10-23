@@ -5,6 +5,8 @@ import { type Server } from "http";
 import { fileURLToPath } from "url";
 import { nanoid } from "nanoid";
 import { guardUnauthenticatedProtectedHtml } from "./seo/protectedHtmlRoutes";
+import { renderHomepageHtml } from "./seo/homepageHtml";
+import { isHomepageDocumentRequest } from "./seo/rootEntry";
 
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 
@@ -19,7 +21,7 @@ export function log(message: string, source = "express") {
   console.log(`${formattedTime} [${source}] ${message}`);
 }
 
-export async function setupVite(app: Express, server: Server) {
+export async function setupVite(app: Express, server: Server, canonicalBaseUrl = "https://www.mealscout.us") {
   const viteModule = (await (0, eval)('import("vite")')) as typeof import("vite");
   const { createServer: createViteServer, createLogger } = viteModule;
   const viteLogger = createLogger();
@@ -59,6 +61,12 @@ export async function setupVite(app: Express, server: Server) {
 
       // always reload the index.html file from disk incase it changes
       let template = await fs.promises.readFile(clientTemplate, "utf-8");
+      if (isHomepageDocumentRequest(req)) {
+        template = renderHomepageHtml(template, canonicalBaseUrl, req.originalUrl, /noindex/i.test(String(res.getHeader("X-Robots-Tag") || "")));
+        res.setHeader("Cache-Control", "private, no-store");
+        res.vary("Accept");
+        res.vary("User-Agent");
+      }
       template = template.replace(
         `src="/src/main.tsx"`,
         `src="/src/main.tsx?v=${nanoid()}"`,
@@ -72,16 +80,27 @@ export async function setupVite(app: Express, server: Server) {
   });
 }
 
-export function serveStatic(app: Express) {
+export function serveStatic(app: Express, options: { canonicalBaseUrl?: string; distPath?: string } = {}) {
   // Production server code is bundled into dist/server, while client assets are
   // emitted to dist/public. Keep this aligned with the startup check in index.ts.
-  const distPath = path.resolve(process.cwd(), "dist", "public");
+  const distPath = options.distPath || path.resolve(process.cwd(), "dist", "public");
 
   if (!fs.existsSync(distPath)) {
     throw new Error(
       `Could not find the build directory: ${distPath}, make sure to build the client first`,
     );
   }
+
+  app.use(async (req, res, next) => {
+    if (!isHomepageDocumentRequest(req)) return next();
+    try {
+      const template = await fs.promises.readFile(path.join(distPath, "index.html"), "utf8");
+      const html = renderHomepageHtml(template, options.canonicalBaseUrl || "https://www.mealscout.us", req.originalUrl, /noindex/i.test(String(res.getHeader("X-Robots-Tag") || "")));
+      res.vary("Accept");
+      res.vary("User-Agent");
+      res.status(200).set({ "Content-Type": "text/html; charset=utf-8", "Cache-Control": "private, no-store" }).send(html);
+    } catch (error) { next(error); }
+  });
 
   app.use(
     express.static(distPath, {
