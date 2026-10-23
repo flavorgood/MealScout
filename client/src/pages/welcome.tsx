@@ -1,18 +1,23 @@
+import React from "react";
 import { Link } from "wouter";
 import { SEOHead } from "@/components/seo-head";
+import { WELCOME_CONTENT } from "@shared/welcomeContent";
 
 export default function Welcome() {
   return (
     <>
       <SEOHead
-        title="Welcome to MealScout"
-        description="Find live food trucks, deals, and what's happening in your local food scene. Log in or create your free account."
+        title={WELCOME_CONTENT.title}
+        description={WELCOME_CONTENT.description}
+        canonicalUrl="/"
       />
 
       <main
         className="relative min-h-[100dvh] w-full overflow-hidden bg-[#120805] text-white"
         data-testid="welcome-landing"
       >
+        <h1 className="sr-only">{WELCOME_CONTENT.title}</h1>
+        <p className="sr-only">{WELCOME_CONTENT.description}</p>
         <div
           aria-hidden="true"
           className="absolute inset-0 bg-cover bg-center bg-no-repeat"

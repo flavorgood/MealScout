@@ -11,7 +11,7 @@ interface SEOHeadProps {
   noIndex?: boolean;
 }
 
-const TRACKING_QUERY_KEYS = new Set([
+export const TRACKING_QUERY_KEYS = new Set([
   "ref",
   "utm_source",
   "utm_medium",
