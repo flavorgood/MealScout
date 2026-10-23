@@ -57,11 +57,13 @@ try {
         const page = await context.newPage();
         const errors: string[] = [];
         const writes: string[] = [];
+        let mockedTelemetry = 0;
+        const assetFailures: string[] = [];
         const assets: string[] = [];
         page.on("pageerror", error => errors.push(error.message));
         page.on("response", response => {
           if (response.url().includes("/api/public-profile/app-assets/assets/")) {
-            assert.equal(response.status(), 200, `compiled asset ${response.url()}`);
+            if (response.status() !== 200) assetFailures.push(`${response.status()} ${response.url().replace(origin, "")}`);
             assets.push(response.url().replace(origin, ""));
           }
         });
@@ -70,6 +72,10 @@ try {
           const request = route.request();
           const url = new URL(request.url());
           if (url.origin !== origin) return route.abort();
+          if (url.pathname === "/api/telemetry/track" && request.method() === "POST") {
+            mockedTelemetry++;
+            return route.fulfill({ status: 202, contentType: "application/json", body: JSON.stringify({ recorded: false, synthetic: true }) });
+          }
           if (!["GET", "HEAD"].includes(request.method())) {
             writes.push(url.pathname);
             return route.fulfill({ status: 405, contentType: "application/json", body: JSON.stringify({ error: "synthetic_fixture_write_blocked" }) });
@@ -128,7 +134,8 @@ try {
         if (!javaScriptEnabled && output) await page.screenshot({ path: path.join(output, `${source.name}-${label}.png`), fullPage: true });
         assert.deepEqual(errors, []);
         assert.deepEqual(writes, []);
-        results.push({ source: source.name, viewport: label, javaScriptEnabled, rawHasIdentity, compiledAssets: assets.length, writes, errors, result: "PASS" });
+        assert.deepEqual(assetFailures, []);
+        results.push({ source: source.name, viewport: label, javaScriptEnabled, rawHasIdentity, compiledAssets: assets.length, mockedTelemetry, writes, errors, result: "PASS" });
         await context.close();
       }
     }
