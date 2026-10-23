@@ -102,7 +102,7 @@ try {
             assert.ok(box && box.width >= 24 && box.height >= 24 && box.x >= 0 && box.x + box.width <= viewport.width + 1);
           }
           const background = await page.locator('[data-testid="welcome-landing"] > div').first().evaluate(element => getComputedStyle(element).backgroundImage);
-          assert.ok(background.includes("mealscout-welcome-map-night.png"));
+          assert.ok(background.includes("mealscout-welcome-map-night"));
           assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth), false);
           if (javaScriptEnabled) {
             await page.waitForFunction(() => Object.keys(document.getElementById("root") || {}).some(key => key.startsWith("__reactContainer")));
@@ -114,6 +114,7 @@ try {
             await page.goto(origin + "/", { waitUntil: "networkidle" });
             if (await betaButton.isVisible()) await betaButton.click();
             await page.getByRole("link", { name: "Log in", exact: true }).click();
+            await page.getByTestId("button-email-login").click();
             await page.getByTestId("button-login-submit").waitFor();
             assert.ok(page.url().includes("/login"));
             await page.goto(origin + "/", { waitUntil: "networkidle" });

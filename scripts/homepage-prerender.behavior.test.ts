@@ -7,7 +7,7 @@ import type { AddressInfo } from "node:net";
 import { after, before, test } from "node:test";
 import express from "express";
 import { registerAcquisitionPrerenderRoutes } from "../server/seo/acquisitionPrerender";
-import { createRootHealthGuard } from "../server/seo/rootEntry";
+import { createRootHealthGuard, isHomepageDocumentRequest } from "../server/seo/rootEntry";
 import { guardUnauthenticatedProtectedHtml } from "../server/seo/protectedHtmlRoutes";
 import { serveStatic } from "../server/vite";
 import { WELCOME_CONTENT } from "../shared/welcomeContent";
@@ -153,6 +153,20 @@ test("malformed build fails explicitly and recovers on the next read without a r
     assert.equal(failed.status, 500); assert.equal(failed.body, "Homepage temporarily unavailable");
   } finally { writeFileSync(indexPath, template); }
   assertDocument(await request("/", browser, "text/html"));
+});
+test("actual development wildcard mount only classifies the original root path as a homepage", async () => {
+  const mounted = express();
+  mounted.use("*", (req, res) => res.json({ homepage: isHomepageDocumentRequest(req), path: req.path }));
+  const listener = mounted.listen(0, "127.0.0.1");
+  await new Promise<void>(resolve => listener.once("listening", resolve));
+  try {
+    const base = `http://127.0.0.1:${(listener.address() as AddressInfo).port}`;
+    for (const requestPath of ["/", "/?ref=synthetic", "/scout", "/for-food-trucks", "/restaurant/synthetic-public"]) {
+      const result = await fetch(base + requestPath, { headers: { Accept: "text/html" } }).then(response => response.json());
+      assert.equal(result.path, "/", "fixture exercises the real Express mount stripping");
+      assert.equal(result.homepage, requestPath.split("?")[0] === "/");
+    }
+  } finally { await new Promise<void>(resolve => listener.close(() => resolve())); }
 });
 const config = JSON.parse(readFileSync(new URL("../vercel.json", import.meta.url), "utf8"));
 for (const [arrayKey, sourceKey, destinationKey, fallback] of [

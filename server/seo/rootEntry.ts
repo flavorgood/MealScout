@@ -4,7 +4,9 @@ import path from "node:path";
 import { shouldServePrerender } from "./acquisitionPrerender";
 
 export function isHomepageDocumentRequest(req: Request) {
-  if (req.path !== "/" || req.method !== "GET") return false;
+  // Express wildcard mounts strip req.path; originalUrl keeps the real route.
+  const requestPath = String(req.originalUrl || req.url).split("?")[0];
+  if (requestPath !== "/" || req.method !== "GET") return false;
   const accept = String(req.get("Accept") || "").toLowerCase();
   if (accept.includes("application/json") && !accept.includes("text/html")) return false;
   return accept.includes("text/html") || shouldServePrerender(req);
