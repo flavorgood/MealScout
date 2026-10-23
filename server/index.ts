@@ -21,6 +21,7 @@ import { setupWebSocketServer } from "./websocket";
 import { antiScrape } from "./middleware/antiScrape";
 import { getSession } from "./unifiedAuth";
 import { distributedRateLimit } from "./middleware/distributedRateLimit";
+import { savedRestaurantLocationLimiter } from "./middleware/restaurantLocationRateLimit";
 import { db } from "./db";
 import { sql } from "drizzle-orm";
 import fs from "fs";
@@ -970,7 +971,7 @@ app.use((req, res, next) => {
 
   // ✏️  STRICT - Content updates (prevent spam editing)
   app.use("/api/deals", dealUpdateLimiter);
-  app.use("/api/restaurants/:restaurantId/location", updateLimiter);
+  app.use("/api/restaurants/:restaurantId/location", savedRestaurantLocationLimiter(updateLimiter));
   app.use("/api/restaurants/:restaurantId/operating-hours", updateLimiter);
   app.use("/api/restaurants/:restaurantId/mobile-settings", updateLimiter);
 

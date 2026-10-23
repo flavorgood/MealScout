@@ -7,6 +7,7 @@ import { db } from "../db";
 import { emailService } from "../emailService";
 import { storage } from "../storage";
 import { checkRateLimit } from "../documentValidation";
+import { liveRestaurantLocationLimiter } from "../middleware/restaurantLocationRateLimit";
 import { isAuthenticated } from "../unifiedAuth";
 import { reverseGeocode } from "../utils/geocoding";
 import { broadcastLocationUpdate, broadcastStatusUpdate } from "../websocket";
@@ -1161,17 +1162,6 @@ export function registerRestaurantOperationsRoutes(
           },
         );
 
-        broadcastLocationUpdate(restaurantId, {
-          latitude: updatedRestaurant.currentLatitude
-            ? parseFloat(updatedRestaurant.currentLatitude)
-            : 0,
-          longitude: updatedRestaurant.currentLongitude
-            ? parseFloat(updatedRestaurant.currentLongitude)
-            : 0,
-          mobileOnline: updatedRestaurant.mobileOnline || false,
-          lastBroadcastAt: updatedRestaurant.lastBroadcastAt || new Date(),
-        });
-
         res.json({
           success: true,
           restaurant: sanitizeOwnerMutationRestaurant(updatedRestaurant),
@@ -2270,6 +2260,7 @@ export function registerRestaurantOperationsRoutes(
   app.post(
     "/api/restaurants/:restaurantId/truck-session/start",
     isAuthenticated,
+    liveRestaurantLocationLimiter,
     async (req: any, res) => {
       try {
         const { restaurantId } = req.params;
@@ -2291,14 +2282,19 @@ export function registerRestaurantOperationsRoutes(
           return res.status(400).json({ message: "deviceId is required" });
         }
 
+        const locationData = insertFoodTruckLocationSchema.parse({
+          ...req.body,
+          restaurantId,
+        });
+        if (locationData.source !== "gps") {
+          return res.status(400).json({ message: "Live sharing requires device GPS. Confirm a manual service stop instead." });
+        }
         const session = await storage.startTruckSession(
           restaurantId,
           deviceId,
           req.user.id,
         );
 
-        const latitude = Number(req.body?.latitude);
-        const longitude = Number(req.body?.longitude);
         const liveForMinutesRaw = Number(req.body?.liveForMinutes);
         const liveForMinutes = Number.isFinite(liveForMinutesRaw)
           ? Math.min(240, Math.max(15, liveForMinutesRaw))
@@ -2307,22 +2303,20 @@ export function registerRestaurantOperationsRoutes(
           Date.now() + (liveForMinutes || 240) * 60_000,
         );
         let location = null;
-        if (Number.isFinite(latitude) && Number.isFinite(longitude)) {
+        {
           location = await storage.upsertLiveLocation(
-            insertFoodTruckLocationSchema.parse({
-              restaurantId,
-              latitude,
-              longitude,
-            }),
+            locationData,
             { liveUntilAt },
           );
           broadcastLocationUpdate(restaurantId, location);
         }
 
-        res.json({ success: true, session, location });
+        const restaurant = await storage.getRestaurant(restaurantId);
+        res.json({ success: true, session, location,
+          restaurant: restaurant ? sanitizeOwnerMutationRestaurant(restaurant) : null });
       } catch (error) {
         console.error("Error starting truck session:", error);
-        res.status(500).json({ message: "Failed to start truck session" });
+        res.status(error instanceof z.ZodError ? 400 : 500).json({ message: "Failed to start truck session" });
       }
     },
   );
@@ -2360,6 +2354,7 @@ export function registerRestaurantOperationsRoutes(
   app.post(
     "/api/restaurants/:restaurantId/location",
     isAuthenticated,
+    liveRestaurantLocationLimiter,
     async (req: any, res) => {
       try {
         const hasAccess = await hasCompleteProfileAccess(req.user.id);
@@ -2383,27 +2378,20 @@ export function registerRestaurantOperationsRoutes(
           });
         }
 
-        const rateLimitResult = checkRateLimit(
-          `location_update_${req.user.id}_${restaurantId}`,
-        );
-        if (!rateLimitResult.allowed) {
-          return res.status(429).json({
-            message:
-              "Too many location updates. Please wait before trying again.",
-            nextAllowedTime: rateLimitResult.nextAllowedTime,
-          });
+        const locationData = insertFoodTruckLocationSchema.parse({
+          ...req.body,
+          restaurantId,
+        });
+        if (locationData.source !== "gps") {
+          return res.status(400).json({ message: "Live sharing requires device GPS. Confirm a manual service stop instead." });
         }
-
         const liveForMinutesRaw = Number(req.body?.liveForMinutes);
         const liveForMinutes = Number.isFinite(liveForMinutesRaw)
           ? Math.min(240, Math.max(15, liveForMinutesRaw))
           : 240;
         const liveUntilAt = new Date(Date.now() + liveForMinutes * 60_000);
         const location = await storage.upsertLiveLocation(
-          insertFoodTruckLocationSchema.parse({
-            ...req.body,
-            restaurantId,
-          }),
+          locationData,
           { liveUntilAt },
         );
 
@@ -2425,7 +2413,9 @@ export function registerRestaurantOperationsRoutes(
           console.warn("Failed to track live location usage:", trackingError);
         }
 
-        res.json({ success: true, location });
+        const restaurant = await storage.getRestaurant(restaurantId);
+        res.json({ success: true, location,
+          restaurant: restaurant ? sanitizeOwnerMutationRestaurant(restaurant) : null });
       } catch (error) {
         console.error("Error updating location:", error);
         res.status(400).json({

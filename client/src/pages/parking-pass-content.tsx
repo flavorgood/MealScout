@@ -12,6 +12,10 @@ import {
 } from "@shared/parkingPassSlots";
 import { isStaffOrAdminUserType } from "@shared/profileAccessPolicy";
 import {
+  DEFAULT_TRUCK_BROADCAST_FRESHNESS_MS,
+  deriveTruckPresence,
+} from "@shared/consumerEntity";
+import {
   AlertCircle,
   Calendar,
   Clock,
@@ -59,6 +63,11 @@ import LongPressHelp from "@/components/long-press-help";
 import { initFacebookSDK, postToFacebook } from "@/lib/facebook";
 import { apiUrl } from "@/lib/api";
 import { apiRequest } from "@/lib/queryClient";
+import {
+  getScopedBusinessPermissions,
+  isScopedBusinessOwner,
+  type BusinessAccessContext,
+} from "@/lib/business-access";
 import {
   normalizeParkingPassLocationSearch,
   parkingPassLocationMatches,
@@ -800,15 +809,10 @@ export default function ParkingPassPage() {
   const { effectiveLocationContext } = useEffectiveLocationContext();
   const { toast } = useToast();
   const [location, setLocation] = useLocation();
-  const { data: businessAccess } = useQuery<{
-    hasAnyAccess: boolean;
+  const { data: businessAccess } = useQuery<BusinessAccessContext & {
     linkState?: "linked" | "not_attached";
     guidance?: string | null;
     primaryRestaurant?: { id: string; name: string } | null;
-    permissions: {
-      manageParkingPass: boolean;
-      manageProfile?: boolean;
-    };
   }>({
     queryKey: ["/api/business-access/me"],
     enabled: !!user,
@@ -823,10 +827,6 @@ export default function ParkingPassPage() {
     isAdminOrStaff ||
     user?.userType === "food_truck" ||
     businessAccess?.permissions?.manageParkingPass === true;
-  const canManageTruckProfile =
-    isAdminOrStaff ||
-    user?.userType === "food_truck" ||
-    businessAccess?.permissions?.manageProfile === true;
   const requiresBusinessAttachment =
     !isAdminOrStaff &&
     (user?.userType === "food_truck" || user?.userType === "restaurant_owner") &&
@@ -841,6 +841,12 @@ export default function ParkingPassPage() {
   const [ownedFoodTrucks, setOwnedFoodTrucks] = useState<any[]>([]);
   const [truckId, setTruckId] = useState<string | null>(null);
   const [truck, setTruck] = useState<any | null>(null);
+  const scopedTruckPermissions = getScopedBusinessPermissions(businessAccess, truckId);
+  const ownsSelectedTruck = isScopedBusinessOwner(businessAccess, truckId);
+  const canManageTruckProfile =
+    isAdminOrStaff || ownsSelectedTruck || scopedTruckPermissions.manageProfile;
+  const canManageTruckSchedule =
+    isAdminOrStaff || ownsSelectedTruck || scopedTruckPermissions.manageParkingPass;
   const [socialLinks, setSocialLinks] = useState({
     facebookPageUrl: "",
     instagramUrl: "",
@@ -1214,6 +1220,22 @@ export default function ParkingPassPage() {
   const [isSavingSchedule, setIsSavingSchedule] = useState(false);
   const [isSharingLocation, setIsSharingLocation] = useState(false);
   const [isLive, setIsLive] = useState(false);
+  const sharingLocationInFlight = useRef(false);
+  const [locationError, setLocationError] = useState("");
+  const [manualLocationFallback, setManualLocationFallback] = useState(false);
+  useEffect(() => {
+    const presence = deriveTruckPresence(truck, {
+      freshnessMs: DEFAULT_TRUCK_BROADCAST_FRESHNESS_MS,
+    });
+    setIsLive(presence.broadcastState === "live");
+    if (presence.broadcastState !== "live" || !presence.location) return;
+    const expiresAt = Math.min(
+      new Date(presence.location.capturedAt).getTime() + DEFAULT_TRUCK_BROADCAST_FRESHNESS_MS,
+      presence.liveUntilAt ? new Date(presence.liveUntilAt).getTime() : Infinity,
+    );
+    const timer = window.setTimeout(() => setIsLive(false), Math.max(0, expiresAt - Date.now()));
+    return () => window.clearTimeout(timer);
+  }, [truck]);
   const [dismissedPreOpenPromptKey, setDismissedPreOpenPromptKey] =
     useState<string | null>(null);
   const defaultLeaveTime = useMemo(() => {
@@ -1989,14 +2011,10 @@ export default function ParkingPassPage() {
   };
 
   const handleCreateSchedule = async () => {
-    if (!hasProfileTruckTools) {
+    if (!canManageTruckSchedule) {
       toast({
-        title: canManageParkingPass
-          ? "Business Distribution access required"
-          : "Permission required",
-        description: canManageParkingPass
-          ? "Start or restore Business Distribution access before publishing a dated stop."
-          : "This account cannot manage the selected truck's schedule.",
+        title: "Permission required",
+        description: "This account cannot manage the selected truck's schedule.",
         variant: "destructive",
       });
       return;
@@ -2062,6 +2080,19 @@ export default function ParkingPassPage() {
         throw new Error(data.message || "Failed to save schedule");
       }
       const created = await res.json();
+      if (
+        typeof created?.id !== "string" || !created.id.trim() ||
+        created.truckId !== truckId || created.status !== "confirmed" ||
+        created.date !== new Date(`${scheduleForm.date}T00:00:00.000Z`).toISOString() ||
+        created.startTime !== scheduleForm.startTime || created.endTime !== scheduleForm.endTime ||
+        created.address !== scheduleForm.address ||
+        created.city !== scheduleForm.city.trim() || created.state !== scheduleForm.state.trim() ||
+        created.isPublic !== scheduleForm.isPublic ||
+        (created.locationName || "") !== scheduleForm.locationName ||
+        (created.notes || "") !== scheduleForm.notes
+      ) {
+        throw new Error("Your saved stop could not be confirmed. Your entries are kept; check your schedule before retrying.");
+      }
       setManualSchedules((prev) => [...prev, created]);
       setScheduleForm((current) => ({
         ...current,
@@ -2112,7 +2143,7 @@ export default function ParkingPassPage() {
   };
 
   const handleDeleteSchedule = async (scheduleId: string) => {
-    if (!hasProfileTruckTools) {
+    if (!canManageTruckSchedule) {
       toast({
         title: "Permission required",
         description: "This account cannot manage the selected truck's schedule.",
@@ -3465,6 +3496,7 @@ export default function ParkingPassPage() {
   };
 
   const handleShareLocation = async () => {
+    if (sharingLocationInFlight.current) return;
     if (!canManageTruckProfile) {
       toast({
         title: "Profile access required",
@@ -3492,7 +3524,9 @@ export default function ParkingPassPage() {
       return;
     }
 
+    sharingLocationInFlight.current = true;
     setIsSharingLocation(true);
+    setLocationError("");
     try {
       const computeLiveMinutes = () => {
         const match = liveLeaveTime.match(/^(\d{2}):(\d{2})$/);
@@ -3506,11 +3540,19 @@ export default function ParkingPassPage() {
       };
       const safeLiveMinutes = Math.max(15, Math.min(240, computeLiveMinutes()));
       if (isLive) {
-        await fetch(apiUrl(`/api/restaurants/${truckId}/mobile-settings`), {
+        const settingsRes = await fetch(apiUrl(`/api/restaurants/${truckId}/mobile-settings`), {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ mobileOnline: false }),
         });
+        const settings = await settingsRes.json().catch(() => ({}));
+        if (!settingsRes.ok) {
+          throw new Error(settings.message || "Failed to go offline. Please retry.");
+        }
+        if (settings.success !== true || settings.restaurant?.id !== truckId || settings.restaurant.mobileOnline !== false) {
+          throw new Error("Offline status could not be confirmed. Please retry.");
+        }
+        setTruck(settings.restaurant);
         setIsLive(false);
         toast({ title: "You are offline" });
         return;
@@ -3522,18 +3564,26 @@ export default function ParkingPassPage() {
 
       const position = await new Promise<GeolocationPosition>(
         (resolve, reject) => {
-          navigator.geolocation.getCurrentPosition(resolve, reject, {
-            enableHighAccuracy: true,
-            timeout: 10000,
-          });
+          navigator.geolocation.getCurrentPosition(
+            resolve,
+            (error) => reject(new Error(
+              error.code === 1
+                ? "Location permission was denied."
+                : error.code === 3
+                  ? "Finding your location timed out."
+                  : "Your current location is unavailable.",
+            )),
+            { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 },
+          );
         },
       );
 
-      await fetch(apiUrl(`/api/restaurants/${truckId}/mobile-settings`), {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ mobileOnline: true }),
-      });
+      if (!Number.isFinite(position.coords.accuracy) || position.coords.accuracy < 0 || position.coords.accuracy > 10000) {
+        throw new Error("Location accuracy is unavailable. Retry GPS or enter your stop manually.");
+      }
+      if (!Number.isFinite(position.coords.latitude) || !Number.isFinite(position.coords.longitude) || Math.abs(position.coords.latitude) > 90 || Math.abs(position.coords.longitude) > 180) {
+        throw new Error("Your current location is invalid. Retry GPS or enter your stop manually.");
+      }
 
       const locationRes = await fetch(apiUrl(`/api/restaurants/${truckId}/location`), {
         method: "POST",
@@ -3542,17 +3592,22 @@ export default function ParkingPassPage() {
           latitude: position.coords.latitude,
           longitude: position.coords.longitude,
           accuracy: position.coords.accuracy,
-          source: "manual",
+          source: "gps",
           liveForMinutes: safeLiveMinutes,
         }),
       });
 
+      const data = await locationRes.json().catch(() => ({}));
       if (!locationRes.ok) {
-        const data = await locationRes.json().catch(() => ({}));
         throw new Error(data.message || "Failed to share location");
       }
+      if (data.success !== true || data.location?.restaurantId !== truckId || data.restaurant?.id !== truckId || deriveTruckPresence(data.restaurant, { freshnessMs: DEFAULT_TRUCK_BROADCAST_FRESHNESS_MS }).broadcastState !== "live") {
+        throw new Error("Live location could not be confirmed. Please retry.");
+      }
 
+      setTruck(data.restaurant);
       setIsLive(true);
+      setManualLocationFallback(false);
       toast({
         title: "Live location shared",
         description: `You are visible for up to ${Math.round(
@@ -3590,13 +3645,16 @@ export default function ParkingPassPage() {
         });
       }
     } catch (error) {
+      const message = error instanceof Error ? error.message : "Unable to confirm your location update.";
+      setLocationError(message);
+      if (!isLive) setManualLocationFallback(true);
       toast({
-        title: "Location update failed",
-        description:
-          error instanceof Error ? error.message : "Unable to share location.",
+        title: "Location update not confirmed",
+        description: `${message} ${isLive ? "Retry going offline to confirm your status." : canManageTruckSchedule ? "Retry GPS or enter and confirm a manual stop below." : "Retry GPS, or ask a teammate with schedule access to confirm a manual stop."}`,
         variant: "destructive",
       });
     } finally {
+      sharingLocationInFlight.current = false;
       setIsSharingLocation(false);
     }
   };
@@ -6437,7 +6495,7 @@ export default function ParkingPassPage() {
                           size="sm"
                           variant="outline"
                           onClick={handleShareLocation}
-                          disabled={isSharingLocation || isLive || !truckId}
+                          disabled={isSharingLocation || isLive || !truckId || !canManageTruckProfile}
                         >
                           Go live
                         </Button>
@@ -6501,6 +6559,23 @@ export default function ParkingPassPage() {
                         : "Go live + share"}
                   </Button>
                 </div>
+                {locationError && (
+                  <div role="alert" className="rounded-xl border border-amber-300 p-3 text-sm space-y-2">
+                    <p>{locationError}</p>
+                    <p>
+                      {isLive
+                        ? "Offline status was not confirmed. Retry Go offline."
+                        : canManageTruckSchedule
+                          ? "Retry Go live, or enter your address and confirm a dated manual stop. This does not turn live sharing on."
+                          : "Retry Go live, or ask a teammate with schedule access to confirm a manual stop."}
+                    </p>
+                    {manualLocationFallback && !isLive && canManageTruckSchedule && (
+                      <Button size="sm" variant="outline" asChild>
+                        <a href="#parking-pass-manual-stop">Enter stop manually</a>
+                      </Button>
+                    )}
+                  </div>
+                )}
                 {(truck?.instagramUrl ||
                   truck?.facebookPageUrl ||
                   truck?.xUrl) && (
@@ -6821,7 +6896,7 @@ export default function ParkingPassPage() {
                   bookingsState={bookingSchedule.error ? "unavailable" : bookingSchedule.loading ? "loading" : "ready"}
                   bookingActionsDisabled={bookingSchedule.loading || Boolean(bookingSchedule.error)}
                   items={parkingScheduleItems}
-                  allowManualEdits={hasProfileTruckTools}
+                  allowManualEdits={canManageTruckSchedule}
                   onDeleteManual={handleDeleteSchedule}
                   onCancelBooking={handleCancelBooking}
                   cancelingBookingId={cancelingBookingId}
@@ -6833,14 +6908,15 @@ export default function ParkingPassPage() {
                   end time.
                 </p>
 
-                <div className="rounded-2xl border border-[color:var(--border-subtle)] pp-glass-muted p-4 space-y-4">
+                <div id="parking-pass-manual-stop" className="rounded-2xl border border-[color:var(--border-subtle)] pp-glass-muted p-4 space-y-4 scroll-mt-4">
                   <div>
                     <p className="text-sm font-semibold text-[color:var(--text-primary)]">
                       Add manual stop
                     </p>
                     <p className="text-xs text-[color:var(--text-muted)]">
                       Share where you will be parked even if it isn’t a Parking
-                      Pass location.
+                      Pass location. Confirm the address, date, and hours before
+                      saving. Saving a stop does not turn live sharing on.
                     </p>
                   </div>
                   <div className="grid grid-cols-2 gap-3">
@@ -6850,7 +6926,7 @@ export default function ParkingPassPage() {
                         id="schedule-date"
                         type="date"
                         value={scheduleForm.date}
-                        disabled={!hasProfileTruckTools}
+                        disabled={!canManageTruckSchedule}
                         onChange={(event) =>
                           handleScheduleFieldChange("date", event.target.value)
                         }
@@ -6862,7 +6938,7 @@ export default function ParkingPassPage() {
                         id="schedule-location"
                         placeholder="Downtown plaza"
                         value={scheduleForm.locationName}
-                        disabled={!hasProfileTruckTools}
+                        disabled={!canManageTruckSchedule}
                         onChange={(event) =>
                           handleScheduleFieldChange(
                             "locationName",
@@ -6877,7 +6953,7 @@ export default function ParkingPassPage() {
                         id="schedule-start"
                         type="time"
                         value={scheduleForm.startTime}
-                        disabled={!hasProfileTruckTools}
+                        disabled={!canManageTruckSchedule}
                         onChange={(event) =>
                           handleScheduleFieldChange(
                             "startTime",
@@ -6892,7 +6968,7 @@ export default function ParkingPassPage() {
                         id="schedule-end"
                         type="time"
                         value={scheduleForm.endTime}
-                        disabled={!hasProfileTruckTools}
+                        disabled={!canManageTruckSchedule}
                         onChange={(event) =>
                           handleScheduleFieldChange(
                             "endTime",
@@ -6908,7 +6984,7 @@ export default function ParkingPassPage() {
                       id="schedule-address"
                       placeholder="123 Main St, City"
                       value={scheduleForm.address}
-                      disabled={!hasProfileTruckTools}
+                      disabled={!canManageTruckSchedule}
                       onChange={(value) =>
                         handleScheduleFieldChange("address", value)
                       }
@@ -6923,7 +6999,7 @@ export default function ParkingPassPage() {
                         placeholder="City"
                         value={scheduleForm.city}
                         required
-                        disabled={!hasProfileTruckTools}
+                        disabled={!canManageTruckSchedule}
                         onChange={(event) =>
                           handleScheduleFieldChange("city", event.target.value)
                         }
@@ -6936,7 +7012,7 @@ export default function ParkingPassPage() {
                         placeholder="State"
                         value={scheduleForm.state}
                         required
-                        disabled={!hasProfileTruckTools}
+                        disabled={!canManageTruckSchedule}
                         onChange={(event) =>
                           handleScheduleFieldChange("state", event.target.value)
                         }
@@ -6949,7 +7025,7 @@ export default function ParkingPassPage() {
                       id="schedule-notes"
                       placeholder="Optional notes for this stop."
                       value={scheduleForm.notes}
-                      disabled={!hasProfileTruckTools}
+                      disabled={!canManageTruckSchedule}
                       onChange={(event) =>
                         handleScheduleFieldChange("notes", event.target.value)
                       }
@@ -6960,7 +7036,7 @@ export default function ParkingPassPage() {
                       <input
                         type="checkbox"
                         checked={scheduleForm.isPublic}
-                        disabled={!hasProfileTruckTools}
+                        disabled={!canManageTruckSchedule}
                         onChange={(event) =>
                           handleScheduleFieldChange(
                             "isPublic",
@@ -6973,7 +7049,7 @@ export default function ParkingPassPage() {
                     <Button
                       size="sm"
                       onClick={handleCreateSchedule}
-                      disabled={isSavingSchedule || !hasProfileTruckTools}
+                      disabled={isSavingSchedule || !canManageTruckSchedule}
                     >
                       {isSavingSchedule ? "Saving..." : "Add stop"}
                     </Button>

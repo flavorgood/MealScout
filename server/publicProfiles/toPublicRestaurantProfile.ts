@@ -199,7 +199,7 @@ export function toPublicRestaurantProfile(input: {
             currentLongitude: row.currentLongitude,
             lastBroadcastAt: row.lastBroadcastAt,
             liveUntilAt: row.liveUntilAt,
-            locationSource: row.locationSource || "owner_gps",
+            locationSource: row.liveLocationSource || row.locationSource || "unknown",
             gpsAccuracy: row.gpsAccuracy,
           },
           { freshnessMs: DEFAULT_TRUCK_BROADCAST_FRESHNESS_MS },

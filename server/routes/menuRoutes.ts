@@ -421,7 +421,7 @@ export async function buildOrderingReadiness(
     ? String(
         currentTruckStop?.addressPublicLabel ||
           currentTruckStop?.locationName ||
-          "Truck pickup location",
+          "",
       ).trim() || null
     : fixedPickupAddress;
   const pickupDirectionsUrl = restaurantRow?.isFoodTruck

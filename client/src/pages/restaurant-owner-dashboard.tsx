@@ -35,6 +35,7 @@ import {
 } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
 import { apiRequest, queryClient } from "@/lib/queryClient";
+import { GoogleMapPicker, type GeoPoint } from "@/components/maps/GoogleMapPicker";
 import {
   resolveCanonicalShareUrl,
   resolveCanonicalShareUrlSync,
@@ -288,7 +289,7 @@ export default function RestaurantOwnerDashboard() {
     timestamp?: number;
   } | null>(null);
   const [locationError, setLocationError] = useState<string | null>(null);
-  const [gpsWatchId, setGpsWatchId] = useState<number | null>(null);
+  const gpsWatchIdRef = useRef<number | null>(null);
   const [lastBroadcast, setLastBroadcast] = useState<Date | null>(null);
   const [connectionStatus, setConnectionStatus] = useState<
     "connected" | "disconnected" | "connecting"
@@ -297,7 +298,21 @@ export default function RestaurantOwnerDashboard() {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [bookingToCancel, setBookingToCancel] =
     useState<TruckBookingItem | null>(null);
-  const hasWarnedFallbackAccuracyRef = useRef(false);
+  const locationWriteInFlightRef = useRef(false);
+  const locationWritePromiseRef = useRef<Promise<unknown> | null>(null);
+  const stopIntentRef = useRef(false);
+  const stopRequestRef = useRef<Promise<{ restaurantId: string; endedSessionId: string }> | null>(null);
+  const startLocationInFlightRef = useRef(false);
+  const activeSessionRef = useRef<{ restaurantId: string; id: string } | null>(null);
+  const lastSentLocationRef = useRef<{ lat: number; lng: number } | null>(null);
+  const lastSentAtRef = useRef(0);
+  const selectedRestaurantRef = useRef(selectedRestaurant);
+  selectedRestaurantRef.current = selectedRestaurant;
+  const [showManualLocation, setShowManualLocation] = useState(false);
+  const [manualLocationAddress, setManualLocationAddress] = useState("");
+  const [manualLocationPin, setManualLocationPin] = useState<GeoPoint | null>(null);
+  const [isFindingManualPin, setIsFindingManualPin] = useState(false);
+  const [gpsRetryAttempt, setGpsRetryAttempt] = useState(0);
 
   const isRestaurantOwner = user?.userType === "restaurant_owner";
   const isFoodTruck = user?.userType === "food_truck";
@@ -401,7 +416,7 @@ export default function RestaurantOwnerDashboard() {
     enabled: !!user,
   });
 
-  const hasProfileLocationTools = canManageParkingPass;
+  const hasProfileLocationTools = canManageProfile;
   const hasAnalyticsAccess = canViewAnalytics;
   // The routed Audience workspace owns served analytics. Keep the legacy query
   // definitions inert until their hidden JSX is removed in the cleanup pass.
@@ -598,17 +613,19 @@ export default function RestaurantOwnerDashboard() {
   // Food truck mutations - declared early to avoid hoisting issues
   const updateLocationMutation = useMutation({
     mutationFn: async (location: {
+      restaurantId: string;
+      sessionId: string;
       lat: number;
       lng: number;
       accuracy?: number;
       heading?: number;
       speed?: number;
     }) => {
-      return await apiRequest(
+      const response = await apiRequest(
         "POST",
-        `/api/restaurants/${selectedRestaurant}/location`,
+        `/api/restaurants/${location.restaurantId}/location`,
         {
-          sessionId,
+          sessionId: location.sessionId,
           latitude: location.lat,
           longitude: location.lng,
           accuracy: location.accuracy,
@@ -617,27 +634,67 @@ export default function RestaurantOwnerDashboard() {
           source: "gps",
         },
       );
+      const data = await response.json();
+      const saved = data?.location;
+      const restaurant = data?.restaurant;
+      const confirmsPoint = (lat: unknown, lng: unknown) =>
+        lat != null && lng != null && String(lat).trim() !== "" && String(lng).trim() !== "" &&
+        Number.isFinite(Number(lat)) && Number.isFinite(Number(lng)) &&
+        Math.abs(Number(lat) - location.lat) <= 1e-8 && Math.abs(Number(lng) - location.lng) <= 1e-8;
+      // Validate existing location + owner-projection fields, including their
+      // decimal(scale 8 coordinates / scale 2 accuracy) persistence precision.
+      if (data?.success !== true || saved?.restaurantId !== location.restaurantId ||
+          saved?.sessionId !== location.sessionId || saved?.source !== "gps" ||
+          saved?.accuracy == null || String(saved.accuracy).trim() === "" || !Number.isFinite(Number(saved.accuracy)) ||
+          location.accuracy === undefined || !Number.isFinite(location.accuracy) || Math.abs(Number(saved.accuracy) - location.accuracy) > 0.01 ||
+          !confirmsPoint(saved?.latitude, saved?.longitude) || restaurant?.id !== location.restaurantId ||
+          !confirmsPoint(restaurant?.currentLatitude, restaurant?.currentLongitude)) {
+        throw new Error("The server did not confirm your live position. The last successful update is retained; please retry.");
+      }
+      return data;
     },
-    onSuccess: () => {
+    onSuccess: (_data, location) => {
+      if (stopIntentRef.current || selectedRestaurantRef.current !== location.restaurantId || activeSessionRef.current?.id !== location.sessionId) return;
+      lastSentLocationRef.current = { lat: location.lat, lng: location.lng };
+      lastSentAtRef.current = Date.now();
       setLastBroadcast(new Date());
+      setLocationError(null);
+      setConnectionStatus("connected");
     },
-    onError: (error: any) => {
-      console.error("Location update failed:", error);
-      setLocationError("Failed to update location");
+    onError: (error: Error, location) => {
+      if (stopIntentRef.current || selectedRestaurantRef.current !== location.restaurantId || activeSessionRef.current?.id !== location.sessionId) return;
+      setLocationError(error.message || "Failed to update location. Please retry.");
+      setConnectionStatus("disconnected");
+    },
+    onSettled: () => {
+      locationWriteInFlightRef.current = false;
     },
   });
+  const updateLocationRef = useRef(updateLocationMutation.mutateAsync);
+  updateLocationRef.current = updateLocationMutation.mutateAsync;
 
   const stopFoodTruckSessionMutation = useMutation({
     mutationFn: async () => {
-      return await apiRequest(
-        "POST",
-        `/api/restaurants/${selectedRestaurant}/truck-session/end`,
-        {
-          sessionId,
-        },
-      );
+      if (stopRequestRef.current) return stopRequestRef.current;
+      if (!sessionId) throw new Error("No confirmed live session is available. Refresh before retrying.");
+      const restaurantId = selectedRestaurant;
+      const endedSessionId = sessionId;
+      // Stop intent fences new GPS callbacks immediately. Let an already sent
+      // update settle before ending, so it cannot revive presence after the end.
+      stopIntentRef.current = true;
+      const request = (async () => {
+        await locationWritePromiseRef.current;
+        const response = await apiRequest("POST", `/api/restaurants/${restaurantId}/truck-session/end`, { sessionId: endedSessionId });
+        const data = await response.json();
+        if (data?.success !== true) throw new Error("The server did not confirm that live sharing stopped. Please retry.");
+        return { restaurantId, endedSessionId };
+      })();
+      stopRequestRef.current = request;
+      return request;
     },
-    onSuccess: () => {
+    onSuccess: ({ restaurantId, endedSessionId }) => {
+      if (selectedRestaurantRef.current !== restaurantId || activeSessionRef.current?.id !== endedSessionId) return;
+      activeSessionRef.current = null;
       setIsBroadcasting(false);
       setSessionId(null);
       setConnectionStatus("disconnected");
@@ -645,9 +702,9 @@ export default function RestaurantOwnerDashboard() {
       // Disconnect WebSocket
       disconnectWS();
 
-      if (gpsWatchId) {
-        navigator.geolocation.clearWatch(gpsWatchId);
-        setGpsWatchId(null);
+      if (gpsWatchIdRef.current !== null) {
+        navigator.geolocation?.clearWatch(gpsWatchIdRef.current);
+        gpsWatchIdRef.current = null;
       }
       toast({
         title: "Live location stopped",
@@ -660,6 +717,10 @@ export default function RestaurantOwnerDashboard() {
         description: error.message || "Please try again.",
         variant: "destructive",
       });
+    },
+    onSettled: () => {
+      stopRequestRef.current = null;
+      stopIntentRef.current = false;
     },
   });
 
@@ -752,7 +813,7 @@ export default function RestaurantOwnerDashboard() {
     overview: canManageProfile,
     profile: canManageProfile,
     menu: canManageProfile,
-    availability: canManageParkingPass,
+    availability: canManageParkingPass || canManageProfile,
     media: canManageProfile,
     deals: canManageDeals,
     work: canManageParkingPass,
@@ -1161,177 +1222,100 @@ export default function RestaurantOwnerDashboard() {
   const liveShareDescription =
     "See our current location and profile on MealScout.";
 
-  // GPS fallback function using IP geolocation
-  const tryFallbackLocation = async (): Promise<{
-    lat: number;
-    lng: number;
-    accuracy?: number;
-  } | null> => {
-    try {
-      // Try IP-based geolocation as fallback
-      const response = await fetch("https://ipapi.co/json/");
-      if (response.ok) {
-        const data = await response.json();
-        if (data.latitude && data.longitude) {
-          return {
-            lat: parseFloat(data.latitude),
-            lng: parseFloat(data.longitude),
-            accuracy: 10000, // IP location is less accurate
-          };
-        }
-      }
-    } catch (error) {
-      console.warn("IP geolocation fallback failed:", error);
+  const readFreshGpsPosition = (position: GeolocationPosition) => {
+    const { latitude: lat, longitude: lng, accuracy } = position.coords;
+    if (!Number.isFinite(lat) || !Number.isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180 ||
+        !Number.isFinite(accuracy) || accuracy < 0 || accuracy > 10000 ||
+        !Number.isFinite(position.timestamp) || Date.now() - position.timestamp > 5000) {
+      throw new Error("A fresh GPS position with known accuracy is required. Retry GPS or confirm a saved pin below.");
     }
-
-    // Final fallback: use restaurant's base location if available
-    if (currentRestaurant?.latitude && currentRestaurant?.longitude) {
-      return {
-        lat: parseFloat(currentRestaurant.latitude),
-        lng: parseFloat(currentRestaurant.longitude),
-        accuracy: 5000, // Restaurant location accuracy estimate
-      };
-    }
-
-    return null;
+    return { lat, lng, accuracy, timestamp: position.timestamp };
   };
 
-  // A quiet inline error string is easy to miss, and "approximate location"
-  // undersells that customers could be sent miles from the truck's real
-  // spot. Surface it once per broadcast session as a toast too.
-  const warnFallbackAccuracy = (accuracyMeters: number) => {
-    if (hasWarnedFallbackAccuracyRef.current) return;
-    hasWarnedFallbackAccuracyRef.current = true;
-    const accuracyMiles = accuracyMeters / 1609;
-    toast({
-      title: "Using an approximate location",
-      description: `Customers may see your truck up to ${accuracyMiles.toFixed(1)} miles from where you are. Allow precise location access for a better pin.`,
-      variant: "destructive",
-    });
+  // A failed GPS reading never becomes an IP estimate or the home-base pin.
+  // The saved-pin editor requires the vendor to choose and confirm a location.
+  const offerManualLocation = (message: string) => {
+    setLocationError(message);
+    setConnectionStatus("disconnected");
+    setShowManualLocation(true);
   };
 
-  // GPS tracking effect with fallback
+  // Only the active owned session owns this watch. Mutable reading/receipt state
+  // lives in refs so successful updates do not tear down and recreate the watch.
   useEffect(() => {
-    if (isBroadcasting && sessionId) {
-      if (!navigator.geolocation) {
-        setLocationError("GPS not supported. Trying fallback location...");
-
-        // Use fallback location when GPS is not supported
-        tryFallbackLocation().then((fallbackLocation) => {
-          if (fallbackLocation) {
-            setCurrentLocation(fallbackLocation);
-            setGpsAccuracy(fallbackLocation.accuracy || 10000);
-            setLocationError("Using approximate location (GPS unavailable)");
-            setConnectionStatus("connected");
-            warnFallbackAccuracy(fallbackLocation.accuracy || 10000);
-
-            updateLocationMutation.mutate({
-              lat: fallbackLocation.lat,
-              lng: fallbackLocation.lng,
-              accuracy: fallbackLocation.accuracy || 10000,
-            });
-          } else {
-            setLocationError(
-              "Unable to determine location. Please check your settings.",
-            );
-            setConnectionStatus("disconnected");
-          }
-        });
-        return;
-      }
-
-      const watchId = navigator.geolocation.watchPosition(
-        (position) => {
-          const newLocation = {
-            lat: position.coords.latitude,
-            lng: position.coords.longitude,
-            accuracy: position.coords.accuracy,
-            timestamp: position.timestamp,
-          };
-
-          // Update location state
-          setCurrentLocation(newLocation);
-          setGpsAccuracy(position.coords.accuracy);
-          setLocationError(null);
-          setConnectionStatus("connected");
-          hasWarnedFallbackAccuracyRef.current = false;
-
-          // Only send updates if location changed significantly (50m threshold)
-          if (
-            !lastBroadcast ||
-            Date.now() - lastBroadcast.getTime() > 30000 || // 30 seconds minimum
-            (currentLocation &&
-              getDistance(
-                currentLocation.lat,
-                currentLocation.lng,
-                newLocation.lat,
-                newLocation.lng,
-              ) > 50)
-          ) {
-            updateLocationMutation.mutate({
-              lat: newLocation.lat,
-              lng: newLocation.lng,
-              accuracy: position.coords.accuracy,
-              heading: position.coords.heading || undefined,
-              speed: position.coords.speed || undefined,
-            });
-          }
-        },
-        async (error) => {
-          console.error("GPS error:", error);
-
-          // Try fallback location when GPS fails
-          let fallbackMessage = "GPS error. ";
-          if (error.code === error.PERMISSION_DENIED) {
-            fallbackMessage += "Location access denied. ";
-          } else if (error.code === error.POSITION_UNAVAILABLE) {
-            fallbackMessage += "Location unavailable. ";
-          } else if (error.code === error.TIMEOUT) {
-            fallbackMessage += "Location timeout. ";
-          }
-
-          setLocationError(fallbackMessage + "Trying fallback...");
-          setConnectionStatus("connecting");
-
-          const fallbackLocation = await tryFallbackLocation();
-          if (fallbackLocation) {
-            setCurrentLocation(fallbackLocation);
-            setGpsAccuracy(fallbackLocation.accuracy || 10000);
-            setLocationError(fallbackMessage + "Using approximate location.");
-            setConnectionStatus("connected");
-            warnFallbackAccuracy(fallbackLocation.accuracy || 10000);
-
-            updateLocationMutation.mutate({
-              lat: fallbackLocation.lat,
-              lng: fallbackLocation.lng,
-              accuracy: fallbackLocation.accuracy || 10000,
-            });
-          } else {
-            setLocationError(fallbackMessage + "Unable to determine location.");
-            setConnectionStatus("disconnected");
-          }
-        },
-        {
-          enableHighAccuracy: true,
-          timeout: 10000,
-          maximumAge: 5000,
-        },
-      );
-
-      setGpsWatchId(watchId);
-
-      return () => {
-        navigator.geolocation.clearWatch(watchId);
-      };
+    if (!isBroadcasting || !sessionId || !hasProfileLocationTools ||
+        activeSessionRef.current?.id !== sessionId || activeSessionRef.current.restaurantId !== selectedRestaurant) return;
+    if (!navigator.geolocation) {
+      offerManualLocation("GPS is unavailable. Enter and confirm a saved location below, or retry GPS on a supported device.");
+      return;
     }
-  }, [
-    isBroadcasting,
-    sessionId,
-    lastBroadcast,
-    currentLocation,
-    updateLocationMutation,
-    currentRestaurant,
-  ]);
+    let active = true;
+    const watchId = navigator.geolocation.watchPosition(
+      (position) => {
+        if (!active || stopIntentRef.current || activeSessionRef.current?.id !== sessionId ||
+            selectedRestaurantRef.current !== selectedRestaurant) return;
+        let next;
+        try { next = readFreshGpsPosition(position); }
+        catch (error) {
+          offerManualLocation(error instanceof Error ? error.message : "GPS could not refresh your pin.");
+          return;
+        }
+        setCurrentLocation(next);
+        setGpsAccuracy(position.coords.accuracy);
+        const previous = lastSentLocationRef.current;
+        if (!locationWriteInFlightRef.current && (
+          !previous || Date.now() - lastSentAtRef.current > 30000 ||
+          getDistance(previous.lat, previous.lng, next.lat, next.lng) > 50
+        )) {
+          locationWriteInFlightRef.current = true;
+          const write = updateLocationRef.current({
+            restaurantId: selectedRestaurant,
+            sessionId,
+            lat: next.lat,
+            lng: next.lng,
+            accuracy: position.coords.accuracy,
+            heading: position.coords.heading ?? undefined,
+            speed: position.coords.speed ?? undefined,
+          }).catch(() => undefined);
+          locationWritePromiseRef.current = write;
+          void write.finally(() => {
+            if (locationWritePromiseRef.current === write) locationWritePromiseRef.current = null;
+          });
+        }
+      },
+      (error) => {
+        if (!active || stopIntentRef.current || activeSessionRef.current?.id !== sessionId ||
+            selectedRestaurantRef.current !== selectedRestaurant) return;
+        offerManualLocation(`${error.message || "GPS could not update your position."} Retry GPS or confirm a saved pin below. No estimated position was sent.`);
+      },
+      { enableHighAccuracy: true, timeout: 10000, maximumAge: 5000 },
+    );
+    gpsWatchIdRef.current = watchId;
+    return () => {
+      active = false;
+      navigator.geolocation?.clearWatch(watchId);
+      if (gpsWatchIdRef.current === watchId) gpsWatchIdRef.current = null;
+    };
+  }, [isBroadcasting, sessionId, selectedRestaurant, hasProfileLocationTools, gpsRetryAttempt]);
+
+  useEffect(() => {
+    activeSessionRef.current = null;
+    setIsBroadcasting(false);
+    setSessionId(null);
+    setCurrentLocation(null);
+    setLastBroadcast(null);
+    setConnectionStatus("disconnected");
+    setLocationError(null);
+    setShowManualLocation(false);
+    setManualLocationAddress("");
+    setManualLocationPin(null);
+    setIsFindingManualPin(false);
+    setIsUpdatingLocation(false);
+    setLocationUpdateError(null);
+    lastSentLocationRef.current = null;
+    lastSentAtRef.current = 0;
+    disconnectWS();
+  }, [selectedRestaurant]);
 
   // Warn, then auto-stop broadcasting after 2 minutes of inactivity.
   // A silent auto-stop is easy to miss if the owner has put the phone
@@ -1355,12 +1339,7 @@ export default function RestaurantOwnerDashboard() {
           // 2 minutes
           stopFoodTruckSessionMutation.mutate();
           setLocationError("Session timed out due to inactivity");
-          toast({
-            title: "You've gone offline on MealScout",
-            description:
-              "No location update was received for 2 minutes, so your truck was taken off the live map. Start broadcasting again when you're ready.",
-            variant: "destructive",
-          });
+          // Only the successful end-session receipt may claim we are offline.
         }
       }, 125000); // Check after 2 minutes 5 seconds
 
@@ -1543,46 +1522,39 @@ export default function RestaurantOwnerDashboard() {
       return;
     }
 
+    if (startLocationInFlightRef.current) return;
     if (!navigator.geolocation) {
-      toast({
-        title: "Location unavailable",
-        description: "This device cannot share its current location.",
-        variant: "destructive",
-      });
+      offerManualLocation("This device cannot share its location. Enter and confirm a saved pin below, or retry GPS on a supported device.");
       return;
     }
 
+    startLocationInFlightRef.current = true;
+    const restaurantId = selectedRestaurant;
     setConnectionStatus("connecting");
-    hasWarnedFallbackAccuracyRef.current = false;
+    setLocationError(null);
 
     navigator.geolocation.getCurrentPosition(
       (position) => {
-        const location = {
-          lat: position.coords.latitude,
-          lng: position.coords.longitude,
-        };
-
-        setCurrentLocation({
-          ...location,
-          accuracy: position.coords.accuracy,
-          timestamp: position.timestamp,
-        });
-
-        startFoodTruckSessionMutation.mutate(location);
+        if (selectedRestaurantRef.current !== restaurantId) { startLocationInFlightRef.current = false; return; }
+        try {
+          const location = readFreshGpsPosition(position);
+          setCurrentLocation(location);
+          setGpsAccuracy(location.accuracy);
+          startFoodTruckSessionMutation.mutate({ ...location, restaurantId });
+        } catch (error) {
+          startLocationInFlightRef.current = false;
+          offerManualLocation(error instanceof Error ? error.message : "GPS could not find your pin.");
+        }
       },
       (error) => {
-        setLocationError(error.message);
-        setConnectionStatus("disconnected");
-        toast({
-          title: "Location unavailable",
-          description: "Allow location access for MealScout, then try again.",
-          variant: "destructive",
-        });
+        startLocationInFlightRef.current = false;
+        if (selectedRestaurantRef.current !== restaurantId) return;
+        offerManualLocation(`${error.message || "Location unavailable."} Retry GPS or enter and confirm a saved pin below.`);
       },
       {
         enableHighAccuracy: true,
         timeout: 10000,
-        maximumAge: 60000,
+        maximumAge: 0,
       },
     );
   };
@@ -1604,39 +1576,43 @@ export default function RestaurantOwnerDashboard() {
     }
 
     if (!navigator.geolocation) {
-      toast({
-        title: "Location unavailable",
-        description: "This device cannot share its current location.",
-        variant: "destructive",
-      });
+      setLocationUpdateError("This device cannot share its location. Enter and confirm a saved pin below.");
+      setShowManualLocation(true);
       return;
     }
 
+    const restaurantId = selectedRestaurant;
     setIsUpdatingLocation(true);
     setLocationUpdateError(null);
 
     navigator.geolocation.getCurrentPosition(
       (position) => {
-        const location = {
-          latitude: position.coords.latitude,
-          longitude: position.coords.longitude,
-        };
-
-        updateRestaurantLocationMutation.mutate(location);
+        if (selectedRestaurantRef.current !== restaurantId) return;
+        try {
+          const location = readFreshGpsPosition(position);
+          updateRestaurantLocationMutation.mutate({
+            restaurantId,
+            latitude: location.lat,
+            longitude: location.lng,
+            source: "gps",
+            accuracy: location.accuracy,
+          });
+        } catch (error) {
+          setIsUpdatingLocation(false);
+          setLocationUpdateError(error instanceof Error ? error.message : "GPS could not find your pin.");
+          setShowManualLocation(true);
+        }
       },
       (error) => {
+        if (selectedRestaurantRef.current !== restaurantId) return;
         setLocationUpdateError(error.message);
         setIsUpdatingLocation(false);
-        toast({
-          title: "Location unavailable",
-          description: "Allow location access for MealScout, then try again.",
-          variant: "destructive",
-        });
+        setShowManualLocation(true);
       },
       {
         enableHighAccuracy: true,
         timeout: 10000,
-        maximumAge: 60000,
+        maximumAge: 0,
       },
     );
   };
@@ -1673,27 +1649,39 @@ export default function RestaurantOwnerDashboard() {
 
   // Food truck mutations
   const startFoodTruckSessionMutation = useMutation({
-    mutationFn: async (location: { lat: number; lng: number }) => {
-      return await apiRequest(
+    mutationFn: async (location: { restaurantId: string; lat: number; lng: number; accuracy?: number }) => {
+      const response = await apiRequest(
         "POST",
-        `/api/restaurants/${selectedRestaurant}/truck-session/start`,
+        `/api/restaurants/${location.restaurantId}/truck-session/start`,
         {
           latitude: location.lat,
           longitude: location.lng,
+          accuracy: location.accuracy,
+          source: "gps",
           deviceId: navigator.userAgent || "web-browser",
         },
       );
+      const data = await response.json();
+      if (!data?.success || typeof data?.session?.id !== "string" || !data.session.id ||
+          data.session.restaurantId !== location.restaurantId) {
+        throw new Error("The server did not confirm this truck's live session. Refresh before retrying.");
+      }
+      return data;
     },
-    onSuccess: (data: any) => {
-      setSessionId(data?.session?.id || null);
+    onSuccess: (data) => {
+      if (selectedRestaurantRef.current !== data.session.restaurantId) return;
+      activeSessionRef.current = { restaurantId: data.session.restaurantId, id: data.session.id };
+      setSessionId(data.session.id);
       setIsBroadcasting(true);
       setConnectionStatus("connected");
+      setLastBroadcast(new Date());
+      lastSentAtRef.current = Date.now();
+      lastSentLocationRef.current = null;
 
       // Connect to WebSocket and subscribe to restaurant updates
       connectWS();
-      setTimeout(() => {
-        subscribeToRestaurant(selectedRestaurant);
-      }, 1000);
+      // The socket hook records subscriptions before connect and restores them.
+      subscribeToRestaurant(data.session.restaurantId);
 
       toast({
         title: "Your truck is live",
@@ -1701,38 +1689,57 @@ export default function RestaurantOwnerDashboard() {
           "Customers can now see your current location on MealScout.",
       });
     },
-    onError: (error: any) => {
+    onError: (error: Error, location) => {
+      if (selectedRestaurantRef.current !== location.restaurantId) return;
+      setConnectionStatus("disconnected");
+      setLocationError(error.message || "Check location access and try again.");
       toast({
         title: "Could not share your location",
         description: error.message || "Check location access and try again.",
         variant: "destructive",
       });
     },
+    onSettled: () => { startLocationInFlightRef.current = false; },
   });
 
   // Restaurant location update mutation (different from food truck location)
   const updateRestaurantLocationMutation = useMutation({
-    mutationFn: async (location: { latitude: number; longitude: number }) => {
-      return await apiRequest(
+    mutationFn: async (location: { restaurantId: string; latitude: number; longitude: number; source: "gps" | "manual"; accuracy?: number; address?: string }) => {
+      const response = await apiRequest(
         "PATCH",
-        `/api/restaurants/${selectedRestaurant}/location`,
+        `/api/restaurants/${location.restaurantId}/location`,
         location,
       );
+      const data = await response.json();
+      const restaurant = data?.restaurant;
+      const hasSavedCoordinates = restaurant?.latitude != null && restaurant?.longitude != null &&
+        String(restaurant.latitude).trim() !== "" && String(restaurant.longitude).trim() !== "";
+      // Profile coordinates are decimal(scale: 8); allow only its rounding unit.
+      if (data?.success !== true || restaurant?.id !== location.restaurantId || !hasSavedCoordinates ||
+          !Number.isFinite(Number(restaurant.latitude)) || !Number.isFinite(Number(restaurant.longitude)) ||
+          Math.abs(Number(restaurant.latitude) - location.latitude) > 1e-8 ||
+          Math.abs(Number(restaurant.longitude) - location.longitude) > 1e-8) {
+        throw new Error("The server did not confirm your saved profile pin. Your entry is preserved; please retry.");
+      }
+      return data;
     },
-    onSuccess: () => {
+    onSuccess: (_data, location) => {
+      if (selectedRestaurantRef.current !== location.restaurantId) return;
       queryClient.invalidateQueries({
         queryKey: ["/api/restaurants/my-restaurants"],
       });
       setLocationUpdateError(null);
       setIsUpdatingLocation(false);
+      setShowManualLocation(false);
       toast({
         title: currentIsTruckBusiness
           ? "Saved location updated"
           : "Restaurant location updated",
-        description: "The map pin on your public profile has been refreshed.",
+        description: "Your saved profile pin has been updated. Serving stops are managed separately in Parking Pass.",
       });
     },
-    onError: (error: any) => {
+    onError: (error: Error, location) => {
+      if (selectedRestaurantRef.current !== location.restaurantId) return;
       setLocationUpdateError(error.message || "Failed to update location");
       setIsUpdatingLocation(false);
       toast({
@@ -1742,6 +1749,44 @@ export default function RestaurantOwnerDashboard() {
       });
     },
   });
+
+  const handleFindManualLocation = async () => {
+    if (!hasProfileLocationTools || !manualLocationAddress.trim() || isFindingManualPin) return;
+    const restaurantId = selectedRestaurant;
+    const address = manualLocationAddress.trim();
+    setIsFindingManualPin(true);
+    setLocationUpdateError(null);
+    try {
+      // Reuse Parking Pass's same-origin geocoder contract; no alternate provider.
+      const response = await apiRequest("GET", `/api/location/search?q=${encodeURIComponent(address)}&limit=1`);
+      const results = await response.json();
+      const point = { lat: Number(results?.[0]?.lat), lng: Number(results?.[0]?.lon) };
+      if (!Number.isFinite(point.lat) || !Number.isFinite(point.lng) ||
+          Math.abs(point.lat) > 90 || Math.abs(point.lng) > 180) {
+        throw new Error("No map pin was found for this address. Edit the address or choose a pin on the map.");
+      }
+      if (selectedRestaurantRef.current === restaurantId) setManualLocationPin(point);
+    } catch (error) {
+      if (selectedRestaurantRef.current === restaurantId) {
+        setLocationUpdateError(error instanceof Error ? error.message : "Could not find this address. Please retry.");
+      }
+    } finally {
+      if (selectedRestaurantRef.current === restaurantId) setIsFindingManualPin(false);
+    }
+  };
+
+  const handleConfirmManualLocation = () => {
+    if (!hasProfileLocationTools || !manualLocationPin || updateRestaurantLocationMutation.isPending) return;
+    setIsUpdatingLocation(true);
+    setLocationUpdateError(null);
+    updateRestaurantLocationMutation.mutate({
+      restaurantId: selectedRestaurant,
+      latitude: manualLocationPin.lat,
+      longitude: manualLocationPin.lng,
+      source: "manual",
+      ...(manualLocationAddress.trim() ? { address: manualLocationAddress.trim() } : {}),
+    });
+  };
 
   // Operating hours update mutation
   const updateOperatingHoursMutation = useMutation({
@@ -2044,7 +2089,7 @@ export default function RestaurantOwnerDashboard() {
     },
   });
   const availableTabs = [
-    ...(canManageParkingPass ? (["foodtruck"] as const) : []),
+    ...(canManageParkingPass || canManageProfile ? (["foodtruck"] as const) : []),
     ...(canManageParkingPass && currentIsTruckBusiness
       ? (["bookings"] as const)
       : []),
@@ -4125,7 +4170,7 @@ export default function RestaurantOwnerDashboard() {
           >
             {currentIsTruckBusiness ? (
               <TabsList className="grid w-full grid-cols-2 rounded-2xl bg-orange-50 p-1 sm:max-w-md">
-                {canManageParkingPass ? (
+                {canManageParkingPass || canManageProfile ? (
                   <TabsTrigger value="foodtruck" data-testid="tab-food-truck">
                     {currentIsTruckBusiness ? (
                       <Truck className="mr-1 hidden h-4 w-4 sm:block" />
@@ -5018,7 +5063,7 @@ export default function RestaurantOwnerDashboard() {
               </TabsContent>
             ) : null}
 
-            {canManageParkingPass ? (
+            {canManageParkingPass || canManageProfile ? (
               <TabsContent value="foodtruck" className="space-y-6">
                 <Card
                   className="overflow-hidden border-orange-100 bg-white/95 shadow-clean"
@@ -5098,7 +5143,7 @@ export default function RestaurantOwnerDashboard() {
                                     {connectionStatus === "connecting"
                                       ? "Finding location"
                                       : isBroadcasting
-                                        ? "Live"
+                                        ? connectionStatus === "connected" ? "Live" : "Location update failed"
                                         : "Not live"}
                                   </Badge>
                                 </div>
@@ -5106,7 +5151,7 @@ export default function RestaurantOwnerDashboard() {
                                   {connectionStatus === "connecting"
                                     ? "Keep this page open while MealScout finds your current stop."
                                     : isBroadcasting
-                                      ? "Customers can see your current truck location."
+                                      ? connectionStatus === "connected" ? "Customers can see your last saved live position." : "Live session remains open, but the latest location could not be saved. Retry GPS or stop sharing."
                                       : "Share your current stop while you are serving."}
                                 </p>
                               </div>
@@ -5118,7 +5163,7 @@ export default function RestaurantOwnerDashboard() {
                               <Button
                                 onClick={handleStartBroadcasting}
                                 disabled={
-                                  startFoodTruckSessionMutation.isPending
+                                  !hasProfileLocationTools || startFoodTruckSessionMutation.isPending || connectionStatus === "connecting"
                                 }
                                 className="min-h-11 flex-1 bg-emerald-600 text-white hover:bg-emerald-700"
                                 data-testid="button-start-broadcasting"
@@ -5136,7 +5181,7 @@ export default function RestaurantOwnerDashboard() {
                               <Button
                                 onClick={handleStopBroadcasting}
                                 disabled={
-                                  stopFoodTruckSessionMutation.isPending
+                                  !hasProfileLocationTools || stopFoodTruckSessionMutation.isPending
                                 }
                                 variant="destructive"
                                 className="min-h-11 flex-1"
@@ -5150,6 +5195,12 @@ export default function RestaurantOwnerDashboard() {
                                 Stop sharing
                               </Button>
                             )}
+                            {isBroadcasting && connectionStatus === "disconnected" ? (
+                              <Button variant="outline" disabled={!hasProfileLocationTools || stopFoodTruckSessionMutation.isPending} onClick={() => {
+                                setConnectionStatus("connecting");
+                                setGpsRetryAttempt((attempt) => attempt + 1);
+                              }} data-testid="button-retry-live-location">Retry GPS</Button>
+                            ) : null}
                             {isBroadcasting ? (
                               <ShareButton
                                 url={liveShareUrl}
@@ -5185,9 +5236,7 @@ export default function RestaurantOwnerDashboard() {
                                   variant="outline"
                                   className="shrink-0 bg-white"
                                 >
-                                  {gpsAccuracy > 1000
-                                    ? "Approximate pin"
-                                    : "Precise pin"}
+                                  {gpsAccuracy > 1000 ? "Approximate GPS pin" : `GPS accuracy ${Math.round(gpsAccuracy)} m`}
                                 </Badge>
                               ) : null}
                             </div>
@@ -5201,11 +5250,7 @@ export default function RestaurantOwnerDashboard() {
                                   className="text-sm text-red-900"
                                   data-testid="text-location-error"
                                 >
-                                  {/approximate/i.test(locationError)
-                                    ? "MealScout is using an approximate pin. Turn on precise location for a better result."
-                                    : /denied|permission/i.test(locationError)
-                                      ? "Location access is off. Allow location access for MealScout and try again."
-                                      : "MealScout could not refresh your live pin. Check location access and your connection, then try again."}
+                                  {locationError}
                                 </p>
                               </div>
                             </div>
@@ -5245,7 +5290,7 @@ export default function RestaurantOwnerDashboard() {
                           <Button
                             onClick={handleUpdateRestaurantLocation}
                             disabled={
-                              isUpdatingLocation ||
+                              !hasProfileLocationTools || isUpdatingLocation ||
                               updateRestaurantLocationMutation.isPending
                             }
                             variant="outline"
@@ -5285,10 +5330,28 @@ export default function RestaurantOwnerDashboard() {
                               className="text-sm text-red-900"
                               data-testid="text-location-update-error"
                             >
-                              {/denied|permission/i.test(locationUpdateError)
-                                ? "Location access is off. Allow location access for MealScout and try again."
-                                : "MealScout could not update this location. Check location access and try again."}
+                              {locationUpdateError}
                             </p>
+                          </div>
+                        ) : null}
+
+                        <Button variant="ghost" className="mt-3" disabled={!hasProfileLocationTools || isUpdatingLocation} onClick={() => setShowManualLocation((open) => !open)} data-testid="button-manual-location">
+                          Enter address or choose map pin
+                        </Button>
+                        {showManualLocation ? (
+                          <div className="mt-3 space-y-3 rounded-xl border border-orange-200 p-3" data-testid="owner-manual-location-editor">
+                            <p className="text-sm font-bold">Confirm your saved profile pin</p>
+                            <p className="text-sm text-[color:var(--text-muted)]">Choose the address or pin yourself, then confirm it. This saves your profile location and does not start live sharing or create a pickup stop. Add a serving stop in Parking Pass for pickup.</p>
+                            <label className="block text-sm font-medium" htmlFor="manual-owner-location-address">Address</label>
+                            <Input id="manual-owner-location-address" value={manualLocationAddress} disabled={isUpdatingLocation || isFindingManualPin} onChange={(event) => { setManualLocationAddress(event.target.value); setManualLocationPin(null); }} />
+                            <Button variant="outline" onClick={handleFindManualLocation} disabled={!hasProfileLocationTools || !manualLocationAddress.trim() || isFindingManualPin || isUpdatingLocation}>
+                              {isFindingManualPin ? "Finding address…" : "Find address on map"}
+                            </Button>
+                            <div className="h-64 overflow-hidden rounded-xl">
+                              <GoogleMapPicker center={manualLocationPin || { lat: 39.8283, lng: -98.5795 }} zoom={manualLocationPin ? 16 : 3} pins={manualLocationPin ? [{ key: "saved-location", position: manualLocationPin, draggable: true }] : []} interactionsEnabled={!isUpdatingLocation && !isFindingManualPin} onMapClick={(point) => { setManualLocationPin(point); setManualLocationAddress(""); }} onPinDrag={(_key, point) => { setManualLocationPin(point); setManualLocationAddress(""); }} />
+                            </div>
+                            {manualLocationPin ? <p className="text-sm" data-testid="text-manual-location-pin">Selected pin: {manualLocationPin.lat.toFixed(6)}, {manualLocationPin.lng.toFixed(6)}</p> : <p className="text-sm">Find an address or select a map pin before confirming.</p>}
+                            <Button onClick={handleConfirmManualLocation} disabled={!hasProfileLocationTools || !manualLocationPin || isUpdatingLocation || isFindingManualPin} data-testid="button-confirm-manual-location">{isUpdatingLocation ? "Saving location…" : "Confirm saved location"}</Button>
                           </div>
                         ) : null}
 
