@@ -2827,7 +2827,7 @@ export function registerRestaurantOperationsRoutes(
         const whereClauses = [
           eq(requestLogs.surface, "public_profile"),
           eq(requestLogs.entityId, String(restaurantId)),
-          inArray(requestLogs.entityType, ["restaurant", "truck", "bar"]),
+          inArray(requestLogs.entityType, ["restaurant", "truck", "bar", "caterer", "private_chef"]),
           inArray(requestLogs.eventType, ["profile_view", "profile_action", "qr_open"]),
         ] as any[];
         if (startDate) whereClauses.push(gte(requestLogs.createdAt, startDate));
@@ -2970,7 +2970,7 @@ export function registerRestaurantOperationsRoutes(
         const baseWhere = [
           eq(requestLogs.surface, "public_profile"),
           eq(requestLogs.entityId, String(restaurantId)),
-          inArray(requestLogs.entityType, ["restaurant", "truck", "bar"]),
+          inArray(requestLogs.entityType, ["restaurant", "truck", "bar", "caterer", "private_chef"]),
           inArray(requestLogs.eventType, ["profile_view", "profile_action", "qr_open"]),
         ] as any[];
 
