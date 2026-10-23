@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 
@@ -50,5 +51,18 @@ assert.match(historicalImplementation, /Historical truth only/);
 assert.match(historicalImplementation, /Status:\*\* Retired historical design/);
 assert.match(historicalArchitecture, /not governing architecture/i);
 assert.match(historicalArchitecture, /Status:\*\* Retired/);
+
+// The selected-QA runner has no outer timeout. Bound this pure helper child
+// explicitly so a hung helper test cannot leave that command waiting forever.
+const helperTests = spawnSync(
+  process.execPath,
+  ["--import", "tsx", "--test", "client/src/lib/oauthIdentityFailure.test.ts"],
+  { cwd: root, encoding: "utf8", timeout: 10_000 },
+);
+if (helperTests.stdout) process.stdout.write(helperTests.stdout);
+if (helperTests.stderr) process.stderr.write(helperTests.stderr);
+assert.ifError(helperTests.error);
+assert.equal(helperTests.signal, null, "OAuth helper tests must not be interrupted");
+assert.equal(helperTests.status, 0, "OAuth helper tests must pass");
 
 console.log("MealScout OAuth identity boundary contract passed");

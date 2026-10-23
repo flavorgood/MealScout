@@ -10,8 +10,9 @@ const OAUTH_IDENTITY_FAILURE_MESSAGES: Record<string, string> = {
 export function getOAuthIdentityFailureMessage(
   errorCode: unknown,
 ): string | null {
-  const normalized = String(errorCode || "")
-    .trim()
-    .toLowerCase();
-  return OAUTH_IDENTITY_FAILURE_MESSAGES[normalized] || null;
+  if (typeof errorCode !== "string") return null;
+  const normalized = errorCode.trim().toLowerCase();
+  return Object.hasOwn(OAUTH_IDENTITY_FAILURE_MESSAGES, normalized)
+    ? OAUTH_IDENTITY_FAILURE_MESSAGES[normalized]
+    : null;
 }
