@@ -4,6 +4,7 @@ import { Router } from "wouter";
 import Welcome from "../../client/src/pages/welcome";
 import { TRACKING_QUERY_KEYS } from "../../client/src/components/seo-head";
 import { WELCOME_CONTENT } from "../../shared/welcomeContent";
+import { PUBLIC_PROFILE_APP_ASSET_BASE } from "../../shared/publicProfileAppAssetPaths";
 
 const escapeHtml = (value: string) => value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 
@@ -24,7 +25,14 @@ export function renderHomepageHtml(
   const markup = renderToStaticMarkup(createElement(Router, { ssrPath: "/", children: createElement(Welcome) }));
   const canonical = new URL("/", canonicalBaseUrl).toString();
   const robots = noIndex ? "noindex, nofollow" : "index, follow, max-snippet:-1, max-image-preview:large, max-video-preview:-1";
-  return template
+  // Vite prefixes public icons as well as its compiled graph. The existing API
+  // asset bridge intentionally exposes only assets/, so public files keep their
+  // native root paths while compiled JS/CSS retain the cross-build bridge.
+  const nativePublicFiles = template.replace(/\b(href|src)=(['"])([^'"]+)\2/g, (attribute, name, quote, url: string) =>
+    url.startsWith(PUBLIC_PROFILE_APP_ASSET_BASE) && !url.startsWith(`${PUBLIC_PROFILE_APP_ASSET_BASE}assets/`)
+      ? `${name}=${quote}/${url.slice(PUBLIC_PROFILE_APP_ASSET_BASE.length)}${quote}`
+      : attribute);
+  return nativePublicFiles
     .replace(/<div\s+id=["']root["']\s*>\s*<\/div>/, `<div id="root">${markup}</div>`)
     .replace(/<title>[\s\S]*?<\/title>/i, `<title>${escapeHtml(WELCOME_CONTENT.title)}</title>`)
     .replace(/<meta\s+name=["']description["']\s+content=["'][^"']*["']\s*\/?\s*>/i, `<meta name="description" content="${escapeHtml(WELCOME_CONTENT.description)}">`)

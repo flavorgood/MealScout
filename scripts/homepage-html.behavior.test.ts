@@ -28,3 +28,9 @@ test("canonical configuration and template failures fail explicitly", () => {
   assert.throws(() => renderHomepageHtml("<html></html>", "https://www.mealscout.us"), /no empty application root/);
   assert.throws(() => renderHomepageHtml(template, "invalid origin"), /Invalid URL/);
 });
+test("compiled graph retains the existing API bridge while public icons use native public paths", () => {
+  const compiled = template.replace('href="/favicon.svg"', 'href="/api/public-profile/app-assets/favicon.svg"').replace('src="/src/main.tsx"', 'src="/api/public-profile/app-assets/assets/app-synthetic.js"');
+  const html = renderHomepageHtml(compiled, "https://www.mealscout.us");
+  assert.ok(html.includes('href="/favicon.svg"'));
+  assert.ok(html.includes('src="/api/public-profile/app-assets/assets/app-synthetic.js"'));
+});
