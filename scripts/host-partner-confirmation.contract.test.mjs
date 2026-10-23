@@ -69,20 +69,55 @@ test('already cancelled navigation sends nothing',async()=>{
 function loadService(options={}) {
   const leadTable={id:'lead.id',email:'lead.email'};
   const sendTable={id:'send.id',leadId:'send.leadId',sequence:'send.sequence',step:'send.step',sentAt:'send.sentAt'};
-  const calls={saves:0,sends:0,marks:0,queries:0,logs:[]};
+  const claimTable={emailNormalized:'claim.emailNormalized',sequence:'claim.sequence',step:'claim.step',leadId:'claim.leadId',status:'claim.status'};
+  const calls={saves:0,sends:0,marks:0,claims:0,queries:0,logs:[]};
   let persisted=null;
+  let leadRow=options.existing?{...input,id:'fixture-lead-123'}:null;
+  let claimRow=options.recent||options.historicalMarker||options.readEmailFailure
+    ?{emailNormalized:input.email,sequence:'host_partner_v1',step:1,leadId:'fixture-lead-123',status:options.readEmailFailure?'pending':'accepted'}
+    :null;
   const db={
-    select:()=>({from:table=>({where:()=>({limit:async()=>{
-      calls.queries++;
-      if(table===leadTable)return options.existing?[{...input,id:'fixture-lead-123'}]:[];
-      if(options.readEmailFailure)throw new Error('PRIVATE_LEDGER_READ');
-      return options.recent?[{id:'sent-fixture'}]:[];
-    }})})}),
+    transaction:async callback=>{
+      const beforeClaim=claimRow&&{...claimRow};
+      try{return await callback(db);}catch(error){claimRow=beforeClaim;throw error;}
+    },
+    execute:async()=>{},
+    select:()=>({from:table=>({where:()=>{
+      const query={
+        orderBy:()=>query,
+        limit:async()=>{
+          calls.queries++;
+          if(table===leadTable)return leadRow?[leadRow]:[];
+          assert.equal(table,claimTable);
+          if(options.readEmailFailure)throw new Error('PRIVATE_LEDGER_READ');
+          return claimRow?[{status:claimRow.status}]:[];
+        },
+      };
+      return query;
+    }})}),
     insert:table=>({values:values=>({
-      returning:async()=>{calls.saves++;if(options.persistFailure)throw new Error('PERSIST_FAILED');persisted=options.missingId?{...values}:{...values,id:'fixture-lead-123'};return [persisted];},
-      onConflictDoNothing:async()=>{assert.equal(table,sendTable);calls.marks++;if(options.markFailure)throw new Error('PRIVATE_LEDGER_WRITE');},
+      returning:async()=>{
+        assert.equal(table,leadTable);calls.saves++;
+        if(options.persistFailure)throw new Error('PERSIST_FAILED');
+        persisted=options.missingId?{...values}:{...values,id:'fixture-lead-123'};
+        leadRow=persisted;return [persisted];
+      },
+      onConflictDoNothing:()=>{
+        if(table===claimTable)return {returning:async()=>{
+          if(claimRow)return [];
+          claimRow={...values};calls.claims++;
+          return [{emailNormalized:values.emailNormalized}];
+        }};
+        assert.equal(table,sendTable);calls.marks++;
+        return options.markFailure?Promise.reject(new Error('PRIVATE_LEDGER_WRITE')):Promise.resolve();
+      },
     })}),
-    update:()=>({set:values=>({where:()=>({returning:async()=>{calls.saves++;persisted={...input,...values,id:'fixture-lead-123'};return [persisted];}})})}),
+    update:table=>({set:values=>({where:()=>({returning:async()=>{
+      if(table===claimTable){assert(claimRow);claimRow={...claimRow,...values};return [{status:claimRow.status}];}
+      assert.equal(table,leadTable);calls.saves++;
+      persisted={...leadRow,...values,id:'fixture-lead-123'};leadRow=persisted;
+      return [persisted];
+    }})})}),
   };
   const source=readFileSync('server/services/hostPartnerLeadMagnet.ts','utf8');
   const compiled=ts.transpileModule(source,{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022},reportDiagnostics:true});
@@ -90,20 +125,23 @@ function loadService(options={}) {
   const module={exports:{}};
   const imports={
     zod:require('zod'),
-    'drizzle-orm':Object.fromEntries(['and','eq','gt','ilike'].map(name=>[name,(...args)=>({name,args})])),
+    'drizzle-orm':{
+      ...Object.fromEntries(['and','eq'].map(name=>[name,(...args)=>({name,args})])),
+      sql:(strings,...values)=>({name:'sql',strings:[...strings],values}),
+    },
     '../db':{db},
     '../emailService':{emailService:{sendBasicEmail:async(...args)=>{
       assert(persisted,'Email must follow persistence');assert.equal(args.at(-1),'account');calls.sends++;
       if(options.sendFailure)throw new Error('PRIVATE_PROVIDER_DETAIL');
       return options.mailAccepted!==false;
     }}},
-    '@shared/schema':{hostPartnerLeads:leadTable,hostPartnerLeadSequenceSends:sendTable},
+    '@shared/schema':{hostPartnerLeads:leadTable,hostPartnerLeadSequenceSends:sendTable,hostPartnerEmailClaims:claimTable},
   };
   const isolatedProcess={env:{HOST_PARTNER_LEADS_ENABLED:options.disabled?'false':'true',PUBLIC_BASE_URL:'https://www.mealscout.us'}};
   new Function('module','exports','require','process','console',compiled.outputText)(module,module.exports,name=>{
     assert(Object.hasOwn(imports,name),'Unexpected external dependency: '+name);return imports[name];
   },isolatedProcess,{error:message=>calls.logs.push(message)});
-  return {run:()=>module.exports.handleHostPartnerLeadRequest(input),calls,persisted:()=>persisted};
+  return {run:()=>module.exports.handleHostPartnerLeadRequest(input),calls,persisted:()=>persisted,claim:()=>claimRow};
 }
 
 test('disabled intake does not write or send',async()=>{
@@ -123,7 +161,7 @@ test('saved request and accepted email retain existing success evidence',async()
 });
 
 test('saved request survives email failure without becoming a false save failure',async()=>{
-  const f=loadService({sendFailure:true});assert.deepEqual(await f.run(),{...saved,emailed:false});assert(f.persisted());assert.equal(f.calls.saves,1);assert.equal(f.calls.sends,1);assert.equal(f.calls.marks,0);assert(!JSON.stringify(f.calls.logs).includes('PRIVATE'));
+  const f=loadService({sendFailure:true});assert.deepEqual(await f.run(),{...saved,emailed:false});assert(f.persisted());assert.equal(f.calls.saves,1);assert.equal(f.calls.sends,1);assert.equal(f.calls.marks,0);assert.equal(f.claim().status,'pending');assert(!JSON.stringify(f.calls.logs).includes('PRIVATE'));
 });
 
 for(const [label,options,sends,marks] of [
@@ -132,10 +170,17 @@ for(const [label,options,sends,marks] of [
   ['provider accepted but ledger write failed',{markFailure:true},1,1],
 ])test(label+' keeps the saved reference without a resend',async()=>{
   const f=loadService(options);assert.deepEqual(await f.run(),{...saved,emailed:false});assert(f.persisted());assert.equal(f.calls.saves,1);assert.equal(f.calls.sends,sends);assert.equal(f.calls.marks,marks);
+  assert.equal(f.claim().status,'pending');
+  assert.deepEqual(await f.run(),{...saved,emailed:false});
+  assert.equal(f.calls.sends,sends);
 });
 
 test('recent accepted email is not sent again',async()=>{
   const f=loadService({recent:true});assert.deepEqual(await f.run(),saved);assert.equal(f.calls.sends,0);assert.equal(f.calls.marks,0);
+});
+
+test('a recorded step-one email is not resent after the old cooldown',async()=>{
+  const f=loadService({historicalMarker:true});assert.deepEqual(await f.run(),saved);assert.equal(f.calls.sends,0);assert.equal(f.calls.marks,0);
 });
 
 test('existing lead update still returns its saved identity',async()=>{

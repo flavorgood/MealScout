@@ -1,0 +1,47 @@
+# Separate, manually connected Blueprint. The production render.yaml remains unchanged.
+services:
+  - type: web
+    name: mealscout-isolated-verification
+    runtime: node
+    plan: starter
+    region: virginia
+    branch: codex/mealscout-hosted-isolation-20260925
+    autoDeployTrigger: "off"
+    buildCommand: npm ci --include=dev && npm run build:platform
+    preDeployCommand: npm run migrate:deploy
+    startCommand: npm run start
+    envVars:
+      - key: NODE_VERSION
+        value: "20"
+      - key: DATABASE_URL
+        sync: false
+      - key: SESSION_SECRET
+        generateValue: true
+      - key: CLIENT_ORIGIN
+        sync: false
+      - key: OWNER_AI_PUBLIC_BASE_URL
+        sync: false
+      - key: MEALSCOUT_ISOLATED_VERIFICATION
+        value: "true"
+      - key: MEALSCOUT_LOCAL_POSTGRES_RUNTIME
+        value: "false"
+      - key: MEALSCOUT_LOCAL_POSTGRES_MIGRATION
+        value: "false"
+      - key: HOST_PARTNER_LEADS_ENABLED
+        value: "false"
+      - key: HOST_PARTNER_DRIP_ENABLED
+        value: "false"
+      - key: EMAIL_NOTIFICATIONS_MODE
+        value: "off"
+      - key: AUTOMATED_MARKETING_EMAILS_ENABLED
+        value: "false"
+      - key: INDEXNOW_ENABLED
+        value: "false"
+      - key: MEALSCOUT_BYPASS_STRIPE
+        value: "false"
+      - key: MEALSCOUT_TEST_MODE
+        value: "false"
+      - key: STRIPE_WEBHOOK_DEV_ALLOW_UNSIGNED
+        value: "false"
+      - key: STRIPE_WEBHOOK_FORCE_VERIFY
+        value: "true"

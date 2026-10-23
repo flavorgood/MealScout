@@ -4,10 +4,12 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { Pool, neonConfig } from "@neondatabase/serverless";
+import { Pool as NeonPool, neonConfig } from "@neondatabase/serverless";
+import pg from "pg";
 import ws from "ws";
 
 import { splitSqlStatements } from "./sqlMigrationStatements";
+import { assertIsolatedVerificationDatabaseUrl, isIsolatedVerificationMode, isRenderService } from "../server/bootstrap/isolatedVerification";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -21,6 +23,7 @@ export const DEPLOY_MIGRATION_DDL_LOCK_TIMEOUT_MS = 5_000;
 export const DEPLOY_MIGRATION_STATEMENT_TIMEOUT_MS = 300_000;
 
 neonConfig.webSocketConstructor = ws;
+const { Pool: NodePool } = pg;
 
 export type DeployMigration = {
   filename: string;
@@ -213,6 +216,24 @@ export function resolveMigrationDatabaseUrl(
   }
 
   const parsed = new URL(raw);
+  if (isIsolatedVerificationMode(environment)) {
+    assertIsolatedVerificationDatabaseUrl(raw, environment);
+    if (environment.MIGRATION_DATABASE_URL) {
+      if (!environment.DATABASE_URL) {
+        throw new Error("Isolated migrations require the runtime DATABASE_URL for target matching");
+      }
+      assertIsolatedVerificationDatabaseUrl(environment.DATABASE_URL, environment);
+      const runtime = new URL(environment.DATABASE_URL);
+      const directHost = (host: string) => host.replace(/-pooler(?=\.)/i, "");
+      if (
+        directHost(parsed.hostname) !== directHost(runtime.hostname) ||
+        parsed.pathname !== runtime.pathname ||
+        parsed.port !== runtime.port
+      ) {
+        throw new Error("Isolated migration and runtime database targets differ");
+      }
+    }
+  }
   if (!environment.MIGRATION_DATABASE_URL && /\.neon\.tech$/i.test(parsed.hostname)) {
     parsed.hostname = parsed.hostname.replace(/-pooler(?=\.)/i, "");
   }
@@ -222,6 +243,35 @@ export function resolveMigrationDatabaseUrl(
     );
   }
   return parsed.toString();
+}
+
+export function useLocalPostgresTransport(
+  databaseUrl: string,
+  environment: NodeJS.ProcessEnv = process.env,
+): boolean {
+  if (environment.MEALSCOUT_LOCAL_POSTGRES_MIGRATION !== "true") {
+    return false;
+  }
+  const parsed = new URL(databaseUrl);
+  // node-postgres treats URL query parameters such as ?host= as connection
+  // overrides, so checking only URL.hostname can permit a remote target.
+  if (parsed.search || parsed.hash) {
+    throw new Error(
+      "Local migration transport does not permit connection URL parameters or fragments",
+    );
+  }
+  const hostname = parsed.hostname.toLowerCase();
+  if (!["127.0.0.1", "[::1]"].includes(hostname)) {
+    throw new Error(
+      "Local migration transport requires a numeric loopback PostgreSQL address",
+    );
+  }
+  if (isRenderService(environment)) {
+    throw new Error(
+      "Local migration transport is unavailable in a Render service",
+    );
+  }
+  return true;
 }
 
 async function countUserTables(client: MigrationClient): Promise<number> {
@@ -388,10 +438,11 @@ async function runEmptyDatabaseBootstrap(
 export async function runDeployMigrations(
   hooks: DeployMigrationHooks = {},
 ): Promise<void> {
-  const pool = new Pool({
-    connectionString: resolveMigrationDatabaseUrl(),
-    max: 1,
-  });
+  const connectionString = resolveMigrationDatabaseUrl();
+  const poolOptions = { connectionString, max: 1 };
+  const pool = useLocalPostgresTransport(connectionString)
+    ? new NodePool(poolOptions)
+    : new NeonPool(poolOptions);
 
   const client = await pool.connect();
   let lockAcquired = false;

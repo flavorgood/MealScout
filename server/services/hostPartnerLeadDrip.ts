@@ -2,8 +2,13 @@ import { and, desc, eq, gte, sql } from "drizzle-orm";
 import { db } from "../db";
 import { emailService } from "../emailService";
 import {
+  acceptHostPartnerEmailStep,
+  claimHostPartnerEmailStep,
+} from "./hostPartnerLeadMagnet";
+import {
   hostPartnerLeads,
   hostPartnerLeadSequenceSends,
+  hostPartnerEmailClaims,
 } from "@shared/schema";
 
 const SEQUENCE = "host_partner_v1";
@@ -34,18 +39,6 @@ async function alreadySent(leadId: string, step: number): Promise<boolean> {
     )
     .limit(1);
   return Boolean(row?.id);
-}
-
-async function markSent(leadId: string, step: number, metadata?: any) {
-  await db
-    .insert(hostPartnerLeadSequenceSends)
-    .values({
-      leadId,
-      sequence: SEQUENCE,
-      step,
-      metadata: metadata ?? null,
-    } as any)
-    .onConflictDoNothing();
 }
 
 function subjectForStep(step: number): string {
@@ -117,11 +110,13 @@ export async function runHostPartnerLeadDripCron() {
   const rows = await db
     .select({
       lead: hostPartnerLeads,
-      step1SentAt: sql<Date | null>`(
-        select min(sent_at) from host_partner_lead_sequence_sends s
-        where s.lead_id = ${hostPartnerLeads.id}
-          and s.sequence = ${SEQUENCE}
-          and s.step = 1
+      step1AcceptedAt: sql<Date | null>`(
+        select c.accepted_at from host_partner_email_claims c
+        where c.email_normalized = lower(btrim(${hostPartnerLeads.email}))
+          and c.lead_id = ${hostPartnerLeads.id}
+          and c.sequence = ${SEQUENCE}
+          and c.step = 1
+          and c.status = 'accepted'
       )`,
     })
     .from(hostPartnerLeads)
@@ -132,31 +127,62 @@ export async function runHostPartnerLeadDripCron() {
   const delayByStepDays: Record<number, number> = { 2: 1, 3: 4 };
   const MAX_SENDS_PER_RUN = 50;
   let sent = 0;
+  let attempted = 0;
 
   for (const row of rows) {
-    if (sent >= MAX_SENDS_PER_RUN) break;
+    if (attempted >= MAX_SENDS_PER_RUN) break;
     const lead: any = row.lead;
     if (!lead?.id || !lead?.email) continue;
-    const step1SentAt = row.step1SentAt ? new Date(row.step1SentAt) : null;
-    if (!step1SentAt) continue;
+    const email = String(lead.email).trim().toLowerCase();
+    const step1AcceptedAt = row.step1AcceptedAt ? new Date(row.step1AcceptedAt) : null;
+    if (!step1AcceptedAt) continue;
 
     for (const step of [2, 3]) {
-      if (sent >= MAX_SENDS_PER_RUN) break;
+      if (attempted >= MAX_SENDS_PER_RUN) break;
       if (await alreadySent(String(lead.id), step)) continue;
+      if (step === 3) {
+        const [step2] = await db
+          .select({ status: hostPartnerEmailClaims.status })
+          .from(hostPartnerEmailClaims)
+          .where(
+            and(
+              eq(hostPartnerEmailClaims.emailNormalized, email),
+              eq(hostPartnerEmailClaims.sequence, SEQUENCE),
+              eq(hostPartnerEmailClaims.step, 2),
+              eq(hostPartnerEmailClaims.status, "accepted"),
+            ),
+          )
+          .limit(1);
+        if (!step2) continue;
+      }
       const dueAt = new Date(
-        step1SentAt.getTime() + delayByStepDays[step] * 24 * 60 * 60 * 1000,
+        step1AcceptedAt.getTime() + delayByStepDays[step] * 24 * 60 * 60 * 1000,
       );
       if (Date.now() < dueAt.getTime()) continue;
 
-      await emailService.sendBasicEmail(
-        String(lead.email),
-        subjectForStep(step),
-        htmlForStep(step, lead),
-        undefined,
-        "marketing",
-      );
-      await markSent(String(lead.id), step, { kind: "lead", leadId: lead.id });
-      sent += 1;
+      const claim = await claimHostPartnerEmailStep(email, String(lead.id), step);
+      if (!claim.won) break;
+      attempted += 1;
+      try {
+        const accepted = await emailService.sendBasicEmail(
+          email,
+          subjectForStep(step),
+          htmlForStep(step, lead),
+          undefined,
+          "marketing",
+        );
+        if (accepted) {
+          await acceptHostPartnerEmailStep(email, String(lead.id), step, {
+            kind: "lead",
+            leadId: lead.id,
+          });
+          sent += 1;
+        }
+      } catch {
+        // Provider or ledger outcome is uncertain. The pending claim fences
+        // retries until an operator reconciles it against provider evidence.
+        console.error("[host-partner] Follow-up email confirmation unavailable.");
+      }
       break;
     }
   }

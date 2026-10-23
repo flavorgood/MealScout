@@ -26,6 +26,7 @@ import {
   PASSWORD_REQUIREMENTS,
 } from "./utils/passwordPolicy";
 import { db } from "./db";
+import { isIsolatedVerificationMode } from "./bootstrap/isolatedVerification";
 import { emailSequenceSends, users } from "@shared/schema";
 import { and, eq, or, sql } from "drizzle-orm";
 import {
@@ -646,7 +647,7 @@ export async function setupUnifiedAuth(
 
   // Ensure configured super admin email is upgraded
   const superAdminEmail = process.env.ADMIN_EMAIL || "info.mealscout@gmail.com";
-  if (superAdminEmail) {
+  if (superAdminEmail && !isIsolatedVerificationMode()) {
     try {
       const existing = await storage.getUserByEmail(superAdminEmail);
       if (existing && existing.userType !== "super_admin") {

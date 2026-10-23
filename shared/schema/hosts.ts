@@ -15,6 +15,7 @@ export {
   insertHostReviewSchema,
   hostPartnerLeads,
   hostPartnerLeadSequenceSends,
+  hostPartnerEmailClaims,
   insertHostPartnerLeadSchema,
 } from "./legacy";
 
@@ -37,4 +38,5 @@ export type {
   InsertHostPartnerLeadRow,
   HostPartnerLeadSequenceSend,
   InsertHostPartnerLeadSequenceSend,
+  HostPartnerEmailClaim,
 } from "./legacy";

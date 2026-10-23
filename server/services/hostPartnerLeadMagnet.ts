@@ -1,10 +1,11 @@
 import { z } from "zod";
-import { and, eq, gt, ilike } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { db } from "../db";
 import { emailService } from "../emailService";
 import {
   hostPartnerLeads,
   hostPartnerLeadSequenceSends,
+  hostPartnerEmailClaims,
 } from "@shared/schema";
 
 const SEQUENCE = "host_partner_v1";
@@ -54,90 +55,130 @@ export async function upsertHostPartnerLead(params: {
   userAgent?: string | null;
 }) {
   const email = String(params.email || "").trim().toLowerCase();
-  const existing = await db
-    .select()
-    .from(hostPartnerLeads)
-    .where(ilike(hostPartnerLeads.email, email))
-    .limit(1)
-    .then((rows: any[]) => rows[0] || null);
+  return db.transaction(async (tx: any) => {
+    // Serialize this service's lookup and insert for one normalized address.
+    // Historical duplicate rows remain intact; an existing row wins by ID.
+    await tx.execute(sql`select pg_advisory_xact_lock(842192, hashtext(${email}))`);
+    const existing = await tx
+      .select()
+      .from(hostPartnerLeads)
+      .where(sql`lower(btrim(${hostPartnerLeads.email})) = ${email}`)
+      .orderBy(hostPartnerLeads.id)
+      .limit(1)
+      .then((rows: any[]) => rows[0] || null);
 
-  if (existing) {
-    const [updated] = await db
-      .update(hostPartnerLeads)
-      .set({
-        firstName: params.firstName || existing.firstName || null,
-        phone: params.phone || existing.phone || null,
-        businessName: params.businessName || existing.businessName,
-        address: params.address || existing.address || null,
-        city: params.city || existing.city || null,
-        state: params.state || existing.state || null,
-        locationType: params.locationType || existing.locationType || "other",
-        parkingSpots:
-          params.parkingSpots ?? existing.parkingSpots ?? null,
-        dailyFootTraffic:
-          params.dailyFootTraffic ?? existing.dailyFootTraffic ?? null,
-        notes: params.notes || existing.notes || null,
-        source: params.source || existing.source || "host_location_partner",
-        ip: params.ip || existing.ip || null,
-        userAgent: params.userAgent || existing.userAgent || null,
+    if (existing) {
+      const [updated] = await tx
+        .update(hostPartnerLeads)
+        .set({
+          email,
+          firstName: params.firstName || existing.firstName || null,
+          phone: params.phone || existing.phone || null,
+          businessName: params.businessName || existing.businessName,
+          address: params.address || existing.address || null,
+          city: params.city || existing.city || null,
+          state: params.state || existing.state || null,
+          locationType: params.locationType || existing.locationType || "other",
+          parkingSpots: params.parkingSpots ?? existing.parkingSpots ?? null,
+          dailyFootTraffic:
+            params.dailyFootTraffic ?? existing.dailyFootTraffic ?? null,
+          notes: params.notes || existing.notes || null,
+          source: params.source || existing.source || "host_location_partner",
+          ip: params.ip || existing.ip || null,
+          userAgent: params.userAgent || existing.userAgent || null,
+          updatedAt: new Date(),
+        } as any)
+        .where(eq(hostPartnerLeads.id, existing.id))
+        .returning();
+      return updated || existing;
+    }
+
+    const [created] = await tx
+      .insert(hostPartnerLeads)
+      .values({
+        email,
+        firstName: params.firstName || null,
+        phone: params.phone || null,
+        businessName: params.businessName,
+        address: params.address || null,
+        city: params.city || null,
+        state: params.state || null,
+        locationType: params.locationType || "other",
+        parkingSpots: params.parkingSpots ?? null,
+        dailyFootTraffic: params.dailyFootTraffic ?? null,
+        notes: params.notes || null,
+        source: params.source || "host_location_partner",
+        status: "new",
+        ip: params.ip || null,
+        userAgent: params.userAgent || null,
         updatedAt: new Date(),
       } as any)
-      .where(eq(hostPartnerLeads.id, existing.id))
       .returning();
-    return updated || existing;
-  }
 
-  const [created] = await db
-    .insert(hostPartnerLeads)
-    .values({
-      email,
-      firstName: params.firstName || null,
-      phone: params.phone || null,
-      businessName: params.businessName,
-      address: params.address || null,
-      city: params.city || null,
-      state: params.state || null,
-      locationType: params.locationType || "other",
-      parkingSpots: params.parkingSpots ?? null,
-      dailyFootTraffic: params.dailyFootTraffic ?? null,
-      notes: params.notes || null,
-      source: params.source || "host_location_partner",
-      status: "new",
-      ip: params.ip || null,
-      userAgent: params.userAgent || null,
-      updatedAt: new Date(),
-    } as any)
-    .returning();
-
-  return created;
+    return created;
+  });
 }
 
-async function markSent(leadId: string, step: number, metadata?: any) {
-  await db
-    .insert(hostPartnerLeadSequenceSends)
+export async function claimHostPartnerEmailStep(
+  email: string,
+  leadId: string,
+  step: number,
+) {
+  const [claimed] = await db
+    .insert(hostPartnerEmailClaims)
     .values({
-      leadId,
+      emailNormalized: email,
       sequence: SEQUENCE,
       step,
-      metadata: metadata ?? null,
-    } as any)
-    .onConflictDoNothing();
-}
+      leadId,
+      status: "pending",
+    })
+    .onConflictDoNothing()
+    .returning({ emailNormalized: hostPartnerEmailClaims.emailNormalized });
+  if (claimed) return { won: true as const, status: "pending" as const };
 
-async function sentRecently(leadId: string, step: number, cutoff: Date) {
-  const rows = await db
-    .select({ id: hostPartnerLeadSequenceSends.id })
-    .from(hostPartnerLeadSequenceSends)
+  const [previous] = await db
+    .select({ status: hostPartnerEmailClaims.status })
+    .from(hostPartnerEmailClaims)
     .where(
       and(
-        eq(hostPartnerLeadSequenceSends.leadId, leadId),
-        eq(hostPartnerLeadSequenceSends.sequence, SEQUENCE),
-        eq(hostPartnerLeadSequenceSends.step, step),
-        gt(hostPartnerLeadSequenceSends.sentAt, cutoff),
+        eq(hostPartnerEmailClaims.emailNormalized, email),
+        eq(hostPartnerEmailClaims.sequence, SEQUENCE),
+        eq(hostPartnerEmailClaims.step, step),
       ),
     )
     .limit(1);
-  return rows.length > 0;
+  return { won: false as const, status: previous?.status ?? "pending" };
+}
+
+export async function acceptHostPartnerEmailStep(
+  email: string,
+  leadId: string,
+  step: number,
+  metadata: Record<string, unknown>,
+) {
+  await db.transaction(async (tx: any) => {
+    const [accepted] = await tx
+      .update(hostPartnerEmailClaims)
+      .set({ status: "accepted", acceptedAt: new Date() })
+      .where(
+        and(
+          eq(hostPartnerEmailClaims.emailNormalized, email),
+          eq(hostPartnerEmailClaims.sequence, SEQUENCE),
+          eq(hostPartnerEmailClaims.step, step),
+          eq(hostPartnerEmailClaims.status, "pending"),
+          eq(hostPartnerEmailClaims.leadId, leadId),
+        ),
+      )
+      .returning({ status: hostPartnerEmailClaims.status });
+    if (!accepted) throw new Error("Host partner email claim changed before acceptance.");
+    // The drip sequence reads the accepted Step 1 claim. Keep the legacy send
+    // ledger consistent in the same transaction for every sequence step.
+    await tx
+      .insert(hostPartnerLeadSequenceSends)
+      .values({ leadId, sequence: SEQUENCE, step, metadata })
+      .onConflictDoNothing();
+  });
 }
 
 async function sendStep1Email(lead: any): Promise<boolean> {
@@ -205,21 +246,17 @@ export async function handleHostPartnerLeadRequest(params: {
   }
   const leadId = lead.id;
   try {
-    const cooldownMinutesRaw = Number(
-      process.env.HOST_PARTNER_EMAIL_COOLDOWN_MINUTES ?? 30,
-    );
-    const cooldownMinutes = Number.isFinite(cooldownMinutesRaw)
-      ? Math.max(1, Math.min(Math.floor(cooldownMinutesRaw), 24 * 60))
-      : 30;
-    const cutoff = new Date(Date.now() - cooldownMinutes * 60 * 1000);
-    const shouldSkip = await sentRecently(leadId, 1, cutoff);
-    if (shouldSkip) {
-      return { ok: true as const, leadId, emailed: true };
+    // A committed claim fences concurrent requests before provider I/O.
+    // Pending also fences ambiguous provider results from automatic retries.
+    const email = String(lead.email || params.email).trim().toLowerCase();
+    const claim = await claimHostPartnerEmailStep(email, leadId, 1);
+    if (!claim.won) {
+      return { ok: true as const, leadId, emailed: claim.status === "accepted" };
     }
 
     const emailed = await sendStep1Email(lead);
     if (emailed) {
-      await markSent(leadId, 1, { kind: "lead", leadId });
+      await acceptHostPartnerEmailStep(email, leadId, 1, { kind: "lead", leadId });
     }
     return { ok: true as const, leadId, emailed };
   } catch {

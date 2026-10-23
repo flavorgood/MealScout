@@ -1,7 +1,12 @@
-import { Pool, neonConfig } from '@neondatabase/serverless';
-import { drizzle } from 'drizzle-orm/neon-serverless';
+import { Pool as NeonPool, neonConfig } from '@neondatabase/serverless';
+import pg, { type Pool as LocalPoolType } from 'pg';
+import { drizzle as drizzleNeon } from 'drizzle-orm/neon-serverless';
+import { drizzle as drizzleLocal } from 'drizzle-orm/node-postgres';
 import ws from "ws";
 import * as schema from "@shared/schema";
+import { assertIsolatedVerificationDatabaseUrl, useLocalPostgresRuntime } from "./bootstrap/isolatedVerification";
+
+const { Pool: LocalPool } = pg;
 
 neonConfig.webSocketConstructor = ws;
 
@@ -16,9 +21,15 @@ if (!process.env.DATABASE_URL) {
   }
 }
 
-export const pool = process.env.DATABASE_URL
-  ? new Pool({ connectionString: process.env.DATABASE_URL })
-  : undefined as unknown as Pool;
+const databaseUrl = process.env.DATABASE_URL;
+if (databaseUrl) assertIsolatedVerificationDatabaseUrl(databaseUrl);
+const localRuntime = databaseUrl ? useLocalPostgresRuntime(databaseUrl) : false;
+const selectedPool = databaseUrl
+  ? localRuntime
+    ? new LocalPool({ connectionString: databaseUrl })
+    : new NeonPool({ connectionString: databaseUrl })
+  : undefined;
+export const pool = selectedPool as NeonPool;
 
 // Some managed Postgres setups (or older DBs) can end up with a `search_path`
 // that excludes `public`, which breaks unqualified table lookups (SQLSTATE 42P01)
@@ -44,6 +55,8 @@ if (process.env.DATABASE_URL && pool) {
 }
 // Cast to any to keep query builder usable even when DATABASE_URL is absent in local dev.
 // Runtime will still require a real connection string in production.
-export const db = (process.env.DATABASE_URL
-  ? drizzle({ client: pool as Pool, schema })
+export const db = (databaseUrl
+  ? localRuntime
+    ? drizzleLocal({ client: selectedPool as LocalPoolType, schema })
+    : drizzleNeon({ client: selectedPool as NeonPool, schema })
   : undefined) as any;

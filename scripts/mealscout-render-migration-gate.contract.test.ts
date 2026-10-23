@@ -15,6 +15,7 @@ import {
   planDeployMigrations,
   resolveBootstrapAction,
   resolveMigrationDatabaseUrl,
+  useLocalPostgresTransport,
 } from "./runDeployMigrations";
 
 assert.equal(
@@ -203,6 +204,52 @@ assert.throws(
         "postgresql://user:password@pgbouncer-pooler.example.com/app",
     }),
   /direct Postgres connection/,
+);
+const localMigrationUrl = "postgresql://user@127.0.0.1:55494/mealscout_pr394";
+assert.equal(
+  useLocalPostgresTransport(localMigrationUrl, {}),
+  false,
+  "the production transport remains the default",
+);
+assert.equal(
+  useLocalPostgresTransport(localMigrationUrl, {
+    MEALSCOUT_LOCAL_POSTGRES_MIGRATION: "true",
+  }),
+  true,
+  "an explicit loopback database may use the native PostgreSQL client",
+);
+assert.throws(
+  () =>
+    useLocalPostgresTransport(
+      "postgresql://user@ep-example.us-east-2.aws.neon.tech/neondb",
+      { MEALSCOUT_LOCAL_POSTGRES_MIGRATION: "true" },
+    ),
+  /loopback PostgreSQL address/,
+);
+assert.throws(
+  () =>
+    useLocalPostgresTransport(
+      `${localMigrationUrl}?host=ep-example.us-east-2.aws.neon.tech`,
+      { MEALSCOUT_LOCAL_POSTGRES_MIGRATION: "true" },
+    ),
+  /connection URL parameters/,
+  "pg connection-string query parameters must not override a loopback hostname",
+);
+assert.throws(
+  () =>
+    useLocalPostgresTransport("postgresql://user@localhost:55494/mealscout_pr394", {
+      MEALSCOUT_LOCAL_POSTGRES_MIGRATION: "true",
+    }),
+  /numeric loopback PostgreSQL address/,
+  "localhost can resolve outside loopback through host configuration",
+);
+assert.throws(
+  () =>
+    useLocalPostgresTransport(localMigrationUrl, {
+      MEALSCOUT_LOCAL_POSTGRES_MIGRATION: "true",
+      RENDER_SERVICE_ID: "srv-example",
+    }),
+  /unavailable in a Render service/,
 );
 
 const runnerSource = readFileSync("scripts/runDeployMigrations.ts", "utf8");

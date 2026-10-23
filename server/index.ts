@@ -11,6 +11,7 @@ import {
   registerOperationalEndpoints,
   registerRecurringJobs,
 } from "./bootstrap";
+import { isIsolatedVerificationMode } from "./bootstrap/isolatedVerification";
 import actionRoutes from "./routes/actionRoutes";
 import {
   verifyActionApiToken,
@@ -1271,7 +1272,12 @@ app.use((req, res, next) => {
   // These are extracted from routes.ts as part of backend refactor Phase 1.
   registerStaticPages(app);
   registerOperationalEndpoints(app);
-  await registerSchedulers(app);
+  const isolatedVerificationMode = isIsolatedVerificationMode();
+  if (isolatedVerificationMode) {
+    console.log("[verification] Schedulers and startup jobs disabled for isolated service");
+  } else {
+    await registerSchedulers(app);
+  }
 
   // Setup WebSocket server for food truck GPS tracking
   setupWebSocketServer(server, nativeSessionMiddleware);
@@ -1407,35 +1413,37 @@ app.use((req, res, next) => {
     () => {
       console.log(`[express] serving on port ${port}`);
 
-      // Initialize database data after server startup - truly non-blocking
-      setImmediate(async () => {
-        try {
-          await storage.ensureAdminExists();
+      if (!isolatedVerificationMode) {
+        // Initialize database data after server startup - truly non-blocking
+        setImmediate(async () => {
+          try {
+            await storage.ensureAdminExists();
 
-          // Never seed fake content unless explicitly enabled for local development.
-          const seedEnabled =
-            process.env.NODE_ENV === "development" &&
-            String(process.env.SEED_DEV_DATA || "").toLowerCase() === "true";
-          if (seedEnabled) {
-            await storage.seedDevelopmentData();
-          } else {
-            console.log(
-              "[seed] Development seed disabled. Set SEED_DEV_DATA=true (and NODE_ENV=development) to enable.",
+            // Never seed fake content unless explicitly enabled for local development.
+            const seedEnabled =
+              process.env.NODE_ENV === "development" &&
+              String(process.env.SEED_DEV_DATA || "").toLowerCase() === "true";
+            if (seedEnabled) {
+              await storage.seedDevelopmentData();
+            } else {
+              console.log(
+                "[seed] Development seed disabled. Set SEED_DEV_DATA=true (and NODE_ENV=development) to enable.",
+              );
+            }
+            console.log("✅ Database initialization completed successfully");
+          } catch (error) {
+            console.warn(
+              "⚠️  Warning: Could not initialize storage after startup:",
+              error instanceof Error ? error.message : String(error)
+            );
+            console.warn(
+              "⚠️  Some features may not work properly until database is initialized"
             );
           }
-          console.log("✅ Database initialization completed successfully");
-        } catch (error) {
-          console.warn(
-            "⚠️  Warning: Could not initialize storage after startup:",
-            error instanceof Error ? error.message : String(error)
-          );
-          console.warn(
-            "⚠️  Some features may not work properly until database is initialized"
-          );
-        }
-      });
+        });
 
-      registerRecurringJobs();
+        registerRecurringJobs();
+      }
     }
   );
 })();
