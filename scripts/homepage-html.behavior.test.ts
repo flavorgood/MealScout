@@ -10,7 +10,7 @@ test("native initial Welcome preserves the App template, brand and real links wi
   assert.match(html, /<h1 class="sr-only">Welcome to MealScout<\/h1>/);
   assert.ok(html.includes(WELCOME_CONTENT.description.replace(/'/g, "&#x27;")));
   for (const href of ["/customer-signup", "/login", "/scout"]) assert.ok(html.includes(`href="${href}"`));
-  assert.ok(html.includes("/atmospheric/mealscout-welcome-map-night.png"));
+  assert.ok(html.includes("mealscout-welcome-background"));
   assert.ok(html.includes('<script type="module" src="/src/main.tsx"></script>'));
   assert.ok(html.includes('<link rel="canonical" href="https://www.mealscout.us/">'));
   assert.ok(html.includes('<meta name="robots" content="index, follow,'));

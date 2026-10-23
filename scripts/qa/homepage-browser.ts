@@ -2,9 +2,12 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import http from "node:http";
+import vm from "node:vm";
 import { pathToFileURL } from "node:url";
 import type { AddressInfo } from "node:net";
 import express from "express";
+import helmet from "helmet";
+import ts from "typescript";
 import { chromium } from "@playwright/test";
 import { createRootHealthGuard } from "../../server/seo/rootEntry";
 import { guardUnauthenticatedProtectedHtml } from "../../server/seo/protectedHtmlRoutes";
@@ -25,10 +28,25 @@ try {
     const { serveStatic } = await import(pathToFileURL(path.join(source.root, "dist/server/vite.js")).href);
     const app = express();
     app.set("env", "production");
+    // Read the actual static Helmet options without importing application boot.
+    const securitySource = ts.createSourceFile("index.ts", fs.readFileSync(path.join(source.root, "server/index.ts"), "utf8"), ts.ScriptTarget.Latest, true);
+    let helmetOptions: string | undefined;
+    const visit = (node: ts.Node) => {
+      if (ts.isCallExpression(node) && node.expression.getText(securitySource) === "helmet") helmetOptions = node.arguments[0].getText(securitySource);
+      ts.forEachChild(node, visit);
+    };
+    visit(securitySource);
+    assert.ok(helmetOptions, "actual production Helmet options found");
+    app.use(helmet(vm.runInNewContext(`(${helmetOptions})`)));
     app.use(guardUnauthenticatedProtectedHtml);
     app.use("/", createRootHealthGuard(app, path.join(distPath, "index.html")));
     registerPublicProfileAppAssets(app, path.join(distPath, "assets"));
-    serveStatic(app, { canonicalBaseUrl: "https://www.mealscout.us", distPath });
+    const previousDirectory = process.cwd();
+    try {
+      // Released serveStatic predates the explicit fixture directory option.
+      process.chdir(source.root);
+      serveStatic(app, { canonicalBaseUrl: "https://www.mealscout.us", distPath });
+    } finally { process.chdir(previousDirectory); }
     const server = http.createServer(app);
     servers.push(server);
     await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));

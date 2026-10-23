@@ -20,11 +20,7 @@ export default function Welcome() {
         <p className="sr-only">{WELCOME_CONTENT.description}</p>
         <div
           aria-hidden="true"
-          className="absolute inset-0 bg-cover bg-center bg-no-repeat"
-          style={{
-            backgroundImage:
-              "url('/atmospheric/mealscout-welcome-map-night.png')",
-          }}
+          className="mealscout-welcome-background absolute inset-0 bg-cover bg-center bg-no-repeat"
         />
         <div
           aria-hidden="true"
