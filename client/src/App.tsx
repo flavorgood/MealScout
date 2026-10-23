@@ -691,11 +691,12 @@ function App() {
   const isPublicProfilePath =
     currentPath.startsWith("/p/") ||
     Boolean(parseCleanAffiliateBusinessRoute(currentPath)) ||
-    /^\/(restaurant|truck|bar|location|supplier)\/[^/]+(?:\/[^/]+)?$/i.test(
+    /^\/(restaurant|truck|bar|caterer|private-chef|location|supplier)\/[^/]+(?:\/[^/]+)?$/i.test(
       currentPath,
     );
   const usesSelfContainedConsumerShell =
     isPublicProfilePath ||
+    currentPath.startsWith("/deal/") ||
     currentPath.startsWith("/menu/") ||
     currentPath.startsWith("/checkout/") ||
     currentPath.startsWith("/order-confirmation/");

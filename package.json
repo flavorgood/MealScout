@@ -74,7 +74,7 @@
     "db:generate:sql": "drizzle-kit generate",
     "db:push": "drizzle-kit push",
     "test:flows:e2e": "playwright test",
-    "test:flows:e2e:no-creds": "playwright test playwright/reviews-route.spec.ts playwright/welcome-routing.spec.ts playwright/verification-handoff.spec.ts playwright/search-recovery.spec.ts playwright/scout-dashboard.spec.ts playwright/about-explainer.spec.ts playwright/owner-profile-evidence-review.spec.ts playwright/event-booking-cancellation.spec.ts",
+    "test:flows:e2e:no-creds": "playwright test playwright/reviews-route.spec.ts playwright/welcome-routing.spec.ts playwright/verification-handoff.spec.ts playwright/search-recovery.spec.ts playwright/scout-dashboard.spec.ts playwright/about-explainer.spec.ts playwright/owner-profile-evidence-review.spec.ts playwright/event-booking-cancellation.spec.ts playwright/deal-wallet-recovery.spec.ts playwright/nearby-search-scope.spec.ts playwright/profile-access-recovery.spec.ts",
     "test:reviews-route": "playwright test playwright/reviews-route.spec.ts",
     "test:staff-rbac": "npx --yes tsx scripts/testStaffRBAC.ts",
     "test:staff-rbac-guardrails": "npx --yes tsx scripts/staff-rbac-guardrails.contract.test.ts",

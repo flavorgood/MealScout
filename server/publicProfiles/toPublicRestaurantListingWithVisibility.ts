@@ -3,6 +3,8 @@ import { inArray } from "drizzle-orm";
 import { users } from "@shared/schema";
 import { db } from "../db";
 import { resolvePublicProfileVisibility } from "./publicProfileUtils";
+import { isPublicBusinessVisible } from "../utils/publicBusinessVisibility";
+import { deriveProfileEvidenceQuarantineVisibility } from "../services/profileEvidenceQuarantine";
 import {
   toPublicRestaurantListingArray,
   type PublicRestaurantListingVisibility,
@@ -72,4 +74,30 @@ export async function toPublicRestaurantListingWithVisibility(
     database,
   );
   return projected;
+}
+
+// Personal relationships do not grant access to private business profile data.
+// Keep native relationship timestamps/IDs while projecting the nested business
+// with the same consent, eligibility and field allowlist as public discovery.
+export async function toPublicRestaurantRelationshipArrayWithVisibility(
+  rows: any[],
+  database: any = db,
+) {
+  const eligible = rows.filter((row) => row.restaurant?.isActive === true &&
+    isPublicBusinessVisible(row.restaurant) &&
+    !deriveProfileEvidenceQuarantineVisibility(row.restaurant).isQuarantined);
+  const publicRestaurants = await toPublicRestaurantListingArrayWithVisibility(
+    eligible.map((row) => row.restaurant), database,
+  );
+  const byId = new Map(publicRestaurants.map((restaurant: any) => [restaurant.id, restaurant]));
+  return eligible.flatMap((row) => {
+    const restaurant = byId.get(row.restaurantId);
+    return restaurant ? [{
+      id: row.id, restaurantId: row.restaurantId, createdAt: row.createdAt,
+      ...(row.favoritedAt !== undefined ? { favoritedAt: row.favoritedAt } : {}),
+      ...(row.followedAt !== undefined ? { followedAt: row.followedAt } : {}),
+      ...(row.recommendedAt !== undefined ? { recommendedAt: row.recommendedAt } : {}),
+      restaurant,
+    }] : [];
+  });
 }

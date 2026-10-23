@@ -300,13 +300,25 @@ requireIncludes(
 ].forEach((snippet) => requireIncludes(dashboardSwitcher, snippet, `dashboard switcher evidence ${snippet}`));
 
 [
-  "buildOwnerAiHref({",
-  'focus: "profile"',
-  'focus: "media"',
-  'focus: "menu"',
-  'focus: "schedule"',
+  'continuationPath = "/restaurant-owner-dashboard?setup=profile"',
+  'continuationPath = "/restaurant-owner-dashboard?setup=profile-media"',
+  'continuationPath = "/menu-builder"',
+  'continuationPath = "/restaurant-owner-dashboard?setup=schedule"',
   'continuationPath = "/restaurant-owner-dashboard?setup=verification"',
+  'businessAccessSummary?.primaryRestaurantId || ""',
+  'target.searchParams.set("restaurantId", primaryBusinessId)',
+  'continuationPath = `${target.pathname}${target.search}`',
 ].forEach((snippet) => requireIncludes(loginContinuation, snippet, `login continuation evidence ${snippet}`));
+
+requireMatch(
+  loginContinuation,
+  /if \(continuationPath && primaryBusinessId &&\s*\["profile", "profile_visual", "menu", "schedule"\]\.includes\(nextRequiredStep\)\)/,
+  "manual setup continuations retain the server-resolved primary business",
+);
+
+if (/\bbuildOwnerAiHref\s*\(|continuationPath\s*=\s*["'`]\/owner-ai\b/.test(loginContinuation)) {
+  throw new Error("Login continuation must not force AI setup.");
+}
 
 [
   '"/api/restaurants/my-restaurants"',

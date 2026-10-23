@@ -51,12 +51,11 @@ if (!scheduleBranch.includes('nextRequiredStep = "schedule"')) {
 }
 
 if (
-  !scheduleBranch.includes("continuationPath = buildOwnerAiHref({") ||
-  !scheduleBranch.includes('source: "onboarding"') ||
-  !scheduleBranch.includes('focus: "schedule"')
+  !scheduleBranch.includes('continuationPath = "/restaurant-owner-dashboard?setup=schedule";') ||
+  scheduleBranch.includes("buildOwnerAiHref")
 ) {
   throw new Error(
-    "Schedule-required food truck continuation must enter owner AI onboarding with schedule focus",
+    "Schedule-required food truck continuation must enter the existing manual schedule workspace",
   );
 }
 

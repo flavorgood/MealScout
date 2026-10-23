@@ -1,7 +1,8 @@
-import { useState, useEffect, useMemo, useCallback } from "react";
+import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { apiUrl } from "@/lib/api";
+import { fetchSearchJson, searchArray, unifiedSearchResult, validSearchLocation, withinSearchRadius, type SearchLocation } from "@/lib/search-scope";
 import { useQuery } from "@tanstack/react-query";
-import { useLocation } from "wouter";
+import { useLocation, useSearch } from "wouter";
 import { Link } from "wouter";
 import Navigation from "@/components/navigation";
 import DealCard from "@/components/deal-card";
@@ -108,9 +109,11 @@ function clampDiscoveryRadiusKm(value: number): number {
 
 function readDiscoveryRadiusKm(): number {
   if (typeof window === "undefined") return DEFAULT_DISCOVERY_RADIUS_KM;
-  const stored = Number(window.localStorage.getItem(DISCOVERY_RADIUS_STORAGE_KEY));
-  if (!Number.isFinite(stored)) return DEFAULT_DISCOVERY_RADIUS_KM;
-  return clampDiscoveryRadiusKm(stored);
+  try {
+    const raw = window.localStorage.getItem(DISCOVERY_RADIUS_STORAGE_KEY);
+    if (raw === null || raw.trim() === "") return DEFAULT_DISCOVERY_RADIUS_KM;
+    return clampDiscoveryRadiusKm(Number(raw));
+  } catch { return DEFAULT_DISCOVERY_RADIUS_KM; }
 }
 
 // Category configuration mapping (from category.tsx)
@@ -274,6 +277,7 @@ const levenshteinDistance = (a: string, b: string) => {
 export default function SearchPage() {
   const isStandalone = useIsStandalone();
   const [location, setLocation] = useLocation();
+  const search = useSearch();
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedCategory, setSelectedCategory] = useState("all");
   const [showFilters, setShowFilters] = useState(false);
@@ -285,10 +289,29 @@ export default function SearchPage() {
   );
 
   // Location state management
-  const [userLocation, setUserLocation] = useState<{
-    lat: number;
-    lng: number;
-  } | null>(null);
+  const [userLocation, setUserLocation] = useState<SearchLocation | null>(() => {
+    try {
+      const stored = JSON.parse(window.sessionStorage.getItem("mealscout:search-location") || "null");
+      return validSearchLocation(stored) ? stored : null;
+    } catch { return null; }
+  });
+  const [widerSearch, setWiderSearch] = useState(false);
+  const localLocation = widerSearch ? null : userLocation;
+  const [manualLocation, setManualLocation] = useState("");
+  const [manualChoices, setManualChoices] = useState<Array<{lat: string; lon: string; display_name: string}>>([]);
+  const [manualSearching, setManualSearching] = useState(false);
+  const locationRequest = useRef(0);
+  const hasCurrentSearch = searchQuery.trim().length >= 2 && searchQuery.trim() === debouncedSearchQuery;
+  const saveLocation = (next: SearchLocation) => {
+    locationRequest.current += 1;
+    setUserLocation(next);
+    setWiderSearch(false);
+    setIsLocating(false);
+    setManualSearching(false);
+    setManualChoices([]);
+    setLocationError(null);
+    try { window.sessionStorage.setItem("mealscout:search-location", JSON.stringify(next)); } catch {}
+  };
   const [isLocating, setIsLocating] = useState(false);
   const [locationError, setLocationError] = useState<string | null>(null);
 
@@ -296,18 +319,16 @@ export default function SearchPage() {
     const nextRadius = clampDiscoveryRadiusKm(Number(values[0]));
     setDiscoveryRadiusKm(nextRadius);
     if (typeof window !== "undefined") {
-      window.localStorage.setItem(DISCOVERY_RADIUS_STORAGE_KEY, String(nextRadius));
+      try { window.localStorage.setItem(DISCOVERY_RADIUS_STORAGE_KEY, String(nextRadius)); } catch {}
     }
   }, []);
 
   // Parse URL query parameter
   useEffect(() => {
-    const urlParams = new URLSearchParams(window.location.search);
+    const urlParams = new URLSearchParams(search);
     const query = urlParams.get("q");
-    if (query) {
-      setSearchQuery(decodeURIComponent(query));
-    }
-  }, [location]);
+    setSearchQuery(query || "");
+  }, [location, search]);
 
   useEffect(() => {
     const timeoutId = setTimeout(() => {
@@ -322,18 +343,21 @@ export default function SearchPage() {
       return;
     }
 
+    const request = ++locationRequest.current;
     setIsLocating(true);
     setLocationError(null);
     navigator.geolocation.getCurrentPosition(
       (position) => {
+        if (request !== locationRequest.current) return;
         const location = {
           lat: position.coords.latitude,
           lng: position.coords.longitude,
         };
-        setUserLocation(location);
-        setIsLocating(false);
+        if (validSearchLocation(location)) saveLocation({ ...location, label: "Your location" });
+        else { setLocationError("Unable to get your location."); setIsLocating(false); }
       },
       () => {
+        if (request !== locationRequest.current) return;
         setLocationError("Unable to get your location.");
         setIsLocating(false);
       },
@@ -341,100 +365,116 @@ export default function SearchPage() {
     );
   };
 
-  // Fetch nearby deals when location is available, otherwise featured deals
-  const { data: nearbyDeals, isLoading: nearbyLoading } = useQuery({
-    queryKey: userLocation
-      ? ["/api/deals/nearby", userLocation.lat, userLocation.lng, discoveryRadiusKm]
-      : ["/api/deals/nearby", "no-location"],
-    queryFn: async () => {
-      if (!userLocation) return null;
-      const response = await fetch(apiUrl(`/api/deals/nearby/${userLocation.lat}/${userLocation.lng}?radius=${discoveryRadiusKm}`),
+  useEffect(() => () => { locationRequest.current += 1; }, []);
+
+  const findManualLocation = async () => {
+    if (!manualLocation.trim()) return;
+    const request = ++locationRequest.current;
+    setIsLocating(false);
+    setManualSearching(true);
+    setLocationError(null);
+    setManualChoices([]);
+    try {
+      const data = await fetchSearchJson(apiUrl(`/api/location/search?q=${encodeURIComponent(manualLocation.trim())}&limit=5`));
+      const choices = searchArray(data).filter((row) =>
+        typeof row.display_name === "string" && row.lat != null && row.lon != null && String(row.lat).trim() !== "" && String(row.lon).trim() !== "" &&
+        validSearchLocation({ lat: Number(row.lat), lng: Number(row.lon) }),
       );
-      if (!response.ok) throw new Error("Failed to fetch nearby deals");
-      return response.json();
-    },
-    enabled: !searchQuery && !!userLocation,
-  });
+      if (request !== locationRequest.current) return;
+      setManualChoices(choices);
+      if (choices.length === 0) setLocationError("Location not found or lookup unavailable. Try another city or ZIP code.");
+    } catch (error) {
+      if (request === locationRequest.current) setLocationError(error instanceof Error ? error.message : "Location search is unavailable. Please retry.");
+    } finally {
+      if (request === locationRequest.current) setManualSearching(false);
+    }
+  };
 
-  const { data: featuredDeals, isLoading: featuredLoading } = useQuery({
+  const scopeKey = [localLocation?.lat ?? null, localLocation?.lng ?? null, discoveryRadiusKm];
+  const scopedParams = (query: string, radiusKey = "radius") => {
+    const params = new URLSearchParams({ q: query });
+    if (localLocation) {
+      params.set("lat", String(localLocation.lat));
+      params.set("lng", String(localLocation.lng));
+      params.set(radiusKey, String(discoveryRadiusKm));
+    }
+    return params;
+  };
+  const fetchCollection = async (path: string, signal: AbortSignal) => {
+    return searchArray(await fetchSearchJson(apiUrl(path), signal), path.startsWith("/api/restaurants/") ? ["id", "name"] : ["id", "title"]);
+  };
+  const nearbyQuery = useQuery<any[]>({
+    queryKey: ["/api/deals/nearby", ...scopeKey],
+    queryFn: ({ signal }) => fetchCollection(`/api/deals/nearby/${localLocation!.lat}/${localLocation!.lng}?radius=${discoveryRadiusKm}`, signal),
+    enabled: !searchQuery.trim() && !!localLocation,
+    retry: false,
+  });
+  const featuredQuery = useQuery<any[]>({
     queryKey: ["/api/deals/featured"],
-    queryFn: async () => {
-      const response = await fetch(apiUrl("/api/deals/featured"));
-      if (!response.ok) throw new Error("Failed to fetch featured deals");
-      return response.json();
-    },
-    enabled: !searchQuery && !userLocation && !isLocating,
+    queryFn: ({ signal }) => fetchCollection("/api/deals/featured", signal),
+    enabled: !searchQuery.trim() && !localLocation && !isLocating,
+    retry: false,
   });
-
-  const { data: unifiedResults, isLoading: unifiedLoading } = useQuery({
+  const unifiedQuery = useQuery<Record<string, any[]>>({
+    // The aggregate endpoint has no proximity contract. Its restaurant/deal
+    // rows cannot establish membership in a local-radius search.
     queryKey: ["/api/search", debouncedSearchQuery],
-    queryFn: async () => {
-      const params = new URLSearchParams({ q: debouncedSearchQuery });
-      const res = await fetch(apiUrl(`/api/search?${params}`));
-      if (!res.ok) throw new Error("Failed to search");
-      return res.json();
+    queryFn: async ({ signal }) => {
+      return unifiedSearchResult(await fetchSearchJson(apiUrl(`/api/search?q=${encodeURIComponent(debouncedSearchQuery)}`), signal));
     },
-    enabled: debouncedSearchQuery.length >= 2,
+    enabled: hasCurrentSearch,
     staleTime: 30_000,
+    retry: false,
   });
-
-  const { data: restaurantSearchResults = [] } = useQuery<any[]>({
-    queryKey: [
-      "/api/restaurants/search",
-      debouncedSearchQuery,
-      userLocation?.lat ?? null,
-      userLocation?.lng ?? null,
-      discoveryRadiusKm,
-    ],
-    queryFn: async () => {
-      const params = new URLSearchParams({ q: debouncedSearchQuery });
-      if (userLocation) {
-        params.set("lat", String(userLocation.lat));
-        params.set("lng", String(userLocation.lng));
-        params.set("radius", String(discoveryRadiusKm));
-      }
-      const res = await fetch(apiUrl(`/api/restaurants/search?${params.toString()}`));
-      if (!res.ok) throw new Error("Failed to search restaurants");
-      return res.json();
+  const restaurantQuery = useQuery<any[]>({
+    queryKey: ["/api/restaurants/search", debouncedSearchQuery, ...scopeKey],
+    queryFn: ({ signal }) => fetchCollection(`/api/restaurants/search?${scopedParams(debouncedSearchQuery)}`, signal),
+    enabled: hasCurrentSearch,
+    staleTime: 30_000,
+    retry: false,
+  });
+  const dealSearchQuery = useQuery<any[]>({
+    queryKey: ["/api/deals/search", debouncedSearchQuery, ...scopeKey],
+    queryFn: ({ signal }) => fetchCollection(`/api/deals/search?${scopedParams(debouncedSearchQuery)}`, signal),
+    enabled: hasCurrentSearch && !!localLocation,
+    staleTime: 30_000,
+    retry: false,
+  });
+  const menuQuery = useQuery<MenuItemSearchResult[]>({
+    queryKey: ["/api/menus/local-items", debouncedSearchQuery, ...scopeKey],
+    queryFn: async ({ signal }) => {
+      const params = scopedParams(debouncedSearchQuery, "radiusKm");
+      params.set("limit", "48");
+      const data = await fetchSearchJson(apiUrl(`/api/menus/local-items?${params}`), signal) as { items?: unknown };
+      return searchArray(data?.items, ["id", "name", "restaurantId"]);
     },
-    enabled: debouncedSearchQuery.length >= 2,
+    enabled: hasCurrentSearch,
     staleTime: 30_000,
+    retry: false,
   });
+  const unifiedResults = hasCurrentSearch && !unifiedQuery.isError ? unifiedQuery.data : undefined;
+  const restaurantSearchResults = hasCurrentSearch && !restaurantQuery.isError ? restaurantQuery.data || [] : [];
+  const menuItemSearchResults = (hasCurrentSearch && !menuQuery.isError ? menuQuery.data || [] : []).filter((item) =>
+    !localLocation || (typeof item.distanceMiles === "number" && Number.isFinite(item.distanceMiles) &&
+      item.distanceMiles >= 0 && item.distanceMiles <= discoveryRadiusKm * 0.621371),
+  );
+  const nearbyDeals = localLocation && !nearbyQuery.isError ? nearbyQuery.data : undefined;
+  const featuredDeals = localLocation || featuredQuery.isError ? undefined : featuredQuery.data;
+  const activeSources = searchQuery.trim().length >= 2
+    ? hasCurrentSearch ? [{ name: "Restaurants", query: restaurantQuery }, { name: "Menu items", query: menuQuery },
+      { name: localLocation ? "Parking spots" : "Deals, parking, videos and events", query: unifiedQuery },
+      ...(localLocation ? [{ name: "Deals", query: dealSearchQuery }] : [])] : []
+    : searchQuery.trim() ? [] : [{ name: "Deals", query: localLocation ? nearbyQuery : featuredQuery }];
+  const loadingSources = activeSources.filter(({ query }) => query.isFetching);
+  const failedSources = activeSources.filter(({ query }) => query.isError);
+  const isLoading = isLocating || (searchQuery.trim().length >= 2 && !hasCurrentSearch) || loadingSources.length > 0;
+  const dealsLoading = searchQuery.trim()
+    ? hasCurrentSearch && (localLocation ? dealSearchQuery.isFetching : unifiedQuery.isFetching)
+    : localLocation ? nearbyQuery.isFetching : featuredQuery.isFetching;
+  const dealsUnavailable = searchQuery.trim()
+    ? hasCurrentSearch && (localLocation ? dealSearchQuery.isError : unifiedQuery.isError)
+    : localLocation ? nearbyQuery.isError : featuredQuery.isError;
 
-  const { data: menuItemSearchResults = [], isLoading: menuItemsLoading } =
-    useQuery<MenuItemSearchResult[]>({
-      queryKey: [
-        "/api/menus/local-items",
-        debouncedSearchQuery,
-        userLocation?.lat ?? null,
-        userLocation?.lng ?? null,
-        discoveryRadiusKm,
-      ],
-      queryFn: async () => {
-        const params = new URLSearchParams({
-          q: debouncedSearchQuery,
-          limit: "48",
-          radiusKm: String(discoveryRadiusKm),
-        });
-        if (userLocation) {
-          params.set("lat", String(userLocation.lat));
-          params.set("lng", String(userLocation.lng));
-        }
-        const res = await fetch(apiUrl(`/api/menus/local-items?${params.toString()}`));
-        if (!res.ok) throw new Error("Failed to search menu items");
-        const data = await res.json();
-        return Array.isArray(data?.items) ? data.items : [];
-      },
-      enabled: debouncedSearchQuery.length >= 2,
-      staleTime: 30_000,
-    });
-
-  const isLoading =
-    nearbyLoading ||
-    featuredLoading ||
-    unifiedLoading ||
-    menuItemsLoading ||
-    isLocating;
 
   // Function to map cuisine types and titles to category IDs
   const mapDealToCategory = (deal: any): string[] => {
@@ -510,9 +550,9 @@ export default function SearchPage() {
     : Array.isArray(featuredDeals)
       ? featuredDeals
       : [];
-  const searchedDeals = Array.isArray((unifiedResults as any)?.deals)
-    ? (unifiedResults as any).deals
-    : [];
+  const searchedDeals = localLocation
+    ? (hasCurrentSearch && !dealSearchQuery.isError ? dealSearchQuery.data || [] : []).filter((deal) => withinSearchRadius(deal.restaurant, localLocation, discoveryRadiusKm))
+    : unifiedResults?.deals || [];
   const searchedRestaurants = Array.isArray(
     (unifiedResults as any)?.restaurants,
   )
@@ -520,12 +560,12 @@ export default function SearchPage() {
     : [];
   const mergedRestaurants = useMemo(() => {
     const byId = new Map<string, any>();
-    searchedRestaurants.forEach((restaurant: any) => {
+    (localLocation ? [] : searchedRestaurants).forEach((restaurant: any) => {
       const id = String(restaurant?.id || "").trim();
       if (!id) return;
       byId.set(id, restaurant);
     });
-    restaurantSearchResults.forEach((restaurant: any) => {
+    restaurantSearchResults.filter((restaurant) => !localLocation || withinSearchRadius(restaurant, localLocation, discoveryRadiusKm)).forEach((restaurant: any) => {
       const id = String(restaurant?.id || "").trim();
       if (!id) return;
       const existing = byId.get(id) || {};
@@ -553,30 +593,29 @@ export default function SearchPage() {
       });
     });
     return Array.from(byId.values()).slice(0, 24);
-  }, [searchedRestaurants, restaurantSearchResults]);
+  }, [searchedRestaurants, restaurantSearchResults, localLocation, discoveryRadiusKm]);
   const searchedParkingPassHosts = Array.isArray(
     (unifiedResults as any)?.parkingPassHosts,
   )
-    ? (unifiedResults as any).parkingPassHosts
+    ? (unifiedResults as any).parkingPassHosts.filter((host: any) => !localLocation || withinSearchRadius(host, localLocation, discoveryRadiusKm))
     : [];
-  const searchedVideos = Array.isArray((unifiedResults as any)?.videos)
+  const searchedVideos = !localLocation && Array.isArray((unifiedResults as any)?.videos)
     ? (unifiedResults as any).videos
     : [];
-  const searchedEvents = Array.isArray((unifiedResults as any)?.events)
+  const searchedEvents = !localLocation && Array.isArray((unifiedResults as any)?.events)
     ? (unifiedResults as any).events
     : [];
-  const totalStructuredMatches =
+  const totalOtherMatches =
     menuItemSearchResults.length +
     mergedRestaurants.length +
     searchedParkingPassHosts.length +
     searchedVideos.length +
-    searchedEvents.length +
-    searchedDeals.length;
+    searchedEvents.length;
 
-  const dealsForPage = searchQuery ? searchedDeals : allDeals;
+  const dealsForPage = searchQuery.trim() ? searchedDeals : allDeals.filter((deal: any) => !localLocation || withinSearchRadius(deal.restaurant, localLocation, discoveryRadiusKm));
   const queryGroups = buildQueryGroups(searchQuery);
   const categories =
-    !searchQuery && userLocation && nearbyDeals && nearbyDeals.length > 0
+    !searchQuery && localLocation && nearbyDeals && nearbyDeals.length > 0
       ? generateDynamicCategories(nearbyDeals)
       : staticCategories;
 
@@ -646,6 +685,8 @@ export default function SearchPage() {
     ],
   );
 
+  const totalStructuredMatches = totalOtherMatches + filteredDeals.length;
+
   const suggestionTerms = useMemo(() => {
     const fromCategories = Object.values(categoryConfig).flatMap((category) =>
       category.keywords.map(normalizeSearchText),
@@ -690,7 +731,7 @@ export default function SearchPage() {
     ? `${searchQuery} - Search Results`
     : "Search";
   const searchDescription = searchQuery
-    ? `Find nearby deals for "${searchQuery}". Browse local restaurants and discover limited-time discounts close to you.`
+    ? `Find deals, restaurants, and menu items for "${searchQuery}" on MealScout.`
     : "Search for deals, restaurants, parking pass spots, videos, and events.";
   const searchKeywordVariants = searchQuery
     ? Array.from(new Set(queryGroups.flat()).values()).slice(0, 8).join(", ")
@@ -830,12 +871,18 @@ export default function SearchPage() {
             <p className="text-sm text-muted-foreground">
               {isLocating && !searchQuery
                 ? "Finding your location..."
-                : userLocation && !searchQuery
+                : localLocation && !searchQuery
                   ? "Popular deals near you"
+                  : isLoading
+                    ? "Searching available sources..."
+                    : failedSources.length > 0
+                      ? "Some search sources are unavailable"
+                      : searchQuery.trim().length === 1
+                        ? "Enter at least two characters"
                   : searchQuery && totalStructuredMatches > 0
                     ? "Showing restaurants, trucks, and deals that match your search"
                     : searchQuery
-                      ? "No matches yet"
+                      ? localLocation ? "No food matches in your selected radius" : "No matches yet"
                       : "Use location for nearby results or browse featured deals"}
             </p>
           </div>
@@ -872,7 +919,7 @@ export default function SearchPage() {
             </Button>
           </div>
         </div>
-        {locationError && !searchQuery && (
+        {locationError && (
           <p
             className="mb-4 text-xs text-[color:var(--status-error)]"
             role="alert"
@@ -880,6 +927,57 @@ export default function SearchPage() {
             {locationError}
           </p>
         )}
+
+        <div className="mb-4 space-y-3">
+          <p className="text-sm font-semibold" data-testid="search-scope">
+            {localLocation
+              ? `Nearby: within ${discoveryRadiusKm} km of ${localLocation.label || "your selected location"}`
+              : userLocation
+                ? "Wider search: all locations, including results outside your saved radius"
+                : "All locations: choose a location for nearby results"}
+          </p>
+          {userLocation && (
+            <Button variant="outline" size="sm" data-testid="button-search-wider" onClick={() => setWiderSearch(!widerSearch)}>
+              {widerSearch ? "Return to nearby results" : "Search all locations"}
+            </Button>
+          )}
+          {localLocation && searchQuery.trim() && (
+            <div className="space-y-2 text-xs text-muted-foreground">
+              <p data-testid="search-parking-coverage">
+                Parking coverage is limited to spots included in wider search; other nearby spots may be missing. Search all locations to browse the available parking results.
+              </p>
+              <p>
+                Videos and events do not provide a nearby location in search. Choose Search all locations to include them.
+              </p>
+            </div>
+          )}
+          <form className="flex gap-2" onSubmit={(event) => { event.preventDefault(); void findManualLocation(); }}>
+            <div className="min-w-0 flex-1">
+              <label htmlFor="search-location" className="mb-1 block text-xs text-muted-foreground">City, ZIP code, or address</label>
+              <Input id="search-location" value={manualLocation} data-testid="input-search-location" placeholder="Enter a location" onChange={(event) => {
+                locationRequest.current += 1;
+                setManualLocation(event.target.value);
+                setManualChoices([]);
+                setManualSearching(false);
+                setIsLocating(false);
+              }} />
+            </div>
+            <Button type="submit" variant="outline" className="self-end" disabled={manualSearching || !manualLocation.trim()} data-testid="button-search-location">
+              {manualSearching ? "Finding..." : "Find location"}
+            </Button>
+          </form>
+          {manualChoices.length > 0 && (
+            <ul aria-label="Choose search location" className="space-y-2">
+              {manualChoices.map((choice, index) => (
+                <li key={`${choice.lat}-${choice.lon}-${index}`}>
+                  <Button variant="outline" className="h-auto w-full whitespace-normal text-left" data-testid={`button-location-choice-${index}`} onClick={() => saveLocation({ lat: Number(choice.lat), lng: Number(choice.lon), label: choice.display_name })}>
+                    {choice.display_name}
+                  </Button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
 
         {userLocation && (
           <Card className="mb-4 bg-[var(--bg-card)] border-[color:var(--border-subtle)] shadow-clean">
@@ -890,7 +988,7 @@ export default function SearchPage() {
                     Search radius
                   </p>
                   <p className="text-xs text-muted-foreground">
-                    Applies to map, Scout discovery, menus, deals, and local search.
+                    Nearby restaurants, menus, deals, and parking use this radius.
                   </p>
                 </div>
                 <span className="shrink-0 rounded-full bg-orange-500/10 px-3 py-1 text-xs font-bold text-orange-700 dark:text-orange-200">
@@ -914,7 +1012,7 @@ export default function SearchPage() {
           </Card>
         )}
 
-        {!searchQuery && !userLocation && !isLocating && (
+        {!isLocating && (
           <div className="mb-4 grid grid-cols-2 gap-2 sm:flex sm:flex-wrap sm:items-center">
             <Button
               variant="outline"
@@ -1042,6 +1140,7 @@ export default function SearchPage() {
                     setPriceRange([0, 50]);
                     setSelectedCategory("all");
                     setSearchQuery("");
+                    setLocation("/search");
                   }}
                 >
                   <X className="w-3 h-3 mr-1" />
@@ -1055,6 +1154,18 @@ export default function SearchPage() {
 
       {/* Results */}
       <div className="px-4 sm:px-6 py-6">
+        {isLoading && (
+          <p role="status" data-testid="search-loading-sources" className="mb-4 text-sm text-muted-foreground">
+            Searching{loadingSources.length > 0 ? `: ${loadingSources.map(({ name }) => name).join(", ")}` : "..."}. Results appear as each source finishes.
+          </p>
+        )}
+        {failedSources.length > 0 && (
+          <div role="alert" data-testid="search-source-errors" className="mb-6 rounded-xl border border-[color:var(--border-subtle)] p-4">
+            <p className="text-sm font-semibold">{failedSources.map(({ name }) => name).join(", ")} unavailable.</p>
+            <p className="mt-1 text-sm text-muted-foreground">Search is incomplete. Available results remain below.</p>
+            <Button variant="outline" className="mt-3" data-testid="button-retry-search" onClick={() => { failedSources.forEach(({ query }) => { void query.refetch(); }); }}>Retry unavailable sources</Button>
+          </div>
+        )}
         {/* Menu Items Section (primary food-intent result) */}
         {searchQuery && menuItemSearchResults.length > 0 && (
           <div className="mb-8">
@@ -1345,17 +1456,12 @@ export default function SearchPage() {
           </h2>
           <div className="flex items-center gap-2">
             <span className="text-sm text-muted-foreground">
-              {filteredDeals.length} deals found
+              {dealsLoading ? "Loading deals..." : dealsUnavailable ? "Deal results unavailable" : `${filteredDeals.length} deals found`}
             </span>
-            {filteredDeals.length > 0 && (
-              <span className="px-2 py-0.5 rounded-full bg-[var(--bg-surface-muted)] text-[11px] text-[color:var(--text-secondary)]">
-                Open now
-              </span>
-            )}
           </div>
         </div>
 
-        {isLoading ? (
+        {dealsLoading || (searchQuery.trim().length >= 2 && !hasCurrentSearch) ? (
           <div className="space-y-4">
             {[1, 2, 3].map((i) => (
               <div
@@ -1381,18 +1487,34 @@ export default function SearchPage() {
             <div className="w-20 h-20 bg-[var(--bg-surface-muted)] rounded-2xl flex items-center justify-center mx-auto mb-4">
               <Search className="w-8 h-8 text-muted-foreground" />
             </div>
-            <h3 className="font-bold text-lg text-foreground mb-2">
-              {searchQuery && mergedRestaurants.length > 0
-                ? "No deals found yet"
+            <h3 className="font-bold text-lg text-foreground mb-2" data-testid="search-empty-message">
+              {searchQuery.trim().length === 1
+                ? "Enter at least two characters"
+                : dealsUnavailable
+                  ? "Deals unavailable"
+                  : failedSources.length > 0 || isLoading
+                    ? "Search is incomplete"
+                    : searchQuery && totalStructuredMatches > 0
+                ? "No deals found"
                 : hasSearchIntent
-                  ? "No matches found"
+                  ? localLocation ? "No nearby food matches found" : "No matches found"
                   : "Start with what sounds good"}
             </h3>
             <p className="text-muted-foreground">
-              {searchQuery && mergedRestaurants.length > 0
-                ? "Restaurants and trucks are listed above even without active deals."
+              {searchQuery.trim().length === 1
+                ? "Search for a dish, place, or truck."
+                : dealsUnavailable
+                  ? "We could not load deals. Retry the unavailable source above."
+                  : failedSources.length > 0 || isLoading
+                    ? "More results may appear when the remaining sources finish or recover."
+                    : searchQuery && totalStructuredMatches > 0
+                ? "Other matching results are listed above even without active deals."
                 : hasSearchIntent
-                  ? "Try another dish, place, truck, or category."
+                  ? localLocation
+                    ? searchQuery.trim()
+                      ? "No matching restaurants, menu items, or deals returned within your radius. Parking coverage is limited; other nearby spots may be missing. Use Search all locations to browse available parking results."
+                      : "No deals match your current filters within your radius. Try another dish, place, truck, or category."
+                    : "Try another dish, place, truck, or category."
                   : "Search for a dish or place, choose a category, or scout."}
             </p>
             {didYouMean && (
@@ -1419,6 +1541,7 @@ export default function SearchPage() {
                 onClick={() => {
                   setSearchQuery("");
                   setSelectedCategory("all");
+                  setLocation("/search");
                 }}
                 className="mt-4"
                 data-testid="button-clear-search"

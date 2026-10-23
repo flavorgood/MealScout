@@ -1,278 +1,113 @@
-import React, { useState, useEffect } from 'react';
-import { useMutation } from '@tanstack/react-query';
-import { Button } from '@/components/ui/button';
-import { Card, CardContent } from '@/components/ui/card';
-import { useToast } from '@/hooks/use-toast';
-import { apiRequest } from '@/lib/queryClient';
-import { shareToFacebook, initFacebookSDK } from '@/lib/facebook';
+import { useEffect, useRef, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
+import { Link } from "wouter";
+import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { apiRequest } from "@/lib/queryClient";
+import { dealClaimStatus, dealIntentPath, displayClaimStatus, isDealAuthenticationError, receiptDateLabel, readClaimList, readClaimResponse, type DealClaimReceipt } from "@/lib/deal-claim-state";
 
 interface DealClaimModalProps {
   dealId: string;
   onClose: () => void;
   isOpen: boolean;
+  existingClaim?: DealClaimReceipt;
+  onClaimed?: (claim: DealClaimReceipt) => void;
 }
 
-export default function DealClaimModal({ dealId, onClose, isOpen }: DealClaimModalProps) {
-  const [step, setStep] = useState<'confirm' | 'posting' | 'success'>('confirm');
-  const [postData, setPostData] = useState<any>(null);
-  const [facebookAvailable, setFacebookAvailable] = useState(false);
-  const [shareStatus, setShareStatus] = useState<'none' | 'succeeded' | 'attempted' | 'cancelled' | 'failed'>('none');
-  const { toast } = useToast();
+export default function DealClaimModal({ dealId, onClose, isOpen, existingClaim, onClaimed }: DealClaimModalProps) {
+  const queryClient = useQueryClient();
+  const [receipt, setReceipt] = useState<DealClaimReceipt | undefined>(existingClaim);
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState("");
+  const busy = useRef(false);
+  const generation = useRef(0);
 
-  // Initialize Facebook SDK when component mounts
   useEffect(() => {
-    const initFacebook = async () => {
-      try {
-        await initFacebookSDK();
-        setFacebookAvailable(true);
-      } catch (error) {
-        console.warn('Facebook SDK initialization failed:', error);
-        setFacebookAvailable(false);
-      }
-    };
-    
-    if (isOpen) {
-      initFacebook();
-    }
-  }, [isOpen]);
+    generation.current += 1;
+    busy.current = false;
+    setPending(false);
+    setError("");
+    setReceipt(existingClaim);
+    return () => { generation.current += 1; };
+  }, [dealId, isOpen, existingClaim?.id]);
 
-  const claimDealMutation = useMutation({
-    mutationFn: async (dealId: string) => {
-      const response = await apiRequest('POST', `/api/deals/${dealId}/claim`);
-      return response;
-    },
-    onSuccess: (data) => {
-      setPostData(data);
-      setStep('posting');
-    },
-    onError: (error: any) => {
-      toast({
-        title: "Error",
-        description: error.message || "Failed to claim deal",
-        variant: "destructive",
-      });
-      onClose();
-    },
-  });
-
-  const handleFacebookPost = async () => {
+  const claim = async () => {
+    if (busy.current || receipt) return;
+    busy.current = true;
+    const requestGeneration = generation.current;
+    setPending(true);
+    setError("");
     try {
-      if (!postData?.facebookPostData) {
-        throw new Error('No post data available');
+      // Reconcile a previous response loss before attempting another write.
+      const historyResponse = await apiRequest("GET", "/api/deals/claimed");
+      const history = readClaimList(await historyResponse.json());
+      const previous = history.find((row) => row.dealId === dealId && !row.isUsed && !row.usedAt);
+      let confirmed = previous;
+      if (!confirmed) {
+        const response = await apiRequest("POST", `/api/deals/${encodeURIComponent(dealId)}/claim`, {});
+        confirmed = readClaimResponse(await response.json(), dealId);
       }
-
-      if (!facebookAvailable) {
-        throw new Error('Facebook SDK not available');
+      if (generation.current !== requestGeneration) return;
+      setReceipt(confirmed);
+      onClaimed?.(confirmed);
+      void queryClient.invalidateQueries({ queryKey: ["/api/deals/claimed"] });
+      void queryClient.invalidateQueries({ queryKey: ["/api/deals", dealId] });
+    } catch (failure) {
+      if (generation.current !== requestGeneration) return;
+      const message = failure instanceof Error ? failure.message : "Claim not confirmed";
+      if (isDealAuthenticationError(message)) {
+        const target = dealIntentPath(window.location.pathname + window.location.search + window.location.hash, "claim");
+        window.location.href = `/login?redirect=${encodeURIComponent(target)}`;
+        return;
       }
-
-      // Use Facebook sharing functionality
-      await shareToFacebook({
-        message: postData.facebookPostData.message,
-        place: postData.facebookPostData.place,
-        restaurantName: postData.restaurantName,
-      });
-
-      // Facebook sharing succeeded (clear post_id returned)
-      setShareStatus('succeeded');
-      setStep('success');
-      
-      toast({
-        title: "Shared Successfully!",
-        description: "Your deal has been shared on Facebook!",
-      });
-
-      // Auto close after success
-      setTimeout(() => {
-        onClose();
-      }, 2000);
-    } catch (error: any) {
-      // Handle different types of Facebook errors
-      if (error.message.includes('cancelled')) {
-        setShareStatus('cancelled');
-        setStep('success');
-        toast({
-          title: "Sharing Cancelled",
-          description: "You cancelled Facebook sharing. Your deal is still claimed!",
-        });
-      } else if (error.message.includes('outcome unknown')) {
-        setShareStatus('attempted');
-        setStep('success');
-        toast({
-          title: "Sharing Window Closed",
-          description: "The Facebook sharing window was closed. Your deal is still claimed!",
-        });
-      } else {
-        setShareStatus('failed');
-        setStep('success');
-        toast({
-          title: "Sharing Failed",
-          description: "Could not share on Facebook, but your deal is claimed successfully!",
-          variant: "destructive",
-        });
+      setError(`${message}. Your request may have completed. Retry checks your wallet first.`);
+    } finally {
+      if (generation.current === requestGeneration) {
+        busy.current = false;
+        setPending(false);
       }
-      
-      // Auto close after handling error
-      setTimeout(() => {
-        onClose();
-      }, 2000);
     }
   };
 
-  const handleSkipPost = () => {
-    setShareStatus('none');
-    setStep('success');
-    toast({
-      title: "Special Claimed",
-      description:
-        "Special claimed successfully! You can share on Facebook later if you'd like.",
-    });
-    setTimeout(() => {
-      onClose();
-    }, 2000);
-  };
-
-  if (!isOpen) return null;
-
+  const status = receipt ? dealClaimStatus(receipt) : null;
   return (
-    <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
-      <Card className="w-full max-w-md shadow-clean-lg border-0">
-        <CardContent className="p-8">
-          {step === 'confirm' && (
-            <div className="text-center">
-              <div className="w-16 h-16 food-gradient-primary rounded-2xl flex items-center justify-center mx-auto mb-4">
-                <i className="fas fa-utensils text-white text-xl"></i>
-              </div>
-              <h3 className="text-xl font-bold text-foreground mb-3">
-                Claim This Special
-              </h3>
-              <p className="text-muted-foreground mb-6">
-                Claim this deal and optionally share it on Facebook to spread the word about great food!
-              </p>
-              <div className="space-y-3">
-                <Button
-                  onClick={() => claimDealMutation.mutate(dealId)}
-                  className="w-full py-3 food-gradient-primary border-0 font-bold"
-                  disabled={claimDealMutation.isPending}
-                >
-                  {claimDealMutation.isPending ? "Claiming..." : "Claim Special"}
-                </Button>
-                <Button
-                  onClick={onClose}
-                  variant="outline"
-                  className="w-full py-3"
-                >
-                  Cancel
-                </Button>
-              </div>
+    <Dialog open={isOpen} onOpenChange={(open) => { if (!open && !pending) onClose(); }}>
+      <DialogContent data-testid="dialog-deal-claim" className="max-w-md" onInteractOutside={(event) => { if (pending) event.preventDefault(); }}>
+        <DialogHeader>
+          <DialogTitle>{receipt ? "Your claim receipt" : "Claim this special"}</DialogTitle>
+          <DialogDescription>
+            {receipt ? "This saved receipt is also in your claimed deals." : "Claim the special for your account. Sharing is optional."}
+          </DialogDescription>
+        </DialogHeader>
+        {receipt ? (
+          <div className="space-y-4" data-testid="claim-receipt">
+            <div className="rounded-2xl border border-orange-200 bg-orange-50 p-4 text-stone-900">
+              <p className="font-bold">{receipt.dealTitle || "Claimed special"}</p>
+              {receipt.restaurantName && <p className="mt-1 text-sm">{receipt.restaurantName}</p>}
+              <p className="mt-3 font-bold" data-testid="claim-status">{status && displayClaimStatus(status)}</p>
+              <p className="mt-1 break-all text-xs">Receipt: <span data-testid="text-claim-id">{receipt.id}</span></p>
+              <p className="mt-1 text-xs">Claimed {receiptDateLabel(receipt.claimedAt)}</p>
+              {receipt.endDate && <p className="mt-1 text-xs">Expires {receiptDateLabel(receipt.endDate)}</p>}
+              <p className="mt-1 text-xs">{receipt.availableDuringBusinessHours ? "Offer hours: business hours" : receipt.startTime && receipt.endTime ? `Offer hours: ${receipt.startTime} – ${receipt.endTime}` : "Offer hours: confirm with the business"}</p>
             </div>
-          )}
-
-          {step === 'posting' && postData && (
-            <div className="text-center">
-              <div className="w-16 h-16 food-gradient-accent rounded-2xl flex items-center justify-center mx-auto mb-4">
-                <i className="fab fa-facebook-f text-white text-xl"></i>
-              </div>
-              <h3 className="text-xl font-bold text-foreground mb-3">Share on Facebook</h3>
-              <p className="text-muted-foreground mb-4">
-                Ready to share on Facebook! This will post about your amazing deal at {postData.restaurantName}.
-              </p>
-              
-              {/* Preview of the Facebook post */}
-              <div className="bg-muted/50 rounded-xl p-4 mb-6 text-left border border-border/30">
-                <div className="flex items-center space-x-3 mb-3">
-                  <div className="w-8 h-8 bg-[color:var(--accent-text)] rounded-full flex items-center justify-center">
-                    <i className="fab fa-facebook-f text-white text-sm"></i>
-                  </div>
-                  <span className="font-semibold text-foreground">Your Name</span>
-                </div>
-                <p className="text-sm text-foreground leading-relaxed whitespace-pre-line">
-                  {postData.facebookPostData?.message ||
-                    `Just claimed an amazing special at ${postData.restaurantName}! 🍽️\n\n${postData.dealTitle}\n\nFound this through MealScout - check it out! #MealScout #FoodSpecials`}
-                </p>
-                <div className="mt-3 p-3 bg-background rounded-lg border border-border/50">
-                  <div className="flex items-center space-x-2">
-                    <i className="fas fa-map-marker-alt text-primary"></i>
-                    <span className="text-sm font-medium text-foreground">{postData.restaurantName}</span>
-                  </div>
-                  <p className="text-xs text-muted-foreground mt-1">{postData.restaurantAddress}</p>
-                </div>
-              </div>
-
-              <div className="space-y-3">
-                <Button
-                  onClick={handleFacebookPost}
-                  className="w-full py-3 bg-[color:var(--accent-text)] hover:bg-[color:var(--accent-text-hover)] border-0 font-bold"
-                  disabled={!facebookAvailable}
-                  data-testid="button-share-facebook"
-                >
-                  <i className="fab fa-facebook-f mr-2"></i>
-                  {facebookAvailable ? 'Share on Facebook' : 'Facebook unavailable'}
-                </Button>
-                <Button
-                  onClick={handleSkipPost}
-                  variant="outline"
-                  className="w-full py-3"
-                >
-                  Skip & Continue
-                </Button>
-              </div>
-            </div>
-          )}
-
-          {step === 'success' && (
-            <div className="text-center">
-              <div className="w-16 h-16 food-gradient-accent rounded-2xl flex items-center justify-center mx-auto mb-4">
-                <i className="fas fa-check text-white text-xl"></i>
-              </div>
-              <h3 className="text-xl font-bold text-foreground mb-3">
-                {shareStatus === "succeeded"
-                  ? "Special Claimed & Shared!"
-                  : "Special Claimed Successfully!"}
-              </h3>
-              <div className="space-y-3 mb-6">
-                <p className="text-foreground font-medium">
-                  ✅ Your deal has been claimed successfully!
-                </p>
-                {shareStatus === 'succeeded' && (
-                  <p className="text-[color:var(--accent-text)] font-medium">
-                    📱 Successfully shared on Facebook!
-                  </p>
-                )}
-                {shareStatus === 'attempted' && (
-                  <p className="text-muted-foreground">
-                    📱 Facebook sharing window was opened - you may have shared!
-                  </p>
-                )}
-                {shareStatus === 'cancelled' && (
-                  <p className="text-muted-foreground">
-                    📱 Facebook sharing was cancelled
-                  </p>
-                )}
-                {shareStatus === 'failed' && (
-                  <p className="text-muted-foreground">
-                    📱 Facebook sharing failed, but your deal is still yours!
-                  </p>
-                )}
-                {shareStatus === 'none' && (
-                  <p className="text-muted-foreground">
-                    📱 You can share on Facebook anytime from your claimed deals
-                  </p>
-                )}
-                <p className="text-sm text-muted-foreground mt-4">
-                  Show this confirmation to the restaurant when you visit!
-                </p>
-              </div>
-              <Button
-                onClick={onClose}
-                className="w-full py-3 food-gradient-primary border-0 font-bold"
-              >
-                Got It!
-              </Button>
-            </div>
-          )}
-        </CardContent>
-      </Card>
-    </div>
+            <p className="text-sm text-muted-foreground">
+              {status === "Active" ? "A claim does not confirm redemption now. Check the offer hours and terms with the business, and show this receipt when you visit." : "This receipt is kept for your records and is not currently redeemable."}
+            </p>
+            <Button asChild className="w-full"><Link href="/orders?view=deals" data-testid="link-claimed-deals">Open claimed deals</Link></Button>
+            <Button variant="outline" className="w-full" onClick={onClose}>Done</Button>
+          </div>
+        ) : (
+          <div className="space-y-3">
+            {error && <p role="alert" className="rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-900">{error}</p>}
+            <Button className="w-full" disabled={pending} onClick={() => void claim()} data-testid="button-confirm-claim">
+              {pending ? "Checking and claiming…" : error ? "Check wallet and retry" : "Claim special"}
+            </Button>
+            <Button asChild variant="outline" className="w-full"><Link href="/orders?view=deals">Check claimed deals</Link></Button>
+            <Button variant="ghost" className="w-full" disabled={pending} onClick={onClose}>Cancel</Button>
+          </div>
+        )}
+      </DialogContent>
+    </Dialog>
   );
 }
 

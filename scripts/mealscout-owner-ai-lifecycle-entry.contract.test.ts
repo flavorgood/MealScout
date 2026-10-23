@@ -28,13 +28,15 @@ const ownerDashboard = read("client/src/pages/restaurant-owner-dashboard.tsx");
 const ownerAi = read("client/src/pages/owner-ai-actions.tsx");
 const auth = read("client/src/hooks/useAuth.ts");
 
-for (const focus of ["profile", "media", "menu", "schedule"]) {
-  assert.match(
-    continuation,
-    new RegExp(`source: "onboarding",\\s+focus: "${focus}"`),
-    `Login continuation must preserve the ${focus} setup focus in AI Control`,
-  );
+for (const target of [
+  "/restaurant-owner-dashboard?setup=profile",
+  "/restaurant-owner-dashboard?setup=profile-media",
+  "/menu-builder",
+  "/restaurant-owner-dashboard?setup=schedule",
+]) {
+  assert.ok(continuation.includes(`continuationPath = "${target}";`), `Manual setup target must remain primary: ${target}`);
 }
+assert.doesNotMatch(continuation, /buildOwnerAiHref/);
 assert.match(
   continuation,
   /nextRequiredStep = "verification";[\s\S]*continuationPath = "\/restaurant-owner-dashboard\?setup=verification";/,
@@ -42,113 +44,39 @@ assert.match(
 );
 
 assert.equal(
-  signup.match(/setLocation\(ownerAiSetupHref\)/g)?.length,
+  signup.match(/setLocation\(resolveProgressiveBusinessSetupDestination\(signupAuthContext, manualSetupHref, createdRestaurant\?\.id\)\)/g)?.length,
   2,
-  "Both submitted and deferred verification handoffs must enter the same AI setup surface",
+  "Both submitted and deferred verification handoffs retain progressive context and manual setup",
 );
 for (const snippet of [
-  'source: "onboarding"',
-  'menuSource: menuSourceUrl',
-  'data-testid="owner-ai-onboarding-handoff"',
-  "Sign your favorite free or paid AI into MealScout",
-  "AI can apply and publish only after",
-  "explicitly approves that exact revision in the AI chat",
-]) {
-  assert.ok(
-    signup.includes(snippet) || read("client/src/copy/hostOnboarding.copy.ts").includes(snippet),
-    `Restaurant onboarding is missing: ${snippet}`,
-  );
-}
+  'const manualSetupHref = useMemo(',
+  'target.searchParams.set("restaurantId", createdRestaurant.id)',
+  'target.searchParams.set("menuSource", menuSourceUrl)',
+  'persistMenuImportDraft(createdRestaurant?.id || null)',
+]) assert.ok(signup.includes(snippet), `Restaurant onboarding must preserve: ${snippet}`);
+assert.doesNotMatch(signup, /ownerAiSetupHref|owner-ai-onboarding-handoff/);
 
 for (const [name, source, snippets] of [
-  [
-    "account setup",
-    accountSetup,
-    [
-      'data-testid="account-setup-owner-ai-introduction"',
-      "any free or paid AI",
-      "signing into MealScout",
-      "approves the exact revision",
-    ],
-  ],
-  [
-    "post-verification handoff",
-    postVerification,
-    [
-      'data-testid="post-verification-owner-ai-handoff"',
-      "AI-prepared setup",
-      "Owner approval",
-      "Sign your favorite AI into MealScout",
-    ],
-  ],
-  [
-    "public profile onboarding",
-    profileSetup,
-    [
-      "Use the AI you already have",
-      "Any free or paid AI can prepare your profile",
-      "the owner can consent in that chat",
-      "approve, apply, and publish it through MealScout",
-    ],
-  ],
-  [
-    "user profile hub",
-    profileHub,
-    [
-      'title: "AI Control"',
-      'source: "profile"',
-      "AI connections, notifications",
-    ],
-  ],
-  [
-    "account settings",
-    settings,
-    [
-      '<TabsTrigger value="ai"',
-      'data-testid="settings-owner-ai-entry"',
-      'source: "settings"',
-      "Only the actual owner can authorize an AI connection",
-      "AI can then",
-      "approve and publish that exact revision",
-      "Owner approves in chat",
-      "Connection readiness",
-    ],
-  ],
-  [
-    "business profile editor",
-    profileEditor,
-    [
-      'data-testid="owner-profile-ai-entry"',
-      "Update this profile with any AI",
-      "approve the exact revision in the AI chat",
-    ],
-  ],
-  [
-    "owner completion checklist",
-    ownerDashboard,
-    [
-      'data-testid="owner-ai-completion-entry"',
-      'source: "completion"',
-      "Finish with AI",
-      "ownsSelectedBusiness",
-    ],
-  ],
-  [
-    "AI onboarding destination",
-    ownerAi,
-    [
-      'data-testid="owner-ai-onboarding-entry"',
-      "Use any AI",
-      "Use manual tools",
-      "untrusted evidence",
-      "Nothing changes or publishes until",
-    ],
-  ],
+  ["business profile editor", profileEditor, [
+    'data-testid="owner-profile-ai-entry"',
+    "Update this profile with any AI",
+    "approve the exact revision in the AI chat",
+  ]],
+  ["optional AI destination", ownerAi, [
+    "Use any AI", "Use manual tools", "untrusted evidence",
+    "Nothing changes or publishes until",
+  ]],
 ] as const) {
-  for (const snippet of snippets) {
-    assert.ok(source.includes(snippet), `${name} is missing: ${snippet}`);
-  }
+  for (const snippet of snippets) assert.ok(source.includes(snippet), `${name} is missing: ${snippet}`);
 }
+for (const [name, source, promotion] of [
+  ["account setup", accountSetup, /account-setup-owner-ai-introduction/],
+  ["post-verification", postVerification, /post-verification-owner-ai-handoff/],
+  ["profile setup", profileSetup, /Use the AI you already have/],
+  ["profile hub", profileHub, /title: "AI Control"/],
+  ["settings", settings, /data-testid="settings-owner-ai-entry"/],
+  ["completion checklist", ownerDashboard, /owner-ai-completion-entry|Finish with AI/],
+] as const) assert.doesNotMatch(source, promotion, `${name} must not promote AI as the default setup surface`);
 
 assert.match(
   auth,
@@ -157,7 +85,7 @@ assert.match(
 );
 assert.match(
   settings,
-  /isScopedBusinessOwner\([\s\S]*ownsCurrentBusiness[\s\S]*Open AI Control/,
+  /isScopedBusinessOwner\([\s\S]*ownsCurrentBusiness/,
   "Settings must expose key management only through actual scoped ownership",
 );
 assert.match(

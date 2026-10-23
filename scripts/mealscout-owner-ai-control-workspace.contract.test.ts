@@ -31,8 +31,10 @@ assert.match(
   guestProtectedRoutes,
   /path="\/owner-ai" component=\{RedirectToLogin\}/,
 );
-assert.match(shell, /id: "ai"/);
-assert.match(shell, /href: buildWorkspaceHref\("\/owner-ai", business\.id\)/);
+assert.doesNotMatch(shell, /id: "ai"/);
+assert.doesNotMatch(shell, /href: buildWorkspaceHref\("\/owner-ai", business\.id\)/);
+assert.match(shell, /mobilePrimaryModuleIds[\s\S]*"overview",\s+"profile",\s+"menu",\s+"availability"/);
+assert.match(read("client/src/components/owner-profile-workspace.tsx"), /ownerAiHref \? \(/);
 assert.match(navigation, /currentPath === "\/owner-ai"/);
 assert.match(seo, /"\/owner-ai"/);
 assert.match(

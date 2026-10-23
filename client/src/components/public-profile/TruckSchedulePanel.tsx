@@ -37,7 +37,10 @@ function StopRow({ label, stop, isCurrent = false }: StopRowProps) {
   const timeLabel = stop.timeWindowLabel || null;
   const directionsHref =
     stop.directionsUrl ||
-    (stop.latitude && stop.longitude
+    (typeof stop.latitude === "number" && Number.isFinite(stop.latitude) &&
+     typeof stop.longitude === "number" && Number.isFinite(stop.longitude) &&
+     Math.abs(stop.latitude) <= 90 && Math.abs(stop.longitude) <= 180 &&
+     (stop.latitude !== 0 || stop.longitude !== 0)
       ? `https://maps.google.com/?q=${stop.latitude},${stop.longitude}`
       : null);
 
@@ -127,7 +130,7 @@ export function TruckSchedulePanel({
   const hasClosedSchedule = closedStops.length > 0;
 
   return (
-    <section aria-label="Truck schedule" className="space-y-3">
+    <section id="truck-schedule" aria-label="Truck schedule" className="scroll-mt-24 space-y-3">
       <div className="flex items-center justify-between">
         <p className="profile-section-label">
           Schedule
@@ -168,7 +171,10 @@ export function TruckSchedulePanel({
                 >
                   <CalendarDays className="mt-0.5 h-4 w-4 flex-none text-[color:var(--profile-accent)]" />
                   <div className="min-w-0">
-                    <p className="truncate text-sm font-medium text-[color:var(--profile-ink)]">
+                    {nextStop && stop.stopId === nextStop.stopId ? (
+                      <p className="profile-section-label text-[10px]">Next stop</p>
+                    ) : null}
+                    <p className="break-words text-sm font-medium text-[color:var(--profile-ink)]">
                       {stop.locationName ||
                         stop.addressPublicLabel ||
                         "Scheduled stop"}
@@ -178,6 +184,13 @@ export function TruckSchedulePanel({
                         .filter(Boolean)
                         .join(" · ")}
                     </p>
+                    {stop.directionsUrl ? (
+                      <a href={stop.directionsUrl} target="_blank" rel="noopener noreferrer"
+                        data-analytics-action="directions_click" data-analytics-target-type="truck_schedule"
+                        className="inline-flex min-h-11 items-center gap-1 text-xs font-semibold text-[#b93619] hover:text-[#8f2a14]">
+                        Get directions <ExternalLink className="h-3 w-3" />
+                      </a>
+                    ) : null}
                   </div>
                 </div>
               ))}

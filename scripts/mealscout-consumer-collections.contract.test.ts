@@ -40,7 +40,8 @@ for (const phrase of [
   assert(shell.includes(phrase), `Consumer collection shell must include: ${phrase}`);
 }
 
-assert(favorites.includes('queryKey: ["/api/favorites/restaurants"]'));
+assert(favorites.includes('queryKey: ["/api/favorites/restaurants", user?.id]'), "Saved cache must be scoped to the current account");
+assert(favorites.includes('apiRequest("GET", "/api/favorites/restaurants")'), "Cache identity must not become a different API endpoint");
 assert(favorites.includes("buildPublicProfilePath"));
 assert(favorites.includes('section="saved"'));
 assert(!favorites.includes("<Navigation"));

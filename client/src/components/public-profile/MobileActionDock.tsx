@@ -47,8 +47,11 @@ function isSelfProfileAction(cta: PublicCta, profileId?: string | null): boolean
   if (cta.type !== "internal") return false;
   const href = String(cta.href || "");
   const label = String(cta.label || "").trim().toLowerCase();
-  if (profileId && href.includes(String(profileId))) return true;
-  return label === "profile" || label === "details" || /\/(truck|restaurant|bar|cafe)\//.test(href);
+  // An internal action can legitimately contain this ID (for example the
+  // supplier catalog). Exclude actual profile routes, not every matching ID.
+  return label === "profile" || label === "details" ||
+    /^\/(truck|restaurant|bar|cafe|caterer|private-chef|location|supplier)\//.test(href) ||
+    /^\/p\//.test(href);
 }
 
 export function MobileActionDock({

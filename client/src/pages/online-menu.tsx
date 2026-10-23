@@ -99,6 +99,7 @@ interface Menu {
     cash: boolean;
   };
   categories: MenuCategory[];
+  uncategorizedItems?: MenuItem[];
 }
 
 interface OrderingReadiness {
@@ -204,6 +205,32 @@ function MenuView({ restaurantId }: { restaurantId: string }) {
 
   const selectedMenu = activeMenus.find((menu) => menu.id === requestedMenuId) ?? activeMenus[0] ?? null;
   const selectedMenuId = selectedMenu?.id ?? null;
+  const menuSections = (selectedMenu?.categories ?? []).map((category) => ({
+    key: `category:${category.id}`,
+    anchorId: `menu-category-${category.id}`,
+    name: category.name,
+    description: category.description,
+    items: category.items,
+  }));
+  const seenItemIds = new Set(
+    menuSections.flatMap((section) => section.items.map((item) => item.id)),
+  );
+  const uncategorizedItems = Array.isArray(selectedMenu?.uncategorizedItems)
+    ? selectedMenu.uncategorizedItems.filter((item) => {
+        if (seenItemIds.has(item.id)) return false;
+        seenItemIds.add(item.id);
+        return true;
+      })
+    : [];
+  if (uncategorizedItems.length > 0) {
+    menuSections.push({
+      key: "uncategorized",
+      anchorId: "menu-uncategorized-items",
+      name: "Other items",
+      description: null,
+      items: uncategorizedItems,
+    });
+  }
   const menuReadMessage = menuRecoveryMessage(menusQuery.error);
   const orderingEnabled = Boolean(selectedMenu?.orderingEnabled);
   const cardPaymentsEnabled = Boolean(selectedMenu?.paymentMethods?.card);
@@ -431,44 +458,44 @@ function MenuView({ restaurantId }: { restaurantId: string }) {
               </p>
             ) : null}
 
-            {selectedMenu.categories.length > 1 && (
+            {menuSections.length > 1 && (
               <nav
                 className="mb-6 flex gap-2 overflow-x-auto pb-1"
                 aria-label="Menu categories"
               >
-                {selectedMenu.categories.map((category) => (
+                {menuSections.map((section) => (
                   <a
-                    key={category.id}
-                    href={`#menu-category-${category.id}`}
+                    key={section.key}
+                    href={`#${section.anchorId}`}
                     className="inline-flex min-h-9 items-center whitespace-nowrap rounded-full border border-[color:var(--profile-border)] bg-white px-3 text-xs font-black text-[color:var(--profile-ink-soft)] hover:border-[color:var(--profile-accent)] hover:text-[color:var(--profile-accent)]"
                   >
-                    {category.name}
+                    {section.name}
                   </a>
                 ))}
               </nav>
             )}
 
-            {/* Category + items */}
-            {selectedMenu.categories.map((cat) => {
+            {/* Menu sections + items */}
+            {menuSections.map((section) => {
               return (
                 <section
-                  key={cat.id}
-                  id={`menu-category-${cat.id}`}
+                  key={section.key}
+                  id={section.anchorId}
                   className="mb-9 scroll-mt-24"
                 >
                   <div className="mb-4 border-b border-[color:var(--profile-border)] pb-3">
                     <h2 className="text-xl font-black tracking-tight text-[color:var(--profile-ink)]">
-                      {cat.name}
+                      {section.name}
                     </h2>
-                    {cat.description && (
+                    {section.description && (
                       <p className="mt-1 text-sm leading-6 text-[color:var(--profile-muted)]">
-                        {cat.description}
+                        {section.description}
                       </p>
                     )}
                   </div>
-                  {cat.items.length > 0 ? (
+                  {section.items.length > 0 ? (
                     <div className="grid gap-3 sm:grid-cols-2">
-                      {cat.items.map((item) => (
+                      {section.items.map((item) => (
                         <MenuItemCard
                           key={item.id}
                           item={item}

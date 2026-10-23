@@ -178,6 +178,12 @@ export default function OwnerProfileWorkspace({
   ) => onDraftChange({ ...draft, [key]: value });
 
   const location = [draft.city, draft.state].filter(Boolean).join(", ");
+  // Keep the same selected business as the existing manual photos continuation.
+  const scheduleUrl = new URL(photosHref, "https://www.mealscout.us");
+  const selectedBusinessId = scheduleUrl.searchParams.get("restaurantId");
+  const scheduleHref = selectedBusinessId
+    ? `/parking-pass?setup=schedule&truckId=${encodeURIComponent(selectedBusinessId)}`
+    : "/restaurant-owner-dashboard?setup=schedule";
   const customerPhotos = gallery.filter((media) => {
     const category = String(media.category || "").toLowerCase();
     const source = String(media.source || "").toLowerCase();
@@ -581,6 +587,11 @@ export default function OwnerProfileWorkspace({
                 </p>
               </div>
             </div>
+            {isFoodTruck ? (
+              <Link href={scheduleHref} className="mb-4 inline-flex min-h-11 items-center rounded-xl border border-orange-200 bg-orange-50 px-4 text-sm font-bold text-orange-900">
+                Add a dated stop manually
+              </Link>
+            ) : null}
             <div className="grid gap-4 sm:grid-cols-2">
               <div className="sm:col-span-2">
                 <FieldLabel

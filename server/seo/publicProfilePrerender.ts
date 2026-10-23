@@ -69,8 +69,8 @@ type PrerenderPage = {
   links: PageLink[];
   body: string[];
   listingHtml?: string;
-  // Only restaurantPage sets this after current native public eligibility checks.
-  appProfile?: { id: string; profileType: "restaurant" | "truck" | "bar" | "caterer" | "private_chef" };
+  // Native profile loaders set this only after current public eligibility checks.
+  appProfile?: { id: string; profileType: "restaurant" | "truck" | "bar" | "caterer" | "private_chef" | "location" | "supplier" };
   selectiveIntelligence?: {
     manifestUrl: string;
     mcpUrl: string;
@@ -921,6 +921,7 @@ async function hostPage(baseUrl: string, hostId: string) {
     title: `${name} Food Truck Location${cityState ? ` in ${cityState}` : ""} | MealScout`,
     description,
     canonicalPath,
+    appProfile: { id: row.id, profileType: "location" },
     imageUrl: image,
     robots: hostIndexable
       ? PUBLIC_RESTAURANT_INDEXABLE_ROBOTS
@@ -932,7 +933,7 @@ async function hostPage(baseUrl: string, hostId: string) {
       ...videoSchemas(baseUrl, videos, name),
     ],
     links: [
-      { label: "Open location", href: canonicalPath },
+      { label: "Open profile", href: `${canonicalPath}?view=app` },
       ...(canonicalCity
         ? [{
             label: `Food in ${canonicalCity.name}`,
@@ -1323,11 +1324,13 @@ async function supplierPage(baseUrl: string, supplierId: string) {
     title: `${name}${cityState ? ` in ${cityState}` : ""} | MealScout Supplier`,
     description,
     canonicalPath,
+    appProfile: { id: row.id, profileType: "supplier" },
     imageUrl: publicProfile.logoUrl || defaultSocialImagePath,
     robots: isSyntheticTestEntity ? noindexRobots : indexableRobots,
     schema: [profilePageSchema, supplierSchema, breadcrumbSchema],
     links: [
-      { label: "Open supplier", href: canonicalPath },
+      { label: "Open profile", href: `${canonicalPath}?view=app` },
+      { label: "Browse catalog", href: `/suppliers/${encodeURIComponent(row.id)}?view=app` },
       { label: "Browse suppliers", href: "/suppliers" },
       ...(canonicalCity
         ? [{
@@ -1456,10 +1459,14 @@ export function registerPublicProfilePrerenderRoutes(
   loadLanding: typeof loadPublicSeoLandingData = loadPublicSeoLandingData,
   dependencies: {
     restaurantPage?: typeof restaurantPage;
+    hostPage?: typeof hostPage;
+    supplierPage?: typeof supplierPage;
     sendPage?: typeof sendPage;
   } = {},
 ) {
   const loadRestaurantPage = dependencies.restaurantPage || restaurantPage;
+  const loadHostPage = dependencies.hostPage || hostPage;
+  const loadSupplierPage = dependencies.supplierPage || supplierPage;
   const renderPage = dependencies.sendPage || sendPage;
   app.get(PUBLIC_PROFILE_STYLES_PATH, (_req, res) => {
     res.setHeader("Content-Type", "text/css; charset=utf-8");
@@ -1469,11 +1476,12 @@ export function registerPublicProfilePrerenderRoutes(
   });
   const canonicalAppTarget = (req: Request, page: PrerenderPage, expectedType: NonNullable<PrerenderPage["appProfile"]>["profileType"], id: string) => {
     const routeKind = expectedType === "private_chef" ? "private-chef" : expectedType;
-    const match = /^\/(restaurant|truck|bar|caterer|private-chef)\/([^/?#\\\s]+)$/.exec(page.canonicalPath);
+    const match = /^\/(restaurant|truck|bar|caterer|private-chef|location|supplier)\/([^/?#\\\s]+)$/.exec(page.canonicalPath);
     if (!page.appProfile || page.appProfile.id !== id || page.appProfile.profileType !== expectedType || !match || match[1] !== routeKind) return false;
     let slug: string;
     try { slug = decodeURIComponent(match[2]); } catch { return false; }
-    return slug.includes("--") && extractId(slug) === id && req.path === page.canonicalPath;
+    const isSupplierCatalog = expectedType === "supplier" && req.path === `/suppliers/${encodeURIComponent(id)}`;
+    return slug.includes("--") && extractId(slug) === id && (req.path === page.canonicalPath || isSupplierCatalog);
   };
   const appViewUrl = (req: Request, canonicalPath: string) => {
     const attribution = legacyCityDealRedirectQuery(req);
@@ -1497,23 +1505,27 @@ export function registerPublicProfilePrerenderRoutes(
         | "truck"
         | "bar"
         | "caterer"
-        | "private_chef",
+        | "private_chef"
+        | "location"
+        | "supplier",
       idFromRequest: (req: Request) => string,
     ) =>
     async (req: Request, res: Response, next: NextFunction) => {
       try {
         const id = idFromRequest(req);
-        const expected = await loadRestaurantPage(
-          canonicalBaseUrl,
-          id,
-          expectedProfileType,
-        );
+        const expected: PrerenderPage | null = expectedProfileType === "location"
+          ? await loadHostPage(canonicalBaseUrl, id)
+          : expectedProfileType === "supplier"
+            ? await loadSupplierPage(canonicalBaseUrl, id)
+            : await loadRestaurantPage(canonicalBaseUrl, id, expectedProfileType);
         if (expected) {
           if (canonicalAppTarget(req, expected, expectedProfileType, id)) {
             const incoming = new URL(req.originalUrl || req.url, canonicalBaseUrl);
             const views = incoming.searchParams.getAll("view");
             if (views.length === 1 && views[0] === "app") {
-              const safeTarget = appViewUrl(req, expected.canonicalPath);
+              const appPath = expectedProfileType === "supplier" && req.path === `/suppliers/${encodeURIComponent(id)}`
+                ? req.path : expected.canonicalPath;
+              const safeTarget = appViewUrl(req, appPath);
               res.setHeader("Cache-Control", "no-store");
               if (incoming.pathname + incoming.search !== safeTarget) return res.redirect(308, safeTarget);
               const discovery = [`<${absoluteUrl(canonicalBaseUrl, expected.canonicalPath)}>; rel="canonical"`];
@@ -1532,7 +1544,8 @@ export function registerPublicProfilePrerenderRoutes(
           return renderPage(canonicalBaseUrl, res, expected);
         }
 
-        const current = await loadRestaurantPage(canonicalBaseUrl, id);
+        const current = expectedProfileType === "location" || expectedProfileType === "supplier"
+          ? null : await loadRestaurantPage(canonicalBaseUrl, id);
         if (current) {
           return safeCanonicalRedirect(req, res, current);
         }
@@ -1654,7 +1667,7 @@ export function registerPublicProfilePrerenderRoutes(
   });
   app.get(
     "/location/:slug",
-    gate((req) => hostPage(canonicalBaseUrl, extractId(req.params.slug))),
+    canonicalRestaurantGate("location", (req) => extractId(req.params.slug)),
   );
   const eventDetailGate = gate((req) =>
     eventPage(canonicalBaseUrl, extractId(req.params.slug)),
@@ -1702,12 +1715,9 @@ export function registerPublicProfilePrerenderRoutes(
     ["/jobs/:jobId", "/jobs/:jobId/:jobSlug"],
     gate((req) => jobPage(canonicalBaseUrl, extractId(req.params.jobId))),
   );
-  const supplierDetailGate = gate((req) =>
-      supplierPage(
-        canonicalBaseUrl,
-        extractId(req.params.slug || req.params.supplierId),
-      ),
-    );
+  const supplierDetailGate = canonicalRestaurantGate(
+    "supplier", (req) => extractId(req.params.slug || req.params.supplierId),
+  );
   app.get("/suppliers/:supplierId", supplierDetailGate);
   app.get(
     "/supplier/:slug",
@@ -1715,7 +1725,7 @@ export function registerPublicProfilePrerenderRoutes(
       if (String(req.params.slug || "").trim().toLowerCase() === "dashboard") {
         return next();
       }
-      return supplierDetailGate(req, res);
+      return supplierDetailGate(req, res, next);
     },
   );
   app.get(

@@ -148,9 +148,9 @@ export function registerDealDiscoveryRoutes(
   app.get("/api/deals/nearby/:lat/:lng", async (req, res) => {
     try {
       res.setHeader("Cache-Control", "no-store");
-      const lat = parseFloat(req.params.lat);
-      const lng = parseFloat(req.params.lng);
-      const radius = parseFloat(req.query.radius as string) || 5;
+      const lat = Number(req.params.lat);
+      const lng = Number(req.params.lng);
+      const radius = req.query.radius == null ? 5 : Number(req.query.radius);
       if (
         !Number.isFinite(lat) ||
         !Number.isFinite(lng) ||
@@ -165,11 +165,13 @@ export function registerDealDiscoveryRoutes(
       }
 
       res.json(
-        await projectAccessibleDeals((await storage.getActiveDeals()) as any[], {
+        (await projectAccessibleDeals((await storage.getActiveDeals({
+          userLat: lat, userLng: lng, radiusKm: radius,
+        })) as any[], {
           userLat: lat,
           userLng: lng,
           radiusKm: radius,
-        }),
+        })).slice(0, 50),
       );
     } catch (error) {
       console.error("Error fetching nearby deals:", error);
@@ -191,15 +193,21 @@ export function registerDealDiscoveryRoutes(
         sortBy = "relevance",
       } = req.query;
 
-      const userLat = lat ? parseFloat(lat as string) : undefined;
-      const userLng = lng ? parseFloat(lng as string) : undefined;
-      const radiusKm = parseFloat(radius as string);
-      const hasLocation = Number.isFinite(userLat) && Number.isFinite(userLng);
+      const hasLocation = lat != null || lng != null;
+      const userLat = lat == null || String(lat).trim() === "" ? undefined : Number(lat);
+      const userLng = lng == null || String(lng).trim() === "" ? undefined : Number(lng);
+      const radiusKm = Number(radius);
+      if (hasLocation && (
+        !Number.isFinite(userLat) || !Number.isFinite(userLng) ||
+        Math.abs(Number(userLat)) > 90 || Math.abs(Number(userLng)) > 180 ||
+        !Number.isFinite(radiusKm) || radiusKm <= 0
+      )) return res.status(400).json({ message: "Invalid coordinates or radius" });
+      const scope = hasLocation
+        ? { userLat: Number(userLat), userLng: Number(userLng), radiusKm }
+        : undefined;
       let publicDeals = await projectAccessibleDeals(
-        (await storage.getActiveDeals()) as any[],
-        hasLocation
-          ? { userLat, userLng, radiusKm }
-          : {},
+        (await storage.getActiveDeals(scope)) as any[],
+        scope || {},
       );
       const searchTerm = String(query || "").trim().toLowerCase();
       if (searchTerm) {
@@ -256,7 +264,7 @@ export function registerDealDiscoveryRoutes(
             new Date(a.createdAt || 0).getTime(),
         );
       }
-      res.json(publicDeals);
+      res.json(publicDeals.slice(0, 50));
     } catch (error) {
       console.error("Error searching deals:", error);
       res.status(500).json({ message: "Failed to search deals" });

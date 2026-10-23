@@ -3,6 +3,7 @@ import { z } from "zod";
 
 import { storage } from "../storage";
 import { isAuthenticated } from "../unifiedAuth";
+import { createDealClaimHandler } from "./dealClaimHandler";
 
 type ClaimRouteDependencies = {
   sendDealClaimedNotification: (
@@ -64,67 +65,7 @@ export function registerClaimRoutes(
   app.post(
     "/api/deals/:dealId/claim",
     isAuthenticated,
-    async (req: any, res) => {
-      try {
-        const dealId = req.params.dealId;
-        const userId = req.user.id;
-
-        const deal = await storage.getDeal(dealId);
-        if (!deal) {
-          return res.status(404).json({ message: "Deal not found" });
-        }
-
-        const restaurant = await storage.getRestaurant(deal.restaurantId);
-        if (!restaurant) {
-          return res.status(404).json({ message: "Restaurant not found" });
-        }
-
-        const claimResult = await storage.claimDealAtomic(
-          dealId,
-          userId,
-          deal.perCustomerLimit || 1,
-        );
-        if (!claimResult.ok) {
-          return res.status(400).json({
-            message:
-              claimResult.reason === "already_claimed"
-                ? "Deal already claimed by user"
-                : "Deal is no longer available",
-          });
-        }
-        const claim = claimResult.claim;
-
-        try {
-          await sendDealClaimedNotification(dealId, userId);
-        } catch (emailError) {
-          console.error(
-            "Failed to send deal claimed notification:",
-            emailError,
-          );
-        }
-
-        const facebookMessage = `🍽️ Just claimed an amazing deal at ${
-          restaurant.name
-        }!\n\n${deal.title}\n${deal.discountValue}% OFF (Min order: $${
-          deal.minOrderAmount || "15"
-        })\n\nFound this through MealScout - check it out! #MealScout #FoodDeals`;
-
-        res.json({
-          success: true,
-          claimId: claim.id,
-          dealTitle: deal.title,
-          restaurantName: restaurant.name,
-          restaurantAddress: restaurant.address,
-          facebookPostData: {
-            message: facebookMessage,
-            place: (restaurant as any).facebookPlaceId || undefined,
-          },
-        });
-      } catch (error: any) {
-        console.error("Error claiming deal:", error);
-        res.status(500).json({ message: "Failed to claim deal" });
-      }
-    },
+    createDealClaimHandler(storage, sendDealClaimedNotification),
   );
 
   app.get(

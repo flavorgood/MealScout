@@ -23,9 +23,20 @@ if (!hasStaticPassThrough) {
   throw new Error("vercel.json must preserve /static/* as static assets before SPA fallback");
 }
 
-const spaFallbackRule = rewrites.find((rule) => rule.destination === "/index.html");
-if (!spaFallbackRule?.source || !spaFallbackRule.source.includes("(?!assets/|static/)")) {
+// Exact app routes (for example /deals/featured) also use index.html. Select
+// the catch-all by its path parameter, then test its matching behavior.
+const spaFallbackRule = rewrites.find(
+  (rule) => rule.destination === "/index.html" && rule.source?.startsWith("/:path("),
+);
+if (!spaFallbackRule?.source?.endsWith(")")) {
+  throw new Error("vercel.json must include the parameterized SPA fallback");
+}
+const spaFallback = new RegExp(`^/(?:${spaFallbackRule.source.slice(7, -1)})$`);
+if (["/assets/missing.js", "/static/missing.css"].some((path) => spaFallback.test(path))) {
   throw new Error("SPA fallback must explicitly exclude /assets and /static paths");
+}
+if (!["/scout", "/restaurant/example", "/caterer/example"].every((path) => spaFallback.test(path))) {
+  throw new Error("SPA fallback must preserve ordinary app routes after explicit proxy rules");
 }
 
 const filesystemHandleIndex = routes.findIndex((rule) => rule.handle === "filesystem");

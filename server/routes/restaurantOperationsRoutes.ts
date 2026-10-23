@@ -900,7 +900,9 @@ export function registerRestaurantOperationsRoutes(
         const updatedRestaurant = await withLockedRestaurantSettings(
           restaurantId,
           async (tx, lockedRestaurant) => {
-            if (parsed.isActive === true && lockedRestaurant.isVerified !== true) {
+            // Saving an already-public listing is not a new publication. Keep the
+            // claimed/verified gate on the hidden -> public transition only.
+            if (parsed.isActive === true && lockedRestaurant.isActive !== true && lockedRestaurant.isVerified !== true) {
               throw Object.assign(
                 new Error("Only a verified claimed profile can be published"),
                 { statusCode: 409 },
@@ -940,9 +942,11 @@ export function registerRestaurantOperationsRoutes(
           "Restaurant profile basics update failed",
           safePersistenceErrorContext(error),
         );
-        res.status(400).json({
-          message:
-            error instanceof z.ZodError
+        const publicationBlocked = asRecord(error).statusCode === 409;
+        res.status(publicationBlocked ? 409 : 400).json({
+          message: publicationBlocked
+            ? "Only a verified claimed profile can be published"
+            : error instanceof z.ZodError
               ? "Invalid business profile fields"
               : "Failed to update business profile",
         });
@@ -2823,7 +2827,7 @@ export function registerRestaurantOperationsRoutes(
         const whereClauses = [
           eq(requestLogs.surface, "public_profile"),
           eq(requestLogs.entityId, String(restaurantId)),
-          inArray(requestLogs.entityType, ["restaurant", "truck", "bar"]),
+          inArray(requestLogs.entityType, ["restaurant", "truck", "bar", "caterer", "private_chef"]),
           inArray(requestLogs.eventType, ["profile_view", "profile_action", "qr_open"]),
         ] as any[];
         if (startDate) whereClauses.push(gte(requestLogs.createdAt, startDate));
@@ -2966,7 +2970,7 @@ export function registerRestaurantOperationsRoutes(
         const baseWhere = [
           eq(requestLogs.surface, "public_profile"),
           eq(requestLogs.entityId, String(restaurantId)),
-          inArray(requestLogs.entityType, ["restaurant", "truck", "bar"]),
+          inArray(requestLogs.entityType, ["restaurant", "truck", "bar", "caterer", "private_chef"]),
           inArray(requestLogs.eventType, ["profile_view", "profile_action", "qr_open"]),
         ] as any[];
 

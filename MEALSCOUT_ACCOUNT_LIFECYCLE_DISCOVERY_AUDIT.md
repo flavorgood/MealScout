@@ -34,7 +34,7 @@ Guest users can enter through discovery with `?ref` and then move through signup
 | --- | --- | --- |
 | `/customer-signup?role=diner` | Customer | Legacy URL alias maps to the Customer signup card. It submits `accountType: "customer"` through `/api/auth/customer/register`; there is no backend diner user type. |
 | `/customer-signup?role=business&businessType=restaurant` | Restaurant | Business signup redirects to `/restaurant-signup` and uses `/api/auth/restaurant/register`; continuation is restaurant owner setup. |
-| `/customer-signup?role=business&businessType=food_truck` | Food Truck | Business signup redirects to `/restaurant-signup?businessType=food_truck`; after the truck is attached, incomplete setup continues through owner-scoped `/owner-ai?...&src=onboarding&focus=schedule`, with the manual schedule workspace still available. |
+| `/customer-signup?role=business&businessType=food_truck` | Food Truck | Business signup redirects to `/restaurant-signup?businessType=food_truck`; after the truck is attached, incomplete schedule setup continues through `/restaurant-owner-dashboard?setup=schedule` with the selected business context. |
 | `/customer-signup?role=business&businessType=bar` | Bar | Business signup uses the existing restaurant owner account path with business subtype metadata. |
 | `/customer-signup?role=business&businessType=caterer` | Caterer | Business signup uses the existing restaurant owner account path with business subtype metadata. |
 | `/customer-signup?role=business&businessType=private_chef` | Private Chef | Business signup uses the existing restaurant owner account path with business subtype metadata. |
@@ -77,8 +77,8 @@ Public profile URLs expose business discovery surfaces, not account ownership. A
 Existing continuation targets are:
 
 - Customers return to discovery/customer dashboard surfaces such as `/scout` or `/dashboard`.
-- Restaurant owners use `/owner-ai?restaurantId=...&src=onboarding&focus=...` as the primary incomplete profile, media, menu, or schedule continuation after a business is attached. The manual `/restaurant-owner-dashboard?setup=...` and `/menu-builder` workspaces remain available.
-- Food truck schedule-required continuation uses owner-scoped `/owner-ai?...&focus=schedule`; business-document verification remains `/restaurant-owner-dashboard?setup=verification`.
+- Restaurant owners continue incomplete profile and media setup through `/restaurant-owner-dashboard?setup=profile` and `/restaurant-owner-dashboard?setup=profile-media`, menu setup through `/menu-builder`, and schedule setup through `/restaurant-owner-dashboard?setup=schedule`. The selected business context is retained. AI remains an optional action inside the profile editor.
+- Food truck schedule-required continuation uses `/restaurant-owner-dashboard?setup=schedule` with the selected business context; business-document verification remains `/restaurant-owner-dashboard?setup=verification`.
 - Hosts use `/host/dashboard`.
 - Event organizers use `/event-coordinator/dashboard?setup=onboarding`.
 - Suppliers use `/supplier/dashboard`.
@@ -109,7 +109,7 @@ Setup context such as `?setup=schedule` on a manual workspace or `?src=onboardin
 
 ## Blessed Berry Isolation Boundary
 
-The Blessed Berry class of failure is a routing-context isolation issue, not a role-repair issue. Schedule-required `food_truck` users continue to owner-scoped `/owner-ai?...&focus=schedule`, with `/restaurant-owner-dashboard?setup=schedule` retained as the manual fallback. `food_truck` users must not be routed into host-only `/parking-pass-manage`, and host rows must not be created to repair truck routing.
+The Blessed Berry class of failure is a routing-context isolation issue, not a role-repair issue. Schedule-required `food_truck` users continue to `/restaurant-owner-dashboard?setup=schedule` with the selected business context. `food_truck` users must not be routed into host-only `/parking-pass-manage`, and host rows must not be created to repair truck routing.
 
 ## Multi-Role And Admin Context
 

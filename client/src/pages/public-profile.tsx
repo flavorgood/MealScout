@@ -630,6 +630,8 @@ function LocationNowSection({ profile }: { profile: PublicLocationProfile }) {
   const now = Number(profile.foodTrucksNow || 0);
   const tonight = Number(profile.foodTrucksTonight || 0);
   const upcoming = Number(profile.upcomingFoodTruckSlots || 0);
+  const hasReportedCounts = [profile.foodTrucksNow, profile.foodTrucksTonight, profile.upcomingFoodTruckSlots]
+    .some((value) => typeof value === "number" && Number.isFinite(value));
   const hasAny = now > 0 || tonight > 0 || upcoming > 0;
 
   return (
@@ -665,7 +667,8 @@ function LocationNowSection({ profile }: { profile: PublicLocationProfile }) {
           </div>
         ) : (
           <div className="rounded-lg border border-white/10 bg-black/20 p-4 text-sm text-white/75">
-            No trucks listed right now. Check back soon.
+            {hasReportedCounts ? "No trucks listed right now. Check back soon."
+              : "See posted truck schedules below. Confirm service details with the truck before traveling."}
           </div>
         )}
       </CardContent>
@@ -681,7 +684,7 @@ function QuickActionRow({
   safeCtas: PublicCta[];
 }) {
   const actions = pickActionCtas(profile, safeCtas, 16)
-    .filter((cta) => cta.type !== "share" && cta.type !== "internal")
+    .filter((cta) => cta.type !== "share")
     .slice(0, 7);
   if (actions.length === 0) return null;
   const headerLabel = actions.some(
@@ -1112,7 +1115,7 @@ function LocationTruckOptionsSection({
   profile: PublicLocationProfile;
 }) {
   const hostId = String(profile.id || "").trim();
-  const { data: nowData, isLoading: nowLoading } =
+  const { data: nowData, isLoading: nowLoading, isError: nowError, refetch: retryNow } =
     useQuery<LocationDiscoveryPayload>({
       queryKey: ["/api/public/discovery/location", hostId, "now"],
       enabled: Boolean(hostId),
@@ -1122,12 +1125,14 @@ function LocationTruckOptionsSection({
             `/api/public/discovery/location/${encodeURIComponent(hostId)}/time/now`,
           ),
         );
-        if (!res.ok) return { totalTrucks: 0, trucks: [] };
-        return res.json();
+        if (!res.ok) throw new Error("Current truck availability is unavailable");
+        const payload = await res.json();
+        if (!Array.isArray(payload?.trucks)) throw new Error("Current truck availability is unavailable");
+        return payload;
       },
     });
 
-  const { data: tonightData, isLoading: tonightLoading } =
+  const { data: tonightData, isLoading: tonightLoading, isError: tonightError, refetch: retryTonight } =
     useQuery<LocationDiscoveryPayload>({
       queryKey: ["/api/public/discovery/location", hostId, "tonight"],
       enabled: Boolean(hostId),
@@ -1137,13 +1142,15 @@ function LocationTruckOptionsSection({
             `/api/public/discovery/location/${encodeURIComponent(hostId)}/time/tonight`,
           ),
         );
-        if (!res.ok) return { totalTrucks: 0, trucks: [] };
-        return res.json();
+        if (!res.ok) throw new Error("Tonight's truck availability is unavailable");
+        const payload = await res.json();
+        if (!Array.isArray(payload?.trucks)) throw new Error("Tonight's truck availability is unavailable");
+        return payload;
       },
     });
 
-  const nowTrucks = Array.isArray(nowData?.trucks) ? nowData!.trucks! : [];
-  const tonightTrucks = Array.isArray(tonightData?.trucks)
+  const nowTrucks = !nowError && Array.isArray(nowData?.trucks) ? nowData!.trucks! : [];
+  const tonightTrucks = !tonightError && Array.isArray(tonightData?.trucks)
     ? tonightData!.trucks!
     : [];
 
@@ -1154,6 +1161,7 @@ function LocationTruckOptionsSection({
 
   const hasCards = nowTrucks.length > 0 || tonightOnly.length > 0;
   const loading = nowLoading || tonightLoading;
+  const unavailable = nowError || tonightError;
   const featuredCurrent = nowTrucks.length > 0 ? nowTrucks[0] : null;
   const remainingCurrent = nowTrucks.length > 1 ? nowTrucks.slice(1) : [];
 
@@ -1250,7 +1258,7 @@ function LocationTruckOptionsSection({
   };
 
   return (
-    <Card className="border-white/10 bg-[#0f0d0b]">
+    <Card className="border-white/10 bg-[#0f0d0b]" data-location-truck-options>
       <CardHeader>
         <CardTitle className="text-xl text-white">Food options here</CardTitle>
       </CardHeader>
@@ -1303,7 +1311,17 @@ function LocationTruckOptionsSection({
           </div>
         ) : null}
 
-        {!loading && !hasCards ? (
+        {unavailable ? (
+          <div role="alert" className="rounded-lg border border-orange-400/25 bg-black/20 p-4 text-sm text-white/75">
+            <p>Truck availability could not be loaded. Try again for the latest food options.</p>
+            <Button type="button" variant="outline" className="mt-3" onClick={() => {
+              if (nowError) void retryNow();
+              if (tonightError) void retryTonight();
+            }}>Retry truck availability</Button>
+          </div>
+        ) : null}
+
+        {!loading && !unavailable && !hasCards ? (
           <div className="rounded-lg border border-white/10 bg-black/20 p-4 text-sm text-white/75">
             <p>No trucks listed right now.</p>
             <p className="mt-1">Check back soon or explore nearby food.</p>
@@ -1318,9 +1336,7 @@ function LocationMapSection({ profile }: { profile: PublicLocationProfile }) {
   const hasCoords =
     typeof profile.latitude === "number" &&
     typeof profile.longitude === "number";
-  const mapHref = hasCoords
-    ? `https://maps.google.com/?q=${profile.latitude},${profile.longitude}`
-    : null;
+  const mapHref = profile.cta.find((action) => action.safe && action.type === "map")?.href || null;
 
   return (
     <Card className="border-white/10 bg-[#0f0d0b]">
@@ -3029,6 +3045,9 @@ export default function PublicProfilePage() {
         className="mealscout-public-profile flex min-h-screen items-center justify-center px-4"
         data-testid={unavailable ? "public-profile-unavailable" : "public-profile-not-found"}
       >
+        <SEOHead title="Profile unavailable | MealScout"
+          description="This profile is unavailable or could not be loaded. Return to Scout or retry the profile."
+          canonicalUrl={`https://www.mealscout.us${pathname}`} noIndex />
         <div className="profile-surface w-full max-w-lg rounded-[1.75rem] p-6 text-center sm:p-8">
           <p className="profile-section-label">MealScout</p>
           <h1 className="mt-2 text-3xl font-black tracking-tight text-[color:var(--profile-ink)]">
@@ -3060,12 +3079,9 @@ export default function PublicProfilePage() {
     data.seo?.seoDescription ||
     data.description ||
     "Find local food coverage, public menus, and posted schedule details on MealScout.";
-  const canonicalUrl =
-    (resolvedCleanBusinessPath && typeof window !== "undefined"
-      ? new URL(resolvedCleanBusinessPath, window.location.origin).toString()
-      : null) ||
-    data.seo?.canonicalUrl ||
-    data.canonicalUrl;
+  // The server owns canonical identity for clean, typed and affiliate aliases.
+  // Rebuilding from the viewing host creates preview-port and alias duplicates.
+  const canonicalUrl = data.seo?.canonicalUrl || data.canonicalUrl;
   const citySlug =
     String((data as any).citySlug || "").trim() ||
     slugifySeoTerm(data.city) ||
@@ -3114,6 +3130,26 @@ export default function PublicProfilePage() {
         canonicalUrl={canonicalUrl}
         ogType="profile"
         ogImage={ogImage}
+        schemaData={{
+          "@context": "https://schema.org",
+          "@type": "WebPage",
+          "@id": `${canonicalUrl}#webpage`,
+          name: data.displayName,
+          url: canonicalUrl,
+          mainEntity: {
+            "@type": data.profileType === "restaurant" ? "Restaurant"
+              : data.profileType === "truck" ? "FoodTruck"
+              : data.profileType === "bar" ? "BarOrPub"
+              : data.profileType === "caterer" || data.profileType === "private_chef" ? "FoodEstablishment"
+              : "LocalBusiness",
+            "@id": `${canonicalUrl}#${data.profileType === "location" ? "location" : data.profileType === "supplier" ? "supplier" : "business"}`,
+            name: data.displayName,
+            url: canonicalUrl,
+            image: new URL(ogImage, canonicalUrl).toString(),
+            ...(data.addressPublicLabel ? { address: data.addressPublicLabel } : {}),
+            ...(phoneLine(data) ? { telephone: phoneLine(data) } : {}),
+          },
+        }}
       />
 
       <header className="sticky top-0 z-40 border-b border-[color:var(--profile-border)] bg-[#fffaf4]/92 backdrop-blur-xl">
@@ -3294,6 +3330,9 @@ export default function PublicProfilePage() {
             /* ── SUPPLIER PROFILE LAYOUT ── */
             <>
               <HeroBlock profile={data} />
+              <div className="hidden md:block">
+                <QuickActionRow profile={data} safeCtas={safeCtas} />
+              </div>
               <Card className="border-white/10 bg-[#0f0d0b]">
                 <CardHeader>
                   <CardTitle className="text-xl text-white">
