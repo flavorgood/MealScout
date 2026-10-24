@@ -1,5 +1,5 @@
 import type { Request, Response } from "express";
-import type { PublicMenuPageFacts } from "../../shared/publicMenuPage";
+import { publicMenuPageMetadata, type PublicMenuPageFacts } from "../../shared/publicMenuPage";
 import { renderMenuHtml } from "./menuHtml";
 
 export type PublicMenuLoader = (restaurantId: string) => Promise<PublicMenuPageFacts | null>;
@@ -17,9 +17,13 @@ export async function renderPublicMenuDocument(req: Request, res: Response, temp
     status = 503;
   }
   const noIndex = /noindex/i.test(String(res.getHeader("X-Robots-Tag") || ""));
+  const metadata = publicMenuPageMetadata(restaurantId, payload);
+  // The earlier generic tracking middleware retains functional parameters in
+  // its Link canonical. Menu variants share the clean entity canonical.
+  res.setHeader("Link", `<${new URL(metadata.canonicalPath, canonicalBaseUrl).toString()}>; rel="canonical"`);
   res.vary("Accept");
   res.vary("User-Agent");
   res.setHeader("Cache-Control", "private, no-store");
-  if (status !== 200) res.setHeader("X-Robots-Tag", "noindex, nofollow");
+  if ((status !== 200 || metadata.noIndex) && !noIndex) res.setHeader("X-Robots-Tag", "noindex, nofollow");
   return { html: renderMenuHtml(template, canonicalBaseUrl, req.originalUrl, restaurantId, payload, status, noIndex), status };
 }

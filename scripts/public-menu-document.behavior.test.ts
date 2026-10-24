@@ -18,7 +18,13 @@ fs.writeFileSync(path.join(directory, "index.html"), template);
 let failing = false;
 const reads: string[] = [];
 const app = express();
-app.use((req, res, next) => { if (req.get("Host") === "preview.example.test") res.setHeader("X-Robots-Tag", "noindex, nofollow, noarchive"); next(); });
+app.use((req, res, next) => {
+  if (req.get("Host") === "preview.example.test") res.setHeader("X-Robots-Tag", "noindex, nofollow, noarchive");
+  // Existing generic tracking middleware's output, independently reproduced
+  // from native index.ts: the menu document must reconcile this Link header.
+  if (req.query.ref) res.setHeader("Link", `<https://www.mealscout.us/menu/${id}?menuId=dinner>; rel="canonical"`);
+  next();
+});
 serveStatic(app, { distPath: directory, loadPublicMenu: async key => {
   reads.push(key);
   if (failing) throw new Error("Synthetic data failure: private diagnostic must not appear");
@@ -58,6 +64,7 @@ test("actual static/menu document pipeline serves identical native public facts 
 test("functional menu selection changes raw facts, preserves attribution links and keeps a clean canonical", async () => {
   const result = await get(`/menu/${id}?menuId=dinner&ref=synthetic&returnTo=%2Fbar%2Ftest--${id}`);
   assert.equal(result.status, 200);
+  assert.equal(result.headers.get("link"), `<https://www.mealscout.us/menu/${id}>; rel="canonical"`);
   assert.ok(result.html.includes("Synthetic dinner plate"));
   assert.ok(!result.html.includes("Synthetic lunch plate"));
   assert.ok(result.html.includes("$0.00"));
