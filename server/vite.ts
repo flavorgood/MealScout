@@ -7,6 +7,13 @@ import { nanoid } from "nanoid";
 import { guardUnauthenticatedProtectedHtml } from "./seo/protectedHtmlRoutes";
 import { renderHomepageHtml } from "./seo/homepageHtml";
 import { isHomepageDocumentRequest } from "./seo/rootEntry";
+import { publicMenuDocumentId } from "./seo/menuHtml";
+import { renderPublicMenuDocument, type PublicMenuLoader } from "./seo/publicMenuDocument";
+
+const loadNativePublicMenu: PublicMenuLoader = async id => {
+  const { loadPublicMenuData } = await import("./routes/menuRoutes");
+  return loadPublicMenuData(id);
+};
 
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 
@@ -21,7 +28,7 @@ export function log(message: string, source = "express") {
   console.log(`${formattedTime} [${source}] ${message}`);
 }
 
-export async function setupVite(app: Express, server: Server, canonicalBaseUrl = "https://www.mealscout.us") {
+export async function setupVite(app: Express, server: Server, canonicalBaseUrl = "https://www.mealscout.us", loadMenu: PublicMenuLoader = loadNativePublicMenu) {
   const viteModule = (await (0, eval)('import("vite")')) as typeof import("vite");
   const { createServer: createViteServer, createLogger } = viteModule;
   const viteLogger = createLogger();
@@ -61,7 +68,13 @@ export async function setupVite(app: Express, server: Server, canonicalBaseUrl =
 
       // always reload the index.html file from disk incase it changes
       let template = await fs.promises.readFile(clientTemplate, "utf-8");
-      if (isHomepageDocumentRequest(req)) {
+      let status = 200;
+      const menuId = publicMenuDocumentId(req);
+      if (menuId) {
+        const document = await renderPublicMenuDocument(req, res, template, menuId, canonicalBaseUrl, loadMenu);
+        template = document.html;
+        status = document.status;
+      } else if (isHomepageDocumentRequest(req)) {
         template = renderHomepageHtml(template, canonicalBaseUrl, req.originalUrl, /noindex/i.test(String(res.getHeader("X-Robots-Tag") || "")));
         res.setHeader("Cache-Control", "private, no-store");
         res.vary("Accept");
@@ -72,7 +85,7 @@ export async function setupVite(app: Express, server: Server, canonicalBaseUrl =
         `src="/src/main.tsx?v=${nanoid()}"`,
       );
       const page = await vite.transformIndexHtml(url, template);
-      res.status(200).set({ "Content-Type": "text/html" }).end(page);
+      res.status(status).set({ "Content-Type": "text/html" }).end(page);
     } catch (e) {
       vite.ssrFixStacktrace(e as Error);
       next(e);
@@ -80,7 +93,7 @@ export async function setupVite(app: Express, server: Server, canonicalBaseUrl =
   });
 }
 
-export function serveStatic(app: Express, options: { canonicalBaseUrl?: string; distPath?: string } = {}) {
+export function serveStatic(app: Express, options: { canonicalBaseUrl?: string; distPath?: string; loadPublicMenu?: PublicMenuLoader } = {}) {
   // Production server code is bundled into dist/server, while client assets are
   // emitted to dist/public. Keep this aligned with the startup check in index.ts.
   const distPath = options.distPath || path.resolve(process.cwd(), "dist", "public");
@@ -92,9 +105,14 @@ export function serveStatic(app: Express, options: { canonicalBaseUrl?: string; 
   }
 
   app.use(async (req, res, next) => {
-    if (!isHomepageDocumentRequest(req)) return next();
+    const menuId = publicMenuDocumentId(req);
+    if (!menuId && !isHomepageDocumentRequest(req)) return next();
     try {
       const template = await fs.promises.readFile(path.join(distPath, "index.html"), "utf8");
+      if (menuId) {
+        const document = await renderPublicMenuDocument(req, res, template, menuId, options.canonicalBaseUrl || "https://www.mealscout.us", options.loadPublicMenu || loadNativePublicMenu);
+        return res.status(document.status).set({ "Content-Type": "text/html; charset=utf-8" }).send(document.html);
+      }
       const html = renderHomepageHtml(template, options.canonicalBaseUrl || "https://www.mealscout.us", req.originalUrl, /noindex/i.test(String(res.getHeader("X-Robots-Tag") || "")));
       res.vary("Accept");
       res.vary("User-Agent");

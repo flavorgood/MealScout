@@ -4,7 +4,8 @@ import { readPublicMenuJson, menuRecoveryMessage, menuProfileReturnPath } from "
  * Supports add-to-cart with variants + modifiers.
  * Cart state is stored in localStorage for simplicity.
  */
-import { useState, useEffect } from "react";
+import React, { useState, useEffect } from "react";
+import { publicMenuPageMetadata, publicMenuSelectionPath } from "@shared/publicMenuPage";
 import { useQuery } from "@tanstack/react-query";
 import { Link, useParams, useLocation, useSearch } from "wouter";
 import { SEOHead } from "@/components/seo-head";
@@ -162,12 +163,7 @@ function MenuView({ restaurantId }: { restaurantId: string }) {
   const [cartOpen, setCartOpen] = useState(false);
   const [addingItem, setAddingItem] = useState<MenuItem | null>(null);
   const requestedMenuId = new URLSearchParams(search).get("menuId");
-  const selectMenu = (menuId: string) => {
-    setAddingItem(null);
-    const url = new URL(window.location.href);
-    url.searchParams.set("menuId", menuId);
-    navigate(url.pathname + url.search + url.hash, { replace: true });
-  };
+
 
   // Load cart from localStorage on mount
   useEffect(() => {
@@ -196,12 +192,7 @@ function MenuView({ restaurantId }: { restaurantId: string }) {
       id: restaurantId,
       name: restaurantName,
     }) ?? "/scout";
-  const seoTitle = restaurantName
-    ? `${restaurantName} Menu${restaurantCity ? ` - ${restaurantCity}` : ""} | MealScout`
-    : `Online Menu | MealScout`;
-  const seoDescription = restaurantName
-    ? `Browse the menu from ${restaurantName}${restaurantCity ? ` in ${restaurantCity}` : ""}${cuisineType ? ` — ${cuisineType}` : ""}. Order for pickup when available on MealScout.`
-    : `Browse the full menu and order for pickup when available on MealScout.`;
+  const metadata = publicMenuPageMetadata(restaurantId, menusQuery.isError ? null : menusQuery.data, requestedMenuId);
 
   const selectedMenu = activeMenus.find((menu) => menu.id === requestedMenuId) ?? activeMenus[0] ?? null;
   const selectedMenuId = selectedMenu?.id ?? null;
@@ -299,6 +290,7 @@ function MenuView({ restaurantId }: { restaurantId: string }) {
         className="mealscout-public-profile min-h-screen bg-[color:var(--profile-page)]"
         data-public-menu-shell="warm-food-led"
       >
+        <SEOHead title={metadata.title} description={metadata.description} canonicalUrl={metadata.canonicalPath} noIndex />
         <PublicOrderingTopBar secondaryHref={publicProfileHref} />
         <main className="mx-auto flex min-h-[70vh] w-full max-w-5xl items-center justify-center px-4 py-20">
           <div className="profile-surface flex items-center gap-3 rounded-3xl px-6 py-5 text-[color:var(--profile-ink-soft)]">
@@ -316,6 +308,7 @@ function MenuView({ restaurantId }: { restaurantId: string }) {
         className="mealscout-public-profile min-h-screen bg-[color:var(--profile-page)]"
         data-public-menu-shell="warm-food-led"
       >
+        <SEOHead title={metadata.title} description={metadata.description} canonicalUrl={metadata.canonicalPath} noIndex />
         <PublicOrderingTopBar secondaryHref={publicProfileHref} />
         <main className="mx-auto flex min-h-[70vh] w-full max-w-2xl items-center justify-center px-4 py-20">
           <section className="profile-surface w-full rounded-[2rem] p-7 text-center sm:p-10">
@@ -361,8 +354,11 @@ function MenuView({ restaurantId }: { restaurantId: string }) {
       data-public-menu-shell="warm-food-led"
     >
       <SEOHead
-        title={seoTitle}
-        description={seoDescription}
+        title={metadata.title}
+        description={metadata.description}
+        canonicalUrl={metadata.canonicalPath}
+        noIndex={metadata.noIndex}
+        schemaData={metadata.schema}
         ogType="website"
       />
       <PublicOrderingTopBar secondaryHref={publicProfileHref} />
@@ -407,18 +403,20 @@ function MenuView({ restaurantId }: { restaurantId: string }) {
         {activeMenus.length > 1 && (
           <div className="mb-5 flex gap-2 overflow-x-auto pb-1" aria-label="Choose a menu">
             {activeMenus.map((menu) => (
-              <button
+              <Link
                 key={menu.id}
-                onClick={() => selectMenu(menu.id)}
-                aria-pressed={selectedMenuId === menu.id}
-                className={`min-h-11 whitespace-nowrap rounded-full border px-4 text-sm font-black transition-colors ${
+                href={publicMenuSelectionPath(restaurantId, search, menu.id)}
+                replace
+                onClick={() => setAddingItem(null)}
+                aria-current={selectedMenuId === menu.id ? "page" : undefined}
+                className={`inline-flex min-h-11 items-center whitespace-nowrap rounded-full border px-4 text-sm font-black transition-colors ${
                   selectedMenuId === menu.id
                     ? "border-[color:var(--profile-accent)] bg-[color:var(--profile-accent)] text-white"
                     : "border-[color:var(--profile-border)] bg-white text-[color:var(--profile-ink-soft)] hover:border-[color:var(--profile-accent)]"
                 }`}
               >
                 {menu.name}
-              </button>
+              </Link>
             ))}
           </div>
         )}

@@ -955,15 +955,23 @@ assert.ok(publicMenuStart >= 0 && publicMenuEnd > publicMenuStart);
 const publicMenuRoute = menuRoutesSource.slice(publicMenuStart, publicMenuEnd);
 assert.match(
   publicMenuRoute,
-  /Cache-Control", "no-store"[\s\S]*loadPublicMenuParent\(restaurantId\)[\s\S]*toPublicOrderingReadiness\(/,
-  "Public menus must re-check parent authority and expose only customer readiness",
+  /Cache-Control", "no-store"[\s\S]*loadPublicMenuData\(req.params.restaurantId\)[\s\S]*status\(404\)[\s\S]*res.json\(payload\)/,
+  "Anonymous JSON menus must use the canonical public reader without caching or alternate authorization",
 );
-assert.match(publicMenuRoute, /toPublicMenuItem\(/);
+const menuReaderAst = ts.createSourceFile("menuRoutes.ts", menuRoutesSource, ts.ScriptTarget.Latest, true);
+const menuReader = menuReaderAst.statements.find(statement => ts.isFunctionDeclaration(statement) && statement.name?.text === "loadPublicMenuData");
+assert.ok(menuReader, "The shared public reader must exist as an explicit source owner");
+const publicMenuReader = menuReader.getText(menuReaderAst);
+assert.match(publicMenuReader, /loadPublicMenuParent\(restaurantId\)[\s\S]*if \(!parent\) return null/);
+assert.match(publicMenuReader, /toPublicOrderingReadiness\(/);
+assert.match(publicMenuReader, /evaluatePublicRestaurantIndexability\([\s\S]*ownerEmail:[\s\S]*\.indexable/);
+assert.match(publicMenuReader, /toPublicMenuItem\(/);
 assert.doesNotMatch(
-  publicMenuRoute,
+  publicMenuReader,
   /\.\.\.(?:menu|item|cat)\b/,
   "Public menu responses must not spread raw menu, item, category, inventory, or import rows",
 );
+
 const featuredMenuItemRoute = sliceAfter(
   menuRoutesSource,
   '"/api/restaurants/:restaurantId/featured-item"',
