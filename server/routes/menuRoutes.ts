@@ -694,6 +694,162 @@ const aiMenuImportLimiter = distributedRateLimit({
   key: (req: any) => `${req.user?.id || req.ip}:${req.params?.menuId}`,
 });
 
+/** The existing anonymous menu projection shared by JSON and initial HTML.
+ * Owner/private readiness and raw business records never leave this reader.
+ */
+export async function loadPublicMenuData(restaurantId: string) {
+  const parent = await loadPublicMenuParent(restaurantId);
+  if (!parent) return null;
+  const readiness = await buildOrderingReadiness(restaurantId);
+  const publicReadiness = toPublicOrderingReadiness(
+    readiness,
+    parent.publicRestaurant,
+  );
+
+  const restaurantMenus: Menu[] = await db
+    .select()
+    .from(menus)
+    .where(
+      and(eq(menus.restaurantId, restaurantId), eq(menus.isActive, true)),
+    )
+    .orderBy(asc(menus.serviceType));
+
+  if (restaurantMenus.length === 0) {
+    return ({
+      menus: [],
+      orderingEnabled: false,
+      readiness: publicReadiness,
+      restaurantName: publicReadiness.restaurantName,
+      restaurantCity: publicReadiness.restaurantCity,
+      isFoodTruck: publicReadiness.isFoodTruck,
+      cuisineType: publicReadiness.cuisineType,
+    });
+  }
+
+  const menuIds = restaurantMenus.map((m) => m.id);
+
+  const [categories, items] = await Promise.all([
+    db
+      .select()
+      .from(menuCategories)
+      .where(
+        and(
+          inArray(menuCategories.menuId, menuIds),
+          eq(menuCategories.isActive, true),
+        ),
+      )
+      .orderBy(asc(menuCategories.sortOrder)),
+    db
+      .select({ ...getTableColumns(menuItems) })
+      .from(menuItems)
+      .leftJoin(
+        menuCategories,
+        and(
+          eq(menuCategories.id, menuItems.categoryId),
+          eq(menuCategories.menuId, menuItems.menuId),
+          eq(menuCategories.restaurantId, menuItems.restaurantId),
+        ),
+      )
+      .where(
+        and(
+          inArray(menuItems.menuId, menuIds),
+          eq(menuItems.isAvailable, true),
+          isNull(menuItems.availableFrom),
+          isNull(menuItems.availableTo),
+          or(
+            eq(menuItems.trackInventory, false),
+            and(
+              eq(menuItems.trackInventory, true),
+              gt(menuItems.inventoryQty, 0),
+            ),
+          ),
+          or(
+            isNull(menuItems.categoryId),
+            eq(menuCategories.isActive, true),
+          ),
+        ),
+      )
+      .orderBy(asc(menuItems.sortOrder)),
+  ]);
+
+  // Re-query variants + modifiers now that we have item IDs
+  const typedCategories = categories as MenuCategory[];
+  const typedItems = items as MenuItem[];
+  const itemIds = typedItems.map((i) => i.id);
+  const [realVariants, realModifiers]: [
+    MenuItemVariant[],
+    MenuItemModifier[],
+  ] = itemIds.length
+    ? await Promise.all([
+        db
+          .select()
+          .from(menuItemVariants)
+          .where(inArray(menuItemVariants.menuItemId, itemIds))
+          .orderBy(asc(menuItemVariants.sortOrder)),
+        db
+          .select()
+          .from(menuItemModifiers)
+          .where(inArray(menuItemModifiers.menuItemId, itemIds))
+          .orderBy(asc(menuItemModifiers.sortOrder)),
+      ])
+    : [[], []];
+
+  const result = restaurantMenus.map((menu) => {
+    const menuCats = typedCategories.filter((c) => c.menuId === menu.id);
+    const menuItemsList = typedItems.filter((i) => i.menuId === menu.id);
+    const orderingTruth = readiness.menuReadiness.find(
+      (candidate) => candidate.menuId === menu.id,
+    );
+
+    const enrichedItems = menuItemsList.map((item) =>
+      toPublicMenuItem(item, realVariants, realModifiers),
+    );
+
+    return {
+      id: menu.id,
+      restaurantId: menu.restaurantId,
+      name: menu.name,
+      serviceType: menu.serviceType,
+      availableFrom: menu.availableFrom,
+      availableTo: menu.availableTo,
+      availableDays: menu.availableDays,
+      isActive: true,
+      hidePlatformFee: menu.hidePlatformFee,
+      pricesIncludeTax: menu.pricesIncludeTax,
+      // Do not leak a legacy in-person cash preference as a native
+      // checkout capability. paymentMethods is the canonical contract.
+      acceptsCash: false,
+      orderingEnabled: Boolean(orderingTruth?.orderingEnabled),
+      orderingBlockingReasons: orderingTruth?.orderingEnabled
+        ? []
+        : ["Online pickup ordering is not currently available"],
+      paymentMethods: orderingTruth?.paymentMethods || {
+        card: false,
+        cash: false,
+      },
+      categories: menuCats.map((cat) => ({
+        id: cat.id,
+        menuId: cat.menuId,
+        restaurantId: cat.restaurantId,
+        name: cat.name,
+        description: cat.description,
+        items: enrichedItems.filter((i) => i.categoryId === cat.id),
+      })),
+      uncategorizedItems: enrichedItems.filter((i) => !i.categoryId),
+    };
+  });
+
+  return ({
+    menus: result,
+    orderingEnabled: readiness.orderingEnabled,
+    readiness: publicReadiness,
+    restaurantName: publicReadiness.restaurantName,
+    restaurantCity: publicReadiness.restaurantCity,
+    isFoodTruck: publicReadiness.isFoodTruck,
+    cuisineType: publicReadiness.cuisineType,
+  });
+}
+
 export function registerMenuRoutes(app: Express) {
   // ── ─────────────────────────────────────────────────────────────────────────
   // PUBLIC: customer-facing menu view
@@ -1592,161 +1748,10 @@ export function registerMenuRoutes(app: Express) {
   app.get(
     "/api/menus/:restaurantId",
     wrap(async (req, res) => {
-      const { restaurantId } = req.params;
       res.setHeader("Cache-Control", "no-store");
-      const parent = await loadPublicMenuParent(restaurantId);
-      if (!parent) {
-        res.status(404).json({ message: "Restaurant not found" });
-        return;
-      }
-      const readiness = await buildOrderingReadiness(restaurantId);
-      const publicReadiness = toPublicOrderingReadiness(
-        readiness,
-        parent.publicRestaurant,
-      );
-
-      const restaurantMenus: Menu[] = await db
-        .select()
-        .from(menus)
-        .where(
-          and(eq(menus.restaurantId, restaurantId), eq(menus.isActive, true)),
-        )
-        .orderBy(asc(menus.serviceType));
-
-      if (restaurantMenus.length === 0) {
-        return res.json({
-          menus: [],
-          orderingEnabled: false,
-          readiness: publicReadiness,
-          restaurantName: publicReadiness.restaurantName,
-          restaurantCity: publicReadiness.restaurantCity,
-          isFoodTruck: publicReadiness.isFoodTruck,
-          cuisineType: publicReadiness.cuisineType,
-        });
-      }
-
-      const menuIds = restaurantMenus.map((m) => m.id);
-
-      const [categories, items] = await Promise.all([
-        db
-          .select()
-          .from(menuCategories)
-          .where(
-            and(
-              inArray(menuCategories.menuId, menuIds),
-              eq(menuCategories.isActive, true),
-            ),
-          )
-          .orderBy(asc(menuCategories.sortOrder)),
-        db
-          .select({ ...getTableColumns(menuItems) })
-          .from(menuItems)
-          .leftJoin(
-            menuCategories,
-            and(
-              eq(menuCategories.id, menuItems.categoryId),
-              eq(menuCategories.menuId, menuItems.menuId),
-              eq(menuCategories.restaurantId, menuItems.restaurantId),
-            ),
-          )
-          .where(
-            and(
-              inArray(menuItems.menuId, menuIds),
-              eq(menuItems.isAvailable, true),
-              isNull(menuItems.availableFrom),
-              isNull(menuItems.availableTo),
-              or(
-                eq(menuItems.trackInventory, false),
-                and(
-                  eq(menuItems.trackInventory, true),
-                  gt(menuItems.inventoryQty, 0),
-                ),
-              ),
-              or(
-                isNull(menuItems.categoryId),
-                eq(menuCategories.isActive, true),
-              ),
-            ),
-          )
-          .orderBy(asc(menuItems.sortOrder)),
-      ]);
-
-      // Re-query variants + modifiers now that we have item IDs
-      const typedCategories = categories as MenuCategory[];
-      const typedItems = items as MenuItem[];
-      const itemIds = typedItems.map((i) => i.id);
-      const [realVariants, realModifiers]: [
-        MenuItemVariant[],
-        MenuItemModifier[],
-      ] = itemIds.length
-        ? await Promise.all([
-            db
-              .select()
-              .from(menuItemVariants)
-              .where(inArray(menuItemVariants.menuItemId, itemIds))
-              .orderBy(asc(menuItemVariants.sortOrder)),
-            db
-              .select()
-              .from(menuItemModifiers)
-              .where(inArray(menuItemModifiers.menuItemId, itemIds))
-              .orderBy(asc(menuItemModifiers.sortOrder)),
-          ])
-        : [[], []];
-
-      const result = restaurantMenus.map((menu) => {
-        const menuCats = typedCategories.filter((c) => c.menuId === menu.id);
-        const menuItemsList = typedItems.filter((i) => i.menuId === menu.id);
-        const orderingTruth = readiness.menuReadiness.find(
-          (candidate) => candidate.menuId === menu.id,
-        );
-
-        const enrichedItems = menuItemsList.map((item) =>
-          toPublicMenuItem(item, realVariants, realModifiers),
-        );
-
-        return {
-          id: menu.id,
-          restaurantId: menu.restaurantId,
-          name: menu.name,
-          serviceType: menu.serviceType,
-          availableFrom: menu.availableFrom,
-          availableTo: menu.availableTo,
-          availableDays: menu.availableDays,
-          isActive: true,
-          hidePlatformFee: menu.hidePlatformFee,
-          pricesIncludeTax: menu.pricesIncludeTax,
-          // Do not leak a legacy in-person cash preference as a native
-          // checkout capability. paymentMethods is the canonical contract.
-          acceptsCash: false,
-          orderingEnabled: Boolean(orderingTruth?.orderingEnabled),
-          orderingBlockingReasons: orderingTruth?.orderingEnabled
-            ? []
-            : ["Online pickup ordering is not currently available"],
-          paymentMethods: orderingTruth?.paymentMethods || {
-            card: false,
-            cash: false,
-          },
-          categories: menuCats.map((cat) => ({
-            id: cat.id,
-            menuId: cat.menuId,
-            restaurantId: cat.restaurantId,
-            name: cat.name,
-            description: cat.description,
-            items: enrichedItems.filter((i) => i.categoryId === cat.id),
-          })),
-          uncategorizedItems: enrichedItems.filter((i) => !i.categoryId),
-        };
-      });
-
-      res.json({
-        menus: result,
-        orderingEnabled: readiness.orderingEnabled,
-        readiness: publicReadiness,
-        restaurantName: publicReadiness.restaurantName,
-        restaurantCity: publicReadiness.restaurantCity,
-        isFoodTruck: publicReadiness.isFoodTruck,
-        cuisineType: publicReadiness.cuisineType,
-      });
+      const payload = await loadPublicMenuData(req.params.restaurantId);
+      if (!payload) return res.status(404).json({ message: "Restaurant not found" });
+      return res.json(payload);
     }),
   );
 
