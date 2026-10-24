@@ -51,7 +51,9 @@ test("actual static/menu document pipeline serves identical native public facts 
   assert.equal(menuSchema(human.html).hasMenuSection[0].hasMenuItem[0].offers.price, "8.25");
   assert.equal(menuSchema(human.html).hasMenuSection[0].hasMenuItem[1].offers, undefined);
   for (const ua of ["Googlebot/2.1", "OAI-SearchBot/1.0"]) assert.equal((await get(undefined, ua)).html, human.html);
-  assert.equal((await get(undefined, "Googlebot/2.1", { Accept: "*/*" })).html, human.html);
+  for (const ua of ["Mozilla/5.0", "Googlebot/2.1"]) {
+    for (const accept of ["*/*", "", "application/xhtml+xml"]) assert.equal((await get(undefined, ua, { Accept: accept })).html, human.html);
+  }
 });
 test("functional menu selection changes raw facts, preserves attribution links and keeps a clean canonical", async () => {
   const result = await get(`/menu/${id}?menuId=dinner&ref=synthetic&returnTo=%2Fbar%2Ftest--${id}`);

@@ -7,14 +7,13 @@ import { PublicMenuReadError } from "../../client/src/lib/public-menu-recovery";
 import { TRACKING_QUERY_KEYS } from "../../client/src/components/seo-head";
 import { publicMenuPageMetadata, type PublicMenuPageFacts } from "../../shared/publicMenuPage";
 import { renderAppDocumentHtml } from "./appDocumentHtml";
-import { shouldServePrerender } from "./acquisitionPrerender";
 import type { Request } from "express";
 
 export function publicMenuDocumentId(req: Request): string | null {
   if (req.method !== "GET") return null;
   const accept = String(req.get("Accept") || "").toLowerCase();
   if (accept.includes("application/json") && !accept.includes("text/html")) return null;
-  if (!accept.includes("text/html") && !shouldServePrerender(req)) return null;
+  if (accept && !accept.includes("text/html") && !accept.includes("application/xhtml+xml") && !accept.includes("*/*")) return null;
   const match = /^\/menu\/([^/?#]+)\/?$/.exec(String(req.originalUrl || req.url).split("?")[0]);
   if (!match) return null;
   try {
