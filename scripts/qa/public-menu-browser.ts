@@ -110,8 +110,11 @@ try {
               selectedVariantId: null, variantLabel: null, variantAddCents: 0, selectedModifierIds: [], modifierLabels: [], modifierAddCents: 0, lineTotalCents: 825, specialInstructions: "Synthetic only" }];
             await page.evaluate(cart => localStorage.setItem("mealscout_cart", JSON.stringify(cart)), savedCart);
             state.documentFails = true; state.apiFails = true;
-            const unavailable = await page.reload({ waitUntil: "networkidle" });
+            const failedApi = page.waitForResponse(response => new URL(response.url()).pathname === `/api/menus/${id}` && response.status() === 503);
+            const unavailable = await page.reload({ waitUntil: "domcontentloaded" });
             assert.equal(unavailable?.status(), 503);
+            await page.waitForFunction(() => Object.keys(document.getElementById("root") || {}).some(key => key.startsWith("__reactContainer")));
+            await failedApi;
             await expect(page.getByRole("heading", { name: "Menu could not be loaded", exact: true })).toBeVisible();
             await expect(ownedSchema).toHaveCount(0);
             assert.deepEqual(await page.evaluate(() => JSON.parse(localStorage.getItem("mealscout_cart") || "null")), savedCart);
