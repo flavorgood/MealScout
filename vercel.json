@@ -61,6 +61,10 @@
       "destination": "https://mealscout.onrender.com/"
     },
     {
+      "source": "/menu/:restaurantId",
+      "destination": "https://mealscout.onrender.com/menu/:restaurantId"
+    },
+    {
       "source": "/for-food-trucks",
       "destination": "https://mealscout.onrender.com/for-food-trucks",
       "has": [
@@ -245,6 +249,10 @@
     {
       "src": "^/$",
       "dest": "https://mealscout.onrender.com/"
+    },
+    {
+      "src": "^/menu/([^/]+)/?$",
+      "dest": "https://mealscout.onrender.com/menu/$1"
     },
     {
       "src": "/for-food-trucks",
