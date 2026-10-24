@@ -86,6 +86,7 @@ import {
 import { projectPublicLocalMenuItemRow } from "../services/publicLocalMenuItemProjection";
 import { publicRestaurantDistanceKm } from "../services/publicRestaurantSearchProjection";
 import { isPublicBusinessVisible } from "../utils/publicBusinessVisibility";
+import { evaluatePublicRestaurantIndexability } from "../seo/publicRestaurantIndexability";
 import { deriveProfileEvidenceQuarantineVisibility } from "../services/profileEvidenceQuarantine";
 export { isRestaurantOpenNow } from "../services/restaurantOrderingEligibility";
 import { parseMenuCsv } from "../utils/menuCsvParser";
@@ -700,7 +701,15 @@ const aiMenuImportLimiter = distributedRateLimit({
 export async function loadPublicMenuData(restaurantId: string) {
   const parent = await loadPublicMenuParent(restaurantId);
   if (!parent) return null;
-  const readiness = await buildOrderingReadiness(restaurantId);
+  const [readiness, ownerRows] = await Promise.all([
+    buildOrderingReadiness(restaurantId),
+    db.select({ email: users.email }).from(users).where(eq(users.id, parent.restaurant.ownerId)).limit(1),
+  ]);
+  // Reuse the same claim/public-readiness rule as profiles and sitemap. Only
+  // its verdict is public; owner evidence never becomes menu/page data.
+  const parentIndexable = evaluatePublicRestaurantIndexability({
+    ...parent.restaurant, ownerEmail: ownerRows[0]?.email ?? null,
+  }).indexable;
   const publicReadiness = toPublicOrderingReadiness(
     readiness,
     parent.publicRestaurant,
@@ -716,6 +725,7 @@ export async function loadPublicMenuData(restaurantId: string) {
 
   if (restaurantMenus.length === 0) {
     return ({
+      parentIndexable,
       menus: [],
       orderingEnabled: false,
       readiness: publicReadiness,
@@ -840,6 +850,7 @@ export async function loadPublicMenuData(restaurantId: string) {
   });
 
   return ({
+    parentIndexable,
     menus: result,
     orderingEnabled: readiness.orderingEnabled,
     readiness: publicReadiness,

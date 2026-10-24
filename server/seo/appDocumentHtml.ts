@@ -20,5 +20,5 @@ export function renderAppDocumentHtml(template: string, page: {
     html = html.replace(matcher, () => `<meta ${name.startsWith("og:") ? "property" : "name"}="${name}" content="${escapeHtml(value)}">`);
   }
   const robots = page.noIndex ? "noindex, nofollow" : "index, follow, max-snippet:-1, max-image-preview:large, max-video-preview:-1";
-  return html.replace(/<\/head>/i, () => `<link rel="canonical" href="${escapeHtml(page.canonical)}">\n<meta name="robots" content="${robots}">\n<meta property="og:url" content="${escapeHtml(page.canonical)}">\n${page.schema ? buildJsonLdScript(page.schema) : ""}\n</head>`);
+  return html.replace(/<\/head>/i, () => `<link rel="canonical" href="${escapeHtml(page.canonical)}">\n<meta name="robots" content="${robots}">\n<meta property="og:url" content="${escapeHtml(page.canonical)}">\n${page.schema ? buildJsonLdScript(page.schema).replace('<script type="application/ld+json"', '<script type="application/ld+json" data-page-schema="true"') : ""}\n</head>`);
 }

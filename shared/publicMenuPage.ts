@@ -1,5 +1,6 @@
 /** Public menu facts already admitted by the canonical anonymous menu reader. */
 export type PublicMenuPageFacts = {
+  parentIndexable?: boolean;
   restaurantName?: string | null;
   restaurantCity?: string | null;
   cuisineType?: string | null;
@@ -31,9 +32,10 @@ export function publicMenuPageMetadata(restaurantId: string, data?: PublicMenuPa
   const foodItems = (items: Parameters<typeof schemaItem>[0][]) => items.filter(item => item.itemType !== "merchandise").map(schemaItem);
   const sections = selected?.categories.map(category => ({ "@type": "MenuSection", name: category.name, hasMenuItem: foodItems(category.items) })) ?? [];
   if (selected?.uncategorizedItems?.length) sections.push({ "@type": "MenuSection", name: "Other items", hasMenuItem: foodItems(selected.uncategorizedItems) });
+  const indexable = Boolean(selected) && data?.parentIndexable === true;
   return {
-    canonicalPath, title, description, noIndex: !selected,
-    schema: selected ? { "@context": "https://schema.org", "@type": "Menu", name: name ? `${name} — ${selected.name}` : selected.name, hasMenuSection: sections } : undefined,
+    canonicalPath, title, description, noIndex: !indexable,
+    schema: selected && indexable ? { "@context": "https://schema.org", "@type": "Menu", name: name ? `${name} — ${selected.name}` : selected.name, hasMenuSection: sections } : undefined,
   };
 }
 

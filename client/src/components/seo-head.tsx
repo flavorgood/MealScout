@@ -184,13 +184,10 @@ export function SEOHead({
 
     // Structured data (JSON-LD)
     let pageSchema: HTMLScriptElement | null = null;
+    // Adopt server-rendered page schema ownership even while the App is
+    // loading or recovering. Generic Organization/WebSite schemas stay intact.
+    document.querySelectorAll('script[type="application/ld+json"][data-page-schema="true"]').forEach(script => script.remove());
     if (schemaData) {
-      // Remove any existing page-specific schema
-      const existingPageSchema = document.querySelector('script[type="application/ld+json"][data-page-schema="true"]');
-      if (existingPageSchema) {
-        existingPageSchema.remove();
-      }
-      
       // Create new page-specific schema
       pageSchema = document.createElement("script");
       pageSchema.setAttribute("type", "application/ld+json");

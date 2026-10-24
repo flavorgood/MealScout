@@ -30,7 +30,7 @@ export function renderMenuHtml(template: string, canonicalBaseUrl: string, reque
 ) {
   const url = new URL(requestUrl, canonicalBaseUrl);
   const metadata = publicMenuPageMetadata(restaurantId, payload, url.searchParams.get("menuId"));
-  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, retryOnMount: false, staleTime: Infinity } } });
   const key = ["/api/menus", restaurantId];
   try {
     if (payload) queryClient.setQueryData(key, payload);
