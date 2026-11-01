@@ -791,6 +791,15 @@ export function registerTruckClaimRoutes(
       const { listing, restaurant, claimRequest, usedSeededRestaurant } =
         claimOutcome;
 
+      try {
+        const { rememberProfileSalesAssistant } = await import(
+          "../services/profileSalesAssistantStore"
+        );
+        rememberProfileSalesAssistant("truck", restaurant.id, "claim");
+      } catch (error) {
+        console.warn("[profile-sales-assistant] claim ensure failed", error);
+      }
+
       // Claim-time Google enrichment (fill missing map coordinates). Fire-and-forget:
       // paid Google usage now scales with real claims, and it never blocks the response.
       void enrichClaimedProfile(restaurant.id);

@@ -48,6 +48,7 @@ import {
   isThinProfile,
 } from "@/components/public-profile/ThinProfileState";
 import { PublicProfileDecisionBar } from "@/components/public-profile/PublicProfileDecisionBar";
+import { ProfileSalesAssistant } from "@/components/public-profile/ProfileSalesAssistant";
 import { RelatedScoutRail } from "@/components/public-profile/RelatedScoutRail";
 import { isClaimedTruckProfile } from "@/components/public-profile/profileClaimPromptPolicy";
 import { useAuth } from "@/hooks/useAuth";
@@ -3242,6 +3243,13 @@ export default function PublicProfilePage() {
                     profile={restaurantProfile}
                     safeCtas={safeCtas}
                   />
+                  {restaurantProfile.profileType === "truck" ? (
+                    <ProfileSalesAssistant
+                      profileKind="truck"
+                      profileId={restaurantProfile.id}
+                      businessName={restaurantProfile.displayName}
+                    />
+                  ) : null}
 
                   {restaurantHasMenuSurface ? (
                     <div
@@ -3320,6 +3328,11 @@ export default function PublicProfilePage() {
               <div className="hidden md:block">
                 <QuickActionRow profile={data} safeCtas={safeCtas} />
               </div>
+              <ProfileSalesAssistant
+                profileKind="host"
+                profileId={data.id}
+                businessName={data.displayName}
+              />
               <LocationNowSection profile={data} />
               <LocationTruckOptionsSection profile={data} />
               <EventsSection profile={data} />
@@ -3333,6 +3346,11 @@ export default function PublicProfilePage() {
               <div className="hidden md:block">
                 <QuickActionRow profile={data} safeCtas={safeCtas} />
               </div>
+              <ProfileSalesAssistant
+                profileKind="vendor"
+                profileId={data.id}
+                businessName={data.displayName}
+              />
               <Card className="border-white/10 bg-[#0f0d0b]">
                 <CardHeader>
                   <CardTitle className="text-xl text-white">

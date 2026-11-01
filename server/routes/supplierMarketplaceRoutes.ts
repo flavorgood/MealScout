@@ -505,6 +505,14 @@ async function ensureSupplierProfile(userId: string) {
       isActive: true,
     } as any)
     .returning();
+  try {
+    const { rememberProfileSalesAssistant } = await import(
+      "../services/profileSalesAssistantStore"
+    );
+    rememberProfileSalesAssistant("vendor", created.id, "public");
+  } catch (error) {
+    console.warn("[profile-sales-assistant] vendor ensure failed", error);
+  }
   return created;
 }
 

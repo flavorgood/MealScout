@@ -25,6 +25,7 @@ import {
 } from "@shared/consumerEntity";
 
 import { db } from "../db";
+import { rememberProfileSalesAssistant } from "../services/profileSalesAssistantStore";
 import { storage } from "../storage";
 import {
   affiliateShareEvents,
@@ -2810,6 +2811,7 @@ export function registerPublicDiscoveryRoutes(app: Express) {
             ),
           },
         );
+        rememberProfileSalesAssistant("truck", String(row.id), "public");
         return sendPublicJson(res, {
           ...mapped,
           entity: "truck",
@@ -2990,6 +2992,7 @@ export function registerPublicDiscoveryRoutes(app: Express) {
             ),
           },
         );
+        rememberProfileSalesAssistant("host", String(row.id), "public");
         return sendPublicJson(res, {
           ...mapped,
           events: {
@@ -3114,6 +3117,7 @@ export function registerPublicDiscoveryRoutes(app: Express) {
             ),
           },
         );
+        rememberProfileSalesAssistant("host", String(row.id), "public");
         return sendPublicJson(res, {
           ...mapped,
           entity: "host",
@@ -3175,6 +3179,7 @@ export function registerPublicDiscoveryRoutes(app: Express) {
             name: String(row.businessName || row.name || row.id),
           },
         );
+        rememberProfileSalesAssistant("vendor", String(row.id), "public");
         return sendPublicJson(res, {
           ...mapped,
           entity: "supplier",

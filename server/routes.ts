@@ -49,6 +49,7 @@ import { registerHostPayoutAdminRoutes } from "./routes/hostPayoutAdminRoutes";
 import { registerGrowthRoutes } from "./routes/growthRoutes";
 import { registerHostInterestRoutes } from "./routes/hostInterestRoutes";
 import { registerPublicDiscoveryRoutes } from "./routes/publicDiscoveryRoutes";
+import { registerProfileSalesAssistantRoutes } from "./routes/profileSalesAssistantRoutes";
 import { registerNativeEcosystemLinks } from "./services/ecosystemPublicLinkRuntime";
 import { registerPublicMapRoutes } from "./routes/publicMapRoutes";
 import { registerRestaurantCoreRoutes } from "./routes/restaurantCoreRoutes";
@@ -154,6 +155,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   registerTruckClaimRoutes(app);
 
   registerPublicDiscoveryRoutes(app);
+  registerProfileSalesAssistantRoutes(app);
   registerNativeEcosystemLinks(app);
 
   registerRestaurantCoreRoutes(app, { validateProfileAnalyticsAccess });
