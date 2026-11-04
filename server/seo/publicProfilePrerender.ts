@@ -97,6 +97,35 @@ const escapeHtml = (value: string | null | undefined) =>
 
 const defaultSocialImagePath = "/og-default.jpg?v=20260506";
 
+// Who receives the static profile document instead of the profile app?
+// Crawlers and link-preview fetchers always get the static document, so
+// indexing and share previews keep working: the generic bot/crawler/spider
+// tokens catch the named search bots (Googlebot, Bingbot, DuckDuckBot,
+// Applebot, Twitterbot, Slackbot, LinkedInBot, Discordbot, TelegramBot,
+// the AI crawlers, ...), and the explicit tokens cover the preview
+// fetchers whose agents carry no generic token (Facebook/Meta, WhatsApp).
+const PROFILE_CRAWLER_UA_PATTERN =
+  /(bot|crawler|spider|slurp|facebookexternalhit|facebookcatalog|meta-externalagent|whatsapp|chatgpt-user|anthropic-ai|cohere-ai)/i;
+
+// Every mainstream browser and in-app web view sends a "Mozilla/" agent
+// (legacy Opera sent "Opera/"). An agent that matches no crawler token and
+// does not look like a browser is treated conservatively as a crawler:
+// the static document is the safe default because it always links onward
+// to the app, while the app shell would give a non-browser fetcher
+// nothing indexable. Empty agents get the static document for the same
+// reason. `?prerender=1` (or `true`) forces the static document for any
+// agent — the same explicit preview override the acquisition prerender
+// honours in shouldServePrerender. `?view=app` stays the explicit app
+// entry and is evaluated before this gate, so it is unaffected.
+export const shouldServePublicProfilePrerender = (req: Request) => {
+  const force = String(req.query?.prerender || "").toLowerCase();
+  if (force === "1" || force === "true") return true;
+  const ua = String(req.get("user-agent") || "");
+  if (!ua) return true;
+  if (PROFILE_CRAWLER_UA_PATTERN.test(ua)) return true;
+  return !/(mozilla\/|opera\/)/i.test(ua);
+};
+
 // Unclaimed, import-seeded listings should stay out of Google's index until a
 // real owner claims them - indexing thousands of thin, identical-template
 // pages en masse dilutes crawl budget and search quality for the pages that
@@ -1449,9 +1478,12 @@ const sendPrerenderUnavailable = (res: Response) => {
 };
 
 /**
- * Public discovery profile routes serve entity SSR HTML for every GET, not only
- * crawler UAs. Authenticated app surfaces (/admin, /dashboard, etc.) are not
- * registered here and keep the SPA / auth interstitial path.
+ * Public discovery profile routes serve entity SSR HTML to crawler and
+ * preview UAs (see shouldServePublicProfilePrerender); ordinary browsers
+ * continue to the profile app at the same canonical address, as do
+ * explicit `?view=app` requests from any agent. Authenticated app
+ * surfaces (/admin, /dashboard, etc.) are not registered here and keep
+ * the SPA / auth interstitial path.
  */
 export function registerPublicProfilePrerenderRoutes(
   app: Express,
@@ -1486,6 +1518,23 @@ export function registerPublicProfilePrerenderRoutes(
   const appViewUrl = (req: Request, canonicalPath: string) => {
     const attribution = legacyCityDealRedirectQuery(req);
     return `${canonicalPath}?view=app${attribution ? `&${attribution.slice(1)}` : ""}`;
+  };
+  const handOffToProfileApp = (
+    res: Response,
+    next: NextFunction,
+    page: PrerenderPage,
+    id: string,
+  ) => {
+    const discovery = [`<${absoluteUrl(canonicalBaseUrl, page.canonicalPath)}>; rel="canonical"`];
+    const manifestUrl = absoluteUrl(canonicalBaseUrl, `/api/owner-ai/profiles/${encodeURIComponent(id)}/selective-intelligence`);
+    const mcpUrl = absoluteUrl(canonicalBaseUrl, `/api/owner-ai/profiles/${encodeURIComponent(id)}/mcp`);
+    if (page.selectiveIntelligence?.manifestUrl === manifestUrl && page.selectiveIntelligence.mcpUrl === mcpUrl) {
+      discovery.push(`<${manifestUrl}>; rel="alternate"; type="application/vnd.selective-intelligence+json"; title="Selective Intelligence"`, `<${mcpUrl}>; rel="alternate"; type="application/mcp+json"; title="MealScout owner actions"`);
+    }
+    res.setHeader("Link", discovery.join(", "));
+    // Server-owned handoff marker; never derived directly from query flags downstream.
+    res.locals.mealScoutPublicProfileAppView = true;
+    return next();
   };
   const gate =
     (handler: (req: Request) => Promise<PrerenderPage | null>) =>
@@ -1528,16 +1577,16 @@ export function registerPublicProfilePrerenderRoutes(
               const safeTarget = appViewUrl(req, appPath);
               res.setHeader("Cache-Control", "no-store");
               if (incoming.pathname + incoming.search !== safeTarget) return res.redirect(308, safeTarget);
-              const discovery = [`<${absoluteUrl(canonicalBaseUrl, expected.canonicalPath)}>; rel="canonical"`];
-              const manifestUrl = absoluteUrl(canonicalBaseUrl, `/api/owner-ai/profiles/${encodeURIComponent(id)}/selective-intelligence`);
-              const mcpUrl = absoluteUrl(canonicalBaseUrl, `/api/owner-ai/profiles/${encodeURIComponent(id)}/mcp`);
-              if (expected.selectiveIntelligence?.manifestUrl === manifestUrl && expected.selectiveIntelligence.mcpUrl === mcpUrl) {
-                discovery.push(`<${manifestUrl}>; rel="alternate"; type="application/vnd.selective-intelligence+json"; title="Selective Intelligence"`, `<${mcpUrl}>; rel="alternate"; type="application/mcp+json"; title="MealScout owner actions"`);
-              }
-              res.setHeader("Link", discovery.join(", "));
-              // Server-owned handoff marker; never derived directly from query flags downstream.
-              res.locals.mealScoutPublicProfileAppView = true;
-              return next();
+              return handOffToProfileApp(res, next, expected, id);
+            }
+            if (!shouldServePublicProfilePrerender(req)) {
+              // Ordinary browser at the canonical address: hand off to the
+              // profile app in place (no redirect, no ?view=app needed) so
+              // a shared profile link opens the real menu/order/follow
+              // page. Crawlers and preview fetchers keep the static
+              // document below.
+              res.setHeader("Cache-Control", "no-store");
+              return handOffToProfileApp(res, next, expected, id);
             }
             return renderPage(canonicalBaseUrl, res, { ...expected, links: expected.links.map(link => link.label === "Open profile" ? { ...link, href: appViewUrl(req, expected.canonicalPath) } : link) });
           }

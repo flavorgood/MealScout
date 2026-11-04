@@ -115,6 +115,43 @@ test("public disable revokes a previously valid app-view request and private gat
   } finally { await f.close(); }
 });
 
+test("browser agents reach the app at the canonical address; crawler and preview agents keep the SSR document", async () => {
+  const f = await fixture();
+  try {
+    const getAs = (url: string, userAgent: string) => fetch(f.base + url, { redirect: "manual", signal: AbortSignal.timeout(5000), headers: { "user-agent": userAgent } });
+    const browserUa = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36";
+    const app = await getAs(canonical, browserUa);
+    assert.equal(app.status, 200); assert.match(await app.text(), /PublicProfilePage handoff fixture/);
+    assert.equal(app.headers.get("cache-control"), "no-store");
+    assert.equal(f.state.continuationCount, 1);
+    assert.deepEqual(f.state.trustedAppMarkers, [true]);
+    assert.match(app.headers.get("link")!, new RegExp(`<https://www.mealscout.us${canonical}>; rel="canonical"`));
+    for (const crawlerUa of [
+      "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
+      "Mozilla/5.0 (compatible; bingbot/2.0; +http://www.bing.com/bingbot.htm)",
+      "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)",
+      "Twitterbot/1.0",
+      "Slackbot-LinkExpanding 1.0 (+https://api.slack.com/robots)",
+      "WhatsApp/2.23.20.0 A",
+      "node",
+      "",
+    ]) {
+      const ssr = await getAs(canonical, crawlerUa);
+      assert.equal(ssr.status, 200); assert.doesNotMatch(await ssr.text(), /handoff fixture/);
+    }
+    assert.equal(f.state.continuationCount, 1);
+    // The explicit preview override forces the document even for a browser agent.
+    const forced = await getAs(canonical + "?prerender=1", browserUa);
+    assert.equal(forced.status, 200); assert.doesNotMatch(await forced.text(), /handoff fixture/);
+    assert.equal(f.state.continuationCount, 1);
+    // The explicit app flag still wins for a crawler agent.
+    const flagged = await getAs(canonical + "?view=app", "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)");
+    assert.equal(flagged.status, 200); assert.match(await flagged.text(), /PublicProfilePage handoff fixture/);
+    assert.equal(f.state.continuationCount, 2);
+    assert.deepEqual(f.state.trustedAppMarkers, [true, true]);
+  } finally { await f.close(); }
+});
+
 test("real Chromium applies same-origin SSR CSS under production CSP and follows only the eligible app boundary", async () => {
   const f = await fixture();
   let browser: Awaited<ReturnType<typeof chromium.launch>> | undefined;
@@ -122,7 +159,9 @@ test("real Chromium applies same-origin SSR CSS under production CSP and follows
   const report: Record<string, unknown> = { fixtureOnly: true, actualReactRenderingProven: false, observedAt: new Date().toISOString(), productionCsp };
   try {
     browser = await chromium.launch({ headless: true });
-    const userAgent = `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${browser.version()} Safari/537.36 MealScout-public-customer-proof`;
+    // The SSR document is served to crawler agents now; browser agents hand
+    // off to the app server-side. Exercise the document as its audience.
+    const userAgent = "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html) MealScout-public-crawler-proof";
     const page = await browser.newPage({ userAgent });
     await page.route("**/*", route => ["GET", "HEAD", "OPTIONS"].includes(route.request().method()) ? route.continue() : route.abort("blockedbyclient"));
     report.userAgent = userAgent;
