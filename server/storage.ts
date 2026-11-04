@@ -549,6 +549,7 @@ export interface IStorage {
         lat: number | null;
         lng: number | null;
         liveBroadcasting: boolean;
+        broadcastState: TruckPresence["broadcastState"];
         locationSource: "live";
         sessionId?: string;
       }
@@ -4047,6 +4048,14 @@ export class DatabaseStorage implements IStorage {
       currentLatitude: location.latitude.toString(),
       currentLongitude: location.longitude.toString(),
       lastBroadcastAt: new Date(),
+      // The owner's own location update is a presence signal in its own
+      // right: refresh the live deadline alongside the broadcast timestamp
+      // (same 240-minute window upsertLiveLocation uses). Without this, a
+      // liveUntilAt left over from an abandoned session stays in the past
+      // and deriveTruckPresence expires the truck by deadline even though
+      // the owner just confirmed where it is. The mobileOnline branch below
+      // still overrides this (false clears the deadline entirely).
+      liveUntilAt: new Date(Date.now() + 240 * 60_000),
       updatedAt: new Date(),
     };
 
@@ -4469,9 +4478,19 @@ export class DatabaseStorage implements IStorage {
           { freshnessMs },
         ),
       }))
+      // Existence is durable for a claimed truck that has a known spot:
+      // a truck whose broadcast went stale stays on the map at its last
+      // confirmed location, carrying broadcastState "stale" (and its
+      // lastBroadcastAt) so clients render freshness honestly instead of
+      // the truck vanishing outright. Only freshness gates the "live"
+      // label, never the truck's existence. Trucks whose owner turned
+      // the online switch off never reach this filter (the SQL above
+      // requires mobileOnline), and presence "offline" carries no
+      // location, so a switched-off truck still shows nothing here.
       .filter(
         ({ presence }: { truck: any; presence: TruckPresence }) =>
-          presence.broadcastState === "live",
+          presence.broadcastState === "live" ||
+          (presence.broadcastState === "stale" && presence.location !== null),
       );
 
     // Calculate distance in JavaScript for now (simpler than complex SQL)
@@ -4499,17 +4518,23 @@ export class DatabaseStorage implements IStorage {
           distanceMiles: distance * 0.621371,
           lat: truckLat,
           lng: truckLng,
-          liveBroadcasting: true,
+          liveBroadcasting: presence.broadcastState === "live",
+          broadcastState: presence.broadcastState,
           locationSource: "live" as const,
           sessionId: truck.sessionId || undefined,
         };
       },
     );
 
-    // Filter by radius and sort by distance
+    // Filter by radius; live trucks first, then by distance
     return trucksWithDistance
       .filter((truck: any) => truck.distance <= radiusKm)
-      .sort((a: any, b: any) => a.distance - b.distance);
+      .sort((a: any, b: any) => {
+        const liveOrder =
+          (a.broadcastState === "live" ? 0 : 1) -
+          (b.broadcastState === "live" ? 0 : 1);
+        return liveOrder !== 0 ? liveOrder : a.distance - b.distance;
+      });
   }
 
   async getTruckLocationHistory(

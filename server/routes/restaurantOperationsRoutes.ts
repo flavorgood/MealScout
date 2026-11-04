@@ -2496,7 +2496,11 @@ export function registerRestaurantOperationsRoutes(
             (truck: any) =>
               isPublicBusinessVisible(truck) &&
               truck?.isActive === true &&
-              truck?.mobileOnline === true &&
+              // Live trucks (projected mobileOnline) plus stale trucks
+              // whose last confirmed spot the projection still exposes;
+              // broadcastState on each row keeps the two distinguishable.
+              (truck?.mobileOnline === true ||
+                truck?.broadcastState === "stale") &&
               Number.isFinite(Number(truck?.currentLatitude)) &&
               Number.isFinite(Number(truck?.currentLongitude)),
           );

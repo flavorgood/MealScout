@@ -70,8 +70,10 @@ import {
 } from "../services/dateKeys";
 import {
   computeParkingPassQualityFlags,
+  isHostProfileMapEligible,
   isParkingPassPublicReady,
 } from "../services/parkingPassQuality";
+import { resolvePublicProfileVisibility } from "../publicProfiles/publicProfileUtils";
 import { imageUploads } from "@shared/schema";
 import { logAudit } from "../auditLogger";
 import { getHostEarningsSummary } from "../hostEarningsService";
@@ -207,6 +209,91 @@ export function registerHostRoutes(app: Express) {
     } catch (error: any) {
       console.error("Error fetching host profiles:", error);
       res.status(500).json({ message: "Failed to fetch host profiles" });
+    }
+  });
+
+  // Public host/venue directory. Browsing is public — trucks and
+  // customers can find venues signed out; booking one still requires
+  // sign-in through the existing booking routes. Eligibility mirrors
+  // the public map feed (/api/map/locations): the host's owner is not
+  // disabled, their public profile settings allow showing the address,
+  // and the host has a real address with coordinates. The response is
+  // an allowlisted projection, never the raw host row (no owner id, no
+  // contact details, no payout or pricing internals).
+  // Registered before /api/hosts/:hostId so "public" is not read as an id.
+  app.get("/api/hosts/public", async (req: any, res) => {
+    try {
+      const allHosts = await storage.getAllHosts();
+      const ownerIds = Array.from(
+        new Set(
+          allHosts
+            .map((host: any) => String(host?.userId || "").trim())
+            .filter(Boolean),
+        ),
+      );
+      const ownerRows =
+        ownerIds.length > 0
+          ? await db
+              .select({
+                id: users.id,
+                isDisabled: users.isDisabled,
+                publicProfileSettings: users.publicProfileSettings,
+              })
+              .from(users)
+              .where(inArray(users.id, ownerIds))
+          : [];
+      const ownerById = new Map(
+        ownerRows.map((row: any) => [String(row.id), row]),
+      );
+
+      const publicHosts = allHosts
+        .filter((host: any) => {
+          const owner = ownerById.get(String(host?.userId || ""));
+          if (!owner || owner.isDisabled !== false) return false;
+          const visibility = resolvePublicProfileVisibility(
+            owner.publicProfileSettings,
+          );
+          if (!visibility.showAddress) return false;
+          if (!String(host?.address || "").trim()) return false;
+          if (
+            !Number.isFinite(Number(host?.latitude)) ||
+            !Number.isFinite(Number(host?.longitude))
+          ) {
+            return false;
+          }
+          return isHostProfileMapEligible({
+            businessName: host.businessName,
+            address: host.address,
+            city: host.city,
+            state: host.state,
+          });
+        })
+        .map((host: any) => ({
+          id: host.id,
+          businessName: host.businessName,
+          address: String(host.address || "").trim() || null,
+          city: host.city ?? null,
+          state: host.state ?? null,
+          latitude: Number(host.latitude),
+          longitude: Number(host.longitude),
+          locationType: host.locationType ?? null,
+          expectedFootTraffic: host.expectedFootTraffic ?? null,
+          amenities: host.amenities ?? null,
+          notes: host.notes ?? null,
+          spotCount: host.spotCount ?? null,
+          isVerified: Boolean(host.isVerified),
+          logoUrl: host.logoUrl ?? null,
+          coverImageUrl: host.coverImageUrl ?? null,
+          websiteUrl: host.websiteUrl ?? null,
+        }))
+        .sort((a: any, b: any) =>
+          String(a.businessName).localeCompare(String(b.businessName)),
+        );
+
+      res.json(publicHosts);
+    } catch (error: any) {
+      console.error("Error fetching public hosts:", error);
+      res.status(500).json({ message: "Failed to fetch public hosts" });
     }
   });
 
