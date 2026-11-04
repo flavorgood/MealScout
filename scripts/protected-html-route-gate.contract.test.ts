@@ -131,6 +131,38 @@ const adminRewriteIndex = rewrites.findIndex(
 );
 assert.ok(spaRewriteIndex > adminRewriteIndex, "protected rewrites must precede SPA fallback");
 
+// Own titles for owner pages: the dashboard interstitial names the page it
+// guards, while unregistered gated paths keep the shared sign-in title.
+const dashboardInterstitial = buildProtectedRouteInterstitialHtml("/dashboard");
+assert.ok(
+  dashboardInterstitial.includes("<title>Dashboard | MealScout</title>"),
+  "dashboard interstitial must carry the dashboard's own title",
+);
+assert.ok(
+  interstitial.includes("<title>MealScout | Sign in required</title>"),
+  "unregistered gated paths keep the shared sign-in title",
+);
+
+// /orders and /menu-builder documents must reach the same Render shell path
+// as /dashboard — the edge otherwise serves them the generic shell title and
+// no server-side title can ever reach the document.
+for (const prefix of ["orders", "menu-builder"]) {
+  const rewriteHit = rewrites.some(
+    (rule) =>
+      String(rule.source || "") === `/${prefix}` &&
+      String(rule.destination || "").includes(`mealscout.onrender.com/${prefix}`),
+  );
+  assert.ok(rewriteHit, `vercel rewrites must proxy /${prefix} to Render for its own page title`);
+  const routeHit = routes.some(
+    (rule) =>
+      String(rule.src || "").includes(prefix) &&
+      String(rule.dest || "").includes(`mealscout.onrender.com/${prefix}`),
+  );
+  assert.ok(routeHit, `vercel routes must proxy /${prefix} to Render for its own page title`);
+}
+
+assert.match(viteTs, /appPageTitles/, "shell serving must apply registered app page titles");
+
 const robots = read("client/public/robots.txt");
 assert.ok(robots.includes("Disallow: /admin"));
 assert.ok(robots.includes("Disallow: /dashboard"));

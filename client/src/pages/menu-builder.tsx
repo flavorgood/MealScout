@@ -16,6 +16,7 @@ import { guestMenuDraftToCsv, readGuestMenuDraft, GUEST_MENU_CATEGORY_NOTICE } f
 import { getProgressiveAccountGate } from "@shared/progressiveOnboarding";
 import { useToast } from "@/hooks/use-toast";
 import BusinessWorkspaceShell from "@/components/business-workspace-shell";
+import { SEOHead } from "@/components/seo-head";
 import {
   getScopedBusinessPermissions,
   isScopedBusinessOwner,
@@ -652,6 +653,12 @@ function OwnerMenuBuilderPage() {
         </Button>
       }
     >
+      <SEOHead
+        title="Menu Builder | MealScout"
+        description="Create and manage your online menu on MealScout."
+        canonicalUrl="https://www.mealscout.us/menu-builder"
+        noIndex
+      />
       <div
         className="mx-auto min-h-screen max-w-6xl space-y-4 px-4 py-5 pb-28 lg:px-6 lg:py-8"
         data-testid="owner-menu-workspace"
