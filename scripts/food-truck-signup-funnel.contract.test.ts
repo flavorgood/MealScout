@@ -521,10 +521,11 @@ assert(
     publicSearch.includes("escapeLikePattern") &&
     publicSearch.includes("id: truckImportListings.id") &&
     publicSearch.includes("name: truckImportListings.name") &&
-    publicSearch.includes("address: truckImportListings.address") &&
+    !publicSearch.includes("address: truckImportListings.address") &&
     publicSearch.includes("city: truckImportListings.city") &&
     publicSearch.includes("state: truckImportListings.state") &&
-    publicSearch.includes("res.json(rows)") &&
+    publicSearch.includes("rows.map(") &&
+    publicSearch.includes("displayCapsValue(row.name)") &&
     !publicSearch.includes("status: truckImportListings.status") &&
     !publicSearch.includes("invitedUserId: truckImportListings.invitedUserId") &&
     !publicSearch.includes("phone: truckImportListings.phone") &&

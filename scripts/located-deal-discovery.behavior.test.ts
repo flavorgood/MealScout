@@ -46,7 +46,7 @@ async function compile(name: string, input: any) {
   finally { await unlink(filename); }
 }
 const { NativeStorage } = await compile("storage", { stdin: { contents: `
-  import { and, eq, lte, gte, sql, desc, inArray } from 'drizzle-orm';
+  import { and, or, eq, lte, gte, sql, desc, inArray, isNull } from 'drizzle-orm';
   import { deals, restaurants } from '@shared/schema';
   import { db } from './db';
   import { getLocatedActiveDealCandidates } from './services/locatedDealCandidates';

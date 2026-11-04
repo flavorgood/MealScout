@@ -366,7 +366,7 @@ export function registerTruckClaimRoutes(
         .limit(15);
 
       res.json(
-        rows.map((row) => ({
+        rows.map((row: (typeof rows)[number]) => ({
           ...row,
           name: displayCapsValue(row.name),
           city: displayCapsValue(row.city),

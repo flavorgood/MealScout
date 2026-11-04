@@ -1620,7 +1620,7 @@ const checks: Array<[string, () => void]> = [
     () => {
       assert.match(
         visitPanel,
-        /profile\.cta\.find\(\(action\) => action\.type === "map"\)/,
+        /profile\.cta\.find\(\(action\) => action\.safe && action\.type === "map"\)/,
       );
       assert.doesNotMatch(
         visitPanel,
