@@ -9,6 +9,7 @@ import { dateKeyInZone } from "../services/dateKeys";
 import { assertPublicResponseSafe } from "../publicProfiles";
 import { isTruckOperatingPlanRowPublic } from "../services/truckOperatingPlan";
 import { resolvePublicProfileVisibility } from "../publicProfiles/publicProfileUtils";
+import { toPublicRestaurantListing } from "../publicProfiles/toPublicRestaurantListing";
 import { resolvePublicHostProximityCoordinates } from "../services/publicHostProximityProjection";
 import { deriveProfileEvidenceQuarantineVisibility } from "../services/profileEvidenceQuarantine";
 import { isPublicBusinessVisible } from "../utils/publicBusinessVisibility";
@@ -250,6 +251,7 @@ export function registerDiscoveryRoutes(app: Express) {
               restaurant_owner.email as "profileEmail",
               r.website_url as "profileWebsiteUrl",
               r.raw_data as "rawData",
+              restaurant_owner.public_profile_settings as "publicProfileSettings",
               coalesce(ri.clicks, 0) as clicks,
               coalesce(ri.events, 0) as events,
               coalesce(vc.video_recommendations, 0) as "videoRecommendations",
@@ -407,6 +409,35 @@ export function registerDiscoveryRoutes(app: Express) {
         ) {
           return [];
         }
+        // Coordinates leave this route only through the canonical public
+        // listing projection — the same gate every other public restaurant
+        // surface uses. The raw r.latitude/r.longitude selected above are
+        // internal inputs to that projection, never response fields: the
+        // projection returns them only when the owner's public settings
+        // allow the address, the business is not a private chef, the
+        // contact-address evidence is accepted, and a truck's saved address
+        // is an operating location rather than an administrative one. In
+        // every other case they come back null. Trend metrics are computed
+        // in SQL and pass through untouched. (The query above already
+        // restricts rows to owners with is_disabled = false, which is the
+        // projection's ownerEnabled condition.)
+        const ownerVisibility = resolvePublicProfileVisibility(
+          row.publicProfileSettings,
+        );
+        const projectedListing = toPublicRestaurantListing(
+          {
+            ...row,
+            address: row.profileAddress,
+            phone: row.profilePhone,
+            email: row.profileEmail,
+            websiteUrl: row.profileWebsiteUrl,
+          },
+          {
+            showAddress: ownerVisibility.showAddress,
+            showContact: ownerVisibility.showContact,
+            ownerEnabled: true,
+          },
+        );
         const {
           rawData: _rawData,
           description: _description,
@@ -414,9 +445,18 @@ export function registerDiscoveryRoutes(app: Express) {
           profilePhone: _profilePhone,
           profileEmail: _profileEmail,
           profileWebsiteUrl: _profileWebsiteUrl,
+          publicProfileSettings: _publicProfileSettings,
+          latitude: _rawLatitude,
+          longitude: _rawLongitude,
           ...publicRow
         } = row;
-        return [publicRow];
+        return [
+          {
+            ...publicRow,
+            latitude: projectedListing.latitude ?? null,
+            longitude: projectedListing.longitude ?? null,
+          },
+        ];
       });
 
       sendPublicJson(res, {
