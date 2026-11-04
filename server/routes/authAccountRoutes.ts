@@ -28,6 +28,11 @@ import {
   restaurants,
   suppliers,
 } from "@shared/schema";
+import {
+  GUEST_MENU_MAX_ITEMS,
+  parseGuestMenuDraft,
+  type GuestMenuDraft,
+} from "@shared/guestMenuDraft";
 import { resolveEffectiveLocationContext } from "../services/sessionLocationContext";
 import { authLog } from "../utils/authLog";
 import {
@@ -233,6 +238,56 @@ const accountSettingsSchema = z.object({
     })
     .optional(),
 });
+
+// ── Private menu draft (per-account) ────────────────────────────────────────
+// The menu builder's private draft used to live only in browser storage, so
+// a new phone or cleared browser data wiped it. It now also lives on the
+// owner's account, under this accountSettings key — the same home the
+// onboarding businessDraft uses. The key is deliberately not "menuDraft":
+// businessOnboardingPromotion reads that key as a signup artifact with a
+// different shape. Identity always comes from the session; no endpoint here
+// accepts a user id, so a draft can only ever be read or written by its owner.
+const PRIVATE_MENU_DRAFT_SETTINGS_KEY = "privateMenuDraft";
+
+const privateMenuDraftPayloadSchema = z.object({
+  draft: z.object({
+    name: z.string().max(160),
+    serviceType: z.enum(["all", "breakfast", "lunch", "dinner"]),
+    items: z
+      .array(
+        z.object({
+          name: z.string().max(160),
+          description: z.string().max(500),
+          price: z.string().max(16),
+          category: z.string().max(80),
+        }),
+      )
+      .max(GUEST_MENU_MAX_ITEMS),
+  }),
+  savedAt: z.number().int().positive(),
+});
+
+function readAccountPrivateMenuDraft(
+  user: any,
+): { draft: GuestMenuDraft; savedAt: number } | null {
+  const settings =
+    user?.accountSettings && typeof user.accountSettings === "object"
+      ? (user.accountSettings as Record<string, any>)
+      : {};
+  const stored = settings[PRIVATE_MENU_DRAFT_SETTINGS_KEY];
+  if (!stored || typeof stored !== "object") return null;
+  const savedAt =
+    typeof stored.savedAt === "number" ? stored.savedAt : Number.NaN;
+  if (!Number.isFinite(savedAt)) return null;
+  if (!stored.draft || typeof stored.draft !== "object") return null;
+  // Re-run the builder's own validator (field limits + 7-day freshness) so
+  // the server never hands back a draft the builder itself would reject.
+  const draft = parseGuestMenuDraft(
+    JSON.stringify({ version: 1, __savedAt: savedAt, ...stored.draft }),
+  );
+  if (!draft) return null;
+  return { draft, savedAt };
+}
 
 export function registerAuthAccountRoutes(app: Express) {
   app.get("/api/auth/user", async (req: any, res) => {
@@ -747,6 +802,78 @@ export function registerAuthAccountRoutes(app: Express) {
         });
       }
       res.status(500).json({ message: "Failed to correct onboarding role" });
+    }
+  });
+
+  app.get("/api/settings/me/menu-draft", isAuthenticated, async (req: any, res) => {
+    try {
+      const user = await storage.getUser(req.user.id);
+      if (!user) {
+        return res.status(404).json({ message: "User not found" });
+      }
+      const stored = readAccountPrivateMenuDraft(user);
+      res.json({
+        draft: stored?.draft ?? null,
+        savedAt: stored?.savedAt ?? null,
+      });
+    } catch (error) {
+      console.error("Error fetching private menu draft:", error);
+      res.status(500).json({ message: "Failed to fetch menu draft" });
+    }
+  });
+
+  app.put("/api/settings/me/menu-draft", isAuthenticated, async (req: any, res) => {
+    try {
+      const parsed = privateMenuDraftPayloadSchema.parse(req.body || {});
+      const user = await storage.getUser(req.user.id);
+      if (!user) {
+        return res.status(404).json({ message: "User not found" });
+      }
+      const now = Date.now();
+      // Clamp clock skew: a client clock running ahead must not pin the
+      // draft's freshness window into the future.
+      const savedAt = Math.min(parsed.savedAt, now);
+      const draft = parseGuestMenuDraft(
+        JSON.stringify({ version: 1, __savedAt: savedAt, ...parsed.draft }),
+        now,
+      );
+      if (!draft) {
+        return res.status(400).json({ message: "Invalid menu draft" });
+      }
+      const existing = readAccountPrivateMenuDraft(user);
+      if (existing && existing.savedAt > savedAt) {
+        // A newer copy already lives on the account (e.g. edited on another
+        // device); never let a stale tab overwrite it.
+        return res.json({
+          draft: existing.draft,
+          savedAt: existing.savedAt,
+          superseded: true,
+        });
+      }
+      const currentSettings =
+        user.accountSettings && typeof user.accountSettings === "object"
+          ? { ...(user.accountSettings as Record<string, any>) }
+          : {};
+      const updated = await storage.updateUser(req.user.id, {
+        accountSettings: {
+          ...currentSettings,
+          [PRIVATE_MENU_DRAFT_SETTINGS_KEY]: { version: 1, savedAt, draft },
+        } as any,
+      });
+      const stored = readAccountPrivateMenuDraft(updated || user) || {
+        draft,
+        savedAt,
+      };
+      res.json({ draft: stored.draft, savedAt: stored.savedAt });
+    } catch (error: any) {
+      console.error("Error saving private menu draft:", error);
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({
+          message: "Invalid menu draft payload",
+          errors: error.errors,
+        });
+      }
+      res.status(500).json({ message: "Failed to save menu draft" });
     }
   });
 

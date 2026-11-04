@@ -12,7 +12,7 @@ import {
   getOwnerMenuJourneyStage,
   type MenuJourneyStage,
 } from "@/lib/menu-builder-navigation";
-import { guestMenuDraftToCsv, readGuestMenuDraft, GUEST_MENU_CATEGORY_NOTICE } from "@shared/guestMenuDraft";
+import { guestMenuDraftToCsv, persistGuestMenuDraft, readGuestMenuDraft, readGuestMenuDraftSavedAt, GUEST_MENU_CATEGORY_NOTICE, type GuestMenuDraft } from "@shared/guestMenuDraft";
 import { getProgressiveAccountGate } from "@shared/progressiveOnboarding";
 import { useToast } from "@/hooks/use-toast";
 import BusinessWorkspaceShell from "@/components/business-workspace-shell";
@@ -248,7 +248,32 @@ function OwnerMenuBuilderPage() {
   const [posNotes, setPosNotes] = useState("");
   const [externalJson, setExternalJson] = useState("");
   const [isRequestingPosSync, setIsRequestingPosSync] = useState(false);
-  const [guestDraft] = useState(() => readGuestMenuDraft(() => window.localStorage));
+  const [guestDraft, setGuestDraft] = useState(() => readGuestMenuDraft(() => window.localStorage));
+
+  // The kept draft also lives on the owner's account: on a device with no
+  // local copy (or an older one), restore the account copy so the draft is
+  // here to review and import.
+  useEffect(() => {
+    if (!user) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await fetch("/api/settings/me/menu-draft", { credentials: "include" });
+        if (!res.ok) return;
+        const payload = await res.json().catch(() => null);
+        const serverDraft = (payload?.draft ?? null) as GuestMenuDraft | null;
+        const serverSavedAt = typeof payload?.savedAt === "number" ? payload.savedAt : null;
+        if (cancelled || !serverDraft || !serverSavedAt) return;
+        const localSavedAt = readGuestMenuDraftSavedAt(() => window.localStorage);
+        if (localSavedAt !== null && localSavedAt >= serverSavedAt) return;
+        persistGuestMenuDraft(() => window.localStorage, serverDraft, serverSavedAt);
+        if (!cancelled) setGuestDraft(serverDraft);
+      } catch {
+        // Any local copy remains the fallback.
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [user]);
 
   const { data: businesses = [], isLoading: loadingBusinesses } = useQuery<
     Restaurant[]

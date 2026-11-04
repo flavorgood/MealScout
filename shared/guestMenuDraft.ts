@@ -48,6 +48,15 @@ export function persistGuestMenuDraft(storage: () => Pick<Storage, "setItem">, d
   } catch { return false; }
 }
 
+export function readGuestMenuDraftSavedAt(storage: () => Pick<Storage, "getItem">): number | null {
+  try {
+    const raw = storage().getItem(GUEST_MENU_DRAFT_KEY);
+    if (!raw || !parseGuestMenuDraft(raw)) return null;
+    const value = JSON.parse(raw);
+    return typeof value?.__savedAt === "number" && Number.isFinite(value.__savedAt) ? value.__savedAt : null;
+  } catch { return null; }
+}
+
 export function guestMenuDraftToCsv(draft: GuestMenuDraft): string {
   if (!draft.items.length || draft.items.some(item => !item.name.trim() || !/^\d{1,5}(?:\.\d{1,2})?$/.test(item.price.trim()))) {
     throw new Error("Add a name and a valid price to every item before importing. Your private draft is saved.");
