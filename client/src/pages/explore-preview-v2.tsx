@@ -439,6 +439,8 @@ interface TrendingPlaceSummary {
   name: string;
   city?: string | null;
   state?: string | null;
+  latitude?: number | null;
+  longitude?: number | null;
   cuisineType?: string | null;
   logoUrl?: string | null;
   coverImageUrl?: string | null;
