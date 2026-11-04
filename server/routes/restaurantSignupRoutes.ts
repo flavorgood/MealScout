@@ -497,6 +497,31 @@ export function registerRestaurantSignupRoutes(
           }
         }
 
+        // Affiliate first-click attribution (affiliateClicks): convert the
+        // first click recorded under this visitor's stable identity. The
+        // click route persists that identity in a cookie, so it survives
+        // the gap between click and signup; a bare session id does not,
+        // because sessions are not persisted for anonymous visitors.
+        if (user?.id) {
+          try {
+            const {
+              attributeSignupToAffiliate,
+              resolveAffiliateVisitorIdentity,
+            } = await import("../affiliateService");
+            const visitorIdentity = resolveAffiliateVisitorIdentity(
+              req as any,
+            );
+            if (visitorIdentity) {
+              await attributeSignupToAffiliate(visitorIdentity, user.id);
+            }
+          } catch (error) {
+            console.error(
+              "[Phase 2] Error attributing affiliate first click:",
+              error,
+            );
+          }
+        }
+
         try {
           const event = buildMealScoutEventInput({
             entity_id: restaurant.id,
