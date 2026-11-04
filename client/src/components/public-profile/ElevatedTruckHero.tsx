@@ -20,16 +20,22 @@
  *   - Cuisine tags
  *   - Favorite button
  */
+import { useCallback, useEffect, useState } from "react";
 import type { PublicRestaurantProfile } from "@shared/publicProfiles";
 import {
   ProfileHeroMedia,
   buildPublicProfileHeroAssets,
 } from "./ProfileHeroMedia";
 import { getDishCategoryPhoto } from "@/lib/dishCategoryPhoto";
+import { apiRequest } from "@/lib/queryClient";
+import {
+  publicProfileLoginHref,
+  publicProfileSignupHref,
+} from "@/lib/public-profile-recovery";
 import { ProfileFavoriteButton } from "./ProfileFavoriteButton";
 import { ProfileRecommendButton } from "./ProfileRecommendButton";
 import { getTruckSchedulePrimaryStop } from "./truckScheduleTruth";
-import { CalendarDays, Clock3, MapPin, Navigation } from "lucide-react";
+import { Bell, BellRing, CalendarDays, Clock3, MapPin, Navigation } from "lucide-react";
 
 type ElevatedTruckHeroProps = {
   profile: PublicRestaurantProfile & {
@@ -75,6 +81,10 @@ const GENERIC_TRUCK_TEXT = new Set([
   "food truck",
   "truck",
   "restaurant",
+  // "other" is the stored placeholder when no real cuisine/category was
+  // ever set (e.g. imported listings). It is not a category and must never
+  // be shown to visitors as one.
+  "other",
 ]);
 
 const cleanCuisineTags = (tags: string[] | null | undefined) =>
@@ -132,6 +142,63 @@ export function ElevatedTruckHero({
   const description = isGenericTruckDescription(profile.description, profile)
     ? null
     : profile.description;
+
+  // "Follow updates" is a real follow, backed by the same restaurant
+  // follow endpoints the deal cards use (POST/DELETE
+  // /api/restaurants/:id/follow, listed by GET /api/following/restaurants).
+  // It used to be a dead label inside a link to the schedule section.
+  const [isFollowing, setIsFollowing] = useState(false);
+  const [followBusy, setFollowBusy] = useState(false);
+  const [followError, setFollowError] = useState<string | null>(null);
+  const [showFollowGuestPrompt, setShowFollowGuestPrompt] = useState(false);
+
+  useEffect(() => {
+    if (!isAuthenticated || !profile.id) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const response = await apiRequest("GET", "/api/following/restaurants");
+        const follows = await response.json().catch(() => null);
+        if (cancelled) return;
+        const list = Array.isArray(follows) ? follows : [];
+        setIsFollowing(
+          list.some(
+            (follow: any) =>
+              String(follow?.restaurantId || follow?.restaurant?.id || "") ===
+              String(profile.id),
+          ),
+        );
+      } catch {
+        // Follow state unknown; the button stays in its default state and
+        // a failed toggle surfaces its own error.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [isAuthenticated, profile.id]);
+
+  const handleFollowToggle = useCallback(async () => {
+    if (!isAuthenticated) {
+      setShowFollowGuestPrompt(true);
+      return;
+    }
+    if (followBusy) return;
+    setFollowBusy(true);
+    setFollowError(null);
+    try {
+      await apiRequest(
+        isFollowing ? "DELETE" : "POST",
+        `/api/restaurants/${encodeURIComponent(String(profile.id))}/follow`,
+        {},
+      );
+      setIsFollowing(!isFollowing);
+    } catch {
+      setFollowError("Follow could not be updated. Please try again.");
+    } finally {
+      setFollowBusy(false);
+    }
+  }, [followBusy, isAuthenticated, isFollowing, profile.id]);
 
   return (
     <section
@@ -244,15 +311,65 @@ export function ElevatedTruckHero({
             </div>
           </div>
         ) : (
-          <a
-            href="#truck-schedule"
-            className="flex min-h-11 items-center justify-between gap-3 rounded-2xl border border-dashed border-orange-300 bg-orange-50/70 px-4 py-3 text-sm font-bold text-orange-950 hover:bg-orange-50"
-          >
-            <span>Schedule not posted yet</span>
-            <span className="inline-flex items-center gap-1 text-orange-700">
-              Follow updates <CalendarDays className="h-4 w-4" />
-            </span>
-          </a>
+          <div className="rounded-2xl border border-dashed border-orange-300 bg-orange-50/70 px-4 py-3">
+            <div className="flex min-h-11 flex-wrap items-center justify-between gap-3">
+              <a
+                href="#truck-schedule"
+                className="text-sm font-bold text-orange-950 hover:underline"
+              >
+                Schedule not posted yet
+              </a>
+              <button
+                type="button"
+                onClick={handleFollowToggle}
+                disabled={followBusy}
+                aria-pressed={isFollowing}
+                className="inline-flex min-h-9 items-center gap-1.5 rounded-full border border-orange-300 bg-white px-3 text-sm font-black text-orange-800 hover:bg-orange-50 disabled:opacity-60"
+              >
+                {isFollowing ? (
+                  <BellRing className="h-4 w-4" />
+                ) : (
+                  <Bell className="h-4 w-4" />
+                )}
+                {followBusy
+                  ? "Saving..."
+                  : isFollowing
+                    ? "Following"
+                    : "Follow updates"}
+              </button>
+            </div>
+            {followError ? (
+              <p className="mt-2 text-xs font-semibold text-red-700" role="alert">
+                {followError}
+              </p>
+            ) : null}
+            {isFollowing ? (
+              <p className="mt-2 text-xs font-semibold text-orange-800">
+                You follow this truck. Its schedule updates will show in your
+                Following list.
+              </p>
+            ) : null}
+            {showFollowGuestPrompt ? (
+              <p className="mt-2 text-xs leading-5 font-semibold text-orange-900">
+                Following takes a free MealScout account, so this truck's
+                schedule updates can find you.{" "}
+                <a
+                  href={publicProfileLoginHref(profile.profilePath, "follow")}
+                  className="font-black underline underline-offset-2"
+                >
+                  Log in
+                </a>{" "}
+                or{" "}
+                <a
+                  href={publicProfileSignupHref(profile.profilePath)}
+                  className="font-black underline underline-offset-2"
+                >
+                  create an account
+                </a>{" "}
+                and you will come right back here.
+              </p>
+            ) : null}
+          </div>
         )}
 
         <div className="flex flex-wrap items-center gap-3">

@@ -29,6 +29,21 @@ const getSafeRedirectPath = (): string | null => {
   }
 };
 
+// Why the visitor was sent here (set by the public-profile Save / Recommend /
+// Follow actions). The subtitle names that action so the page explains what
+// logging in is for, instead of generic copy about unrelated features.
+const getLoginIntentSubtitle = (): string => {
+  try {
+    const intent = new URLSearchParams(window.location.search).get("intent");
+    if (intent === "save") return "Log in to save this place to your favorites";
+    if (intent === "recommend") return "Log in to recommend this place";
+    if (intent === "follow") return "Log in to follow this business for updates";
+  } catch {
+    // fall through to the neutral subtitle
+  }
+  return "Log in to your MealScout account";
+};
+
 export default function Login() {
   const { isAuthenticated, isLoading } = useAuth();
   const { toast } = useToast();
@@ -280,7 +295,7 @@ export default function Login() {
             Welcome Back
           </h2>
           <p className="text-[color:var(--text-secondary)] text-sm">
-            Log in to access your saved deals and favorites
+            {getLoginIntentSubtitle()}
           </p>
         </div>
 

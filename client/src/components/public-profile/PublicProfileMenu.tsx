@@ -8,6 +8,7 @@ import type {
   PublicRestaurantProfile,
 } from "@shared/publicProfiles";
 import { apiUrl } from "@/lib/api";
+import { publicProfileLoginHref } from "@/lib/public-profile-recovery";
 import { getDishCategoryPhoto } from "@/lib/dishCategoryPhoto";
 import { assessPublicMenuCompleteness } from "@/lib/publicMenuCompleteness";
 import {
@@ -31,6 +32,7 @@ const externalTarget = (href: string) =>
 function PublicProfileMenuItem({
   item,
   submitState,
+  showAuthPrompt,
   isRecommending,
   isSubmitting,
   recommendComment,
@@ -43,6 +45,7 @@ function PublicProfileMenuItem({
 }: {
   item: PublicMenuItem;
   submitState: string | null;
+  showAuthPrompt: boolean;
   isRecommending: boolean;
   isSubmitting: boolean;
   recommendComment: string;
@@ -155,6 +158,24 @@ function PublicProfileMenuItem({
         </p>
       ) : null}
 
+      {showAuthPrompt ? (
+        <div className="border-t border-[color:var(--profile-border)] bg-[color:var(--profile-surface-soft)] px-3 py-2 text-xs leading-5 text-[color:var(--profile-muted)]">
+          <p>
+            You need a free MealScout account to recommend a dish, so
+            recommendations stay tied to real people.
+          </p>
+          <p className="mt-1">
+            <a
+              href={publicProfileLoginHref(undefined, "recommend")}
+              className="font-black text-[color:var(--profile-accent)] hover:text-[color:var(--profile-accent-hover)]"
+            >
+              Log in
+            </a>{" "}
+            and you will come right back to this menu.
+          </p>
+        </div>
+      ) : null}
+
       {isRecommending && item.menuItemId ? (
         <div className="space-y-3 border-t border-[color:var(--profile-border)] bg-[color:var(--profile-surface-soft)] p-3">
           <label className="block text-xs font-black text-[color:var(--profile-ink-soft)]">
@@ -214,6 +235,7 @@ export function PublicProfileMenu({
   const [submitStateByItem, setSubmitStateByItem] = useState<
     Record<string, string>
   >({});
+  const [authPromptItemId, setAuthPromptItemId] = useState<string | null>(null);
   const [submittingItemId, setSubmittingItemId] = useState<string | null>(null);
   const menuVariants = useMemo(
     () =>
@@ -356,6 +378,17 @@ export function PublicProfileMenu({
       );
       const data = await response.json().catch(() => ({}));
       if (!response.ok) {
+        if (response.status === 401) {
+          // Signed-out visitor: explain in place why an account is needed
+          // and offer the login continuation, instead of surfacing the raw
+          // server auth error.
+          setSubmitStateByItem((current) => ({
+            ...current,
+            [menuItemId]: "",
+          }));
+          setAuthPromptItemId(menuItemId);
+          return;
+        }
         setSubmitStateByItem((current) => ({
           ...current,
           [menuItemId]:
@@ -509,6 +542,10 @@ export function PublicProfileMenu({
                             ? submitStateByItem[item.menuItemId] || null
                             : null
                         }
+                        showAuthPrompt={
+                          Boolean(item.menuItemId) &&
+                          authPromptItemId === item.menuItemId
+                        }
                         isRecommending={recommendingKey === item.menuItemId}
                         isSubmitting={submittingItemId === item.menuItemId}
                         recommendComment={recommendComment}
@@ -516,6 +553,7 @@ export function PublicProfileMenu({
                         onToggleRecommend={() => {
                           setRecommendComment("");
                           setRecommendPhoto(null);
+                          setAuthPromptItemId(null);
                           setRecommendingKey((current) =>
                             current === item.menuItemId
                               ? null

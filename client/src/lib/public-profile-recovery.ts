@@ -15,11 +15,24 @@ export const isPrivatePublicProfile = (error: unknown) =>
   error instanceof PublicProfileReadError &&
   (error.status === 401 || error.status === 403);
 
-export function publicProfileLoginHref(fallback?: string): string {
+export type PublicProfileLoginIntent = "save" | "recommend" | "follow";
+
+export function publicProfileLoginHref(
+  fallback?: string,
+  intent?: PublicProfileLoginIntent,
+): string {
   const current = typeof window === "undefined" ? null :
     normalizeSafeInternalPath(window.location.pathname + window.location.search + window.location.hash);
   const destination = current || normalizeSafeInternalPath(fallback) || "/scout";
-  return `/login?redirect=${encodeURIComponent(destination)}`;
+  const intentParam = intent ? `&intent=${encodeURIComponent(intent)}` : "";
+  return `/login?redirect=${encodeURIComponent(destination)}${intentParam}`;
+}
+
+export function publicProfileSignupHref(fallback?: string): string {
+  const current = typeof window === "undefined" ? null :
+    normalizeSafeInternalPath(window.location.pathname + window.location.search + window.location.hash);
+  const destination = current || normalizeSafeInternalPath(fallback) || "/scout";
+  return `/customer-signup?redirect=${encodeURIComponent(destination)}`;
 }
 
 export async function readPublicProfileJson<T>(url: string, signal?: AbortSignal): Promise<T> {

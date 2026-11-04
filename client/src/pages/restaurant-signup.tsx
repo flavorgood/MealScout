@@ -364,7 +364,14 @@ export default function RestaurantSignup() {
   const { user, isAuthenticated, isLoading } = useAuth();
   const queryClient = useQueryClient();
   const [authMode, setAuthMode] = useState<"signup" | "login">("signup");
-  const [accountRequested, setAccountRequested] = useState(
+  // Guests start at the account step: the account minimum (name, email,
+  // phone, password, terms) comes first, and the business-details designer
+  // is the optional step after it — those details are collected again in
+  // the authenticated business setup form. The flow used to open on the
+  // eight-field business designer before any account existed, which read
+  // as a long form to fill in before signing up could even start.
+  const [accountRequested, setAccountRequested] = useState(true);
+  const [draftKept, setDraftKept] = useState(
     () => new URLSearchParams(window.location.search).get("keepDraft") === "1",
   );
   const signupRouteIntent = useMemo(
@@ -1530,6 +1537,7 @@ export default function RestaurantSignup() {
                   window.location.href = buildGuestBusinessSignupPath(currentIntent, businessType, signupAuthContext);
                   return;
                 }
+                setDraftKept(true);
                 setAccountRequested(true);
               }}
             />
@@ -1552,11 +1560,19 @@ export default function RestaurantSignup() {
         />
 
         <div className="mx-auto max-w-6xl px-4 py-6 sm:px-6">
-          <div className="mb-6 rounded-xl border bg-card p-4" data-testid="guest-draft-account-gate">
-            <h1 className="text-xl font-bold">{COPY.guestDraft.accountTitle}</h1>
-            <p className="mt-2 text-sm text-muted-foreground">{COPY.guestDraft.accountDescription}</p>
-            <Button type="button" variant="outline" className="mt-3" onClick={() => setAccountRequested(false)}>{COPY.guestDraft.edit}</Button>
-          </div>
+          {draftKept ? (
+            <div className="mb-6 rounded-xl border bg-card p-4" data-testid="guest-draft-account-gate">
+              <h1 className="text-xl font-bold">{COPY.guestDraft.accountTitle}</h1>
+              <p className="mt-2 text-sm text-muted-foreground">{COPY.guestDraft.accountDescription}</p>
+              <Button type="button" variant="outline" className="mt-3" onClick={() => setAccountRequested(false)}>{COPY.guestDraft.edit}</Button>
+            </div>
+          ) : (
+            <div className="mb-6 rounded-xl border bg-card p-4" data-testid="guest-account-first-gate">
+              <h1 className="text-xl font-bold">{COPY.guestDraft.accountFirstTitle}</h1>
+              <p className="mt-2 text-sm text-muted-foreground">{COPY.guestDraft.accountFirstDescription}</p>
+              <Button type="button" variant="outline" className="mt-3" onClick={() => setAccountRequested(false)}>{COPY.guestDraft.designFirst}</Button>
+            </div>
+          )}
           <div className="grid items-start gap-6 lg:grid-cols-[1.1fr_1fr]">
             <Card className="border-[color:var(--border-subtle)] bg-[var(--bg-card)] shadow-clean-lg">
               <CardContent className="p-6 sm:p-8">

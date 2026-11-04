@@ -79,9 +79,11 @@ export function ElevatedProfileHero({
   // serviceType is just businessType again (e.g. "restaurant") — already
   // shown as the type badge above, so it's dropped here to avoid showing
   // the same thing twice (once as a badge, once as raw, unformatted text).
+  // "other" is likewise dropped: it is the stored placeholder for "no real
+  // category was ever set", not a cuisine a visitor can act on.
   const cuisineSummary = (profile.cuisineTags ?? [])
+    .filter((tag) => Boolean(tag) && tag.trim().toLowerCase() !== "other")
     .slice(0, 2)
-    .filter(Boolean)
     .join(" · ");
 
   const statusStyle = openStatusStyle(profile.openStatus);

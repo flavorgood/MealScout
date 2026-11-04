@@ -139,7 +139,10 @@ const buildCard = (row: any): PublicSeoLandingItem => {
     city: row.city || null,
     state: row.state || null,
     imageUrl: publicMedia.coverImageUrl || publicMedia.logoUrl || null,
-    cuisineTags: row.cuisineType ? [String(row.cuisineType)] : [],
+    cuisineTags:
+      row.cuisineType && String(row.cuisineType).trim().toLowerCase() !== "other"
+        ? [String(row.cuisineType)]
+        : [],
     statusLabel: null,
     summary: null,
     primaryCtaPath: profilePath,
