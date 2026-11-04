@@ -132,13 +132,35 @@ export const publicSeoCityIdentityKey = (input: {
   city?: unknown;
   state?: unknown;
 }) =>
-  `${normalizeIdentityPart(input.city)}\u0000${normalizeIdentityPart(input.state)}`;
+  `${normalizeIdentityPart(canonicalPublicSeoCityName(input.city))}\u0000${normalizeIdentityPart(input.state)}`;
+
+// Stored city names come from free-text business records, so a place name
+// can be saved misspelled and then become the city's public name and URL
+// slug ("Lakeworth beach" for Lake Worth Beach, FL). Corrections are keyed
+// by the identity-normalized stored name and applied at every public read
+// (sitemaps and landing pages), so a city always lists under its real name
+// and its correctly spelled slug. This corrects a geographic fact in the
+// stored data; it does not rewrite any business's own name, and the stored
+// rows themselves are left untouched.
+const PUBLIC_SEO_CITY_NAME_CORRECTIONS: Record<string, string> = {
+  "lakeworth beach": "Lake Worth Beach",
+};
+
+export const canonicalPublicSeoCityName = (value: unknown): string => {
+  const collapsed = String(value ?? "").replace(/\s+/g, " ").trim();
+  if (!collapsed) return "";
+  return PUBLIC_SEO_CITY_NAME_CORRECTIONS[collapsed.toLowerCase()] ?? collapsed;
+};
+
+export const canonicalPublicSeoCitySlug = (value: unknown): string =>
+  toPublicSeoSlug(canonicalPublicSeoCityName(value));
 
 export const publicSeoCityIdentityMatches = (
   candidate: { city?: unknown; state?: unknown },
   city: PublicSeoLandingCity,
 ) =>
-  normalizeIdentityPart(candidate.city) === normalizeIdentityPart(city.name) &&
+  normalizeIdentityPart(canonicalPublicSeoCityName(candidate.city)) ===
+    normalizeIdentityPart(canonicalPublicSeoCityName(city.name)) &&
   normalizeIdentityPart(candidate.state) === normalizeIdentityPart(city.state);
 
 export const publicSeoCuisineMatches = (

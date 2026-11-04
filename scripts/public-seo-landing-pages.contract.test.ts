@@ -624,7 +624,7 @@ if (
   !publicSeoData.includes(
     "sql`btrim(coalesce(${cities.name}, '')) <> ''`",
   ) ||
-  !publicSeoData.includes("slug: normalizeCityRegistrySlug(city.slug)") ||
+  !publicSeoData.includes("slug: canonicalPublicSeoCitySlug(city.name)") ||
   !seoRoutes.includes("normalizeCityRegistrySlug") ||
   !seoRoutes.includes(
     "sql`${cities.createdAt} desc nulls last`, asc(cities.id)",
