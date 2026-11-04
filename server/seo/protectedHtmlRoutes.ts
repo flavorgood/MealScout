@@ -6,6 +6,7 @@
  * Enforcement is session-based — never user-agent based.
  */
 import type { Request, Response, NextFunction } from "express";
+import { appPageTitleForPath } from "./appPageTitles";
 
 /** Entry prefixes disallowed in robots.txt plus clearly related dashboards. */
 export const PROTECTED_HTML_PATH_PREFIXES = [
@@ -51,6 +52,9 @@ export function buildProtectedRouteInterstitialHtml(requestPath: string): string
   const safePath = escapeHtml(normalizeRequestPath(requestPath));
   const loginHref = `/login?redirect=${encodeURIComponent(normalizeRequestPath(requestPath))}`;
   const safeLoginHref = escapeHtml(loginHref);
+  // Pages with a registered own title are named in the tab even on the
+  // sign-in interstitial; other gated paths keep the shared sign-in title.
+  const pageTitle = appPageTitleForPath(requestPath)?.title ?? "MealScout | Sign in required";
   // The gate still answers 401 and never serves the app shell, but a person
   // who lands here should end up on the real sign-in screen, not a dead-end
   // page: forward immediately (meta refresh + script), with the link kept
@@ -62,7 +66,7 @@ export function buildProtectedRouteInterstitialHtml(requestPath: string): string
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="robots" content="noindex, nofollow, noarchive" />
     <meta http-equiv="refresh" content="0; url=${safeLoginHref}" />
-    <title>MealScout | Sign in required</title>
+    <title>${escapeHtml(pageTitle)}</title>
     <script>window.location.replace(${JSON.stringify(loginHref)});</script>
   </head>
   <body>

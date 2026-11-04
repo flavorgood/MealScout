@@ -5,6 +5,7 @@ import { type Server } from "http";
 import { fileURLToPath } from "url";
 import { nanoid } from "nanoid";
 import { guardUnauthenticatedProtectedHtml } from "./seo/protectedHtmlRoutes";
+import { appPageTitleForPath, renderAppPageTitleDocument } from "./seo/appPageTitles";
 import { renderHomepageHtml } from "./seo/homepageHtml";
 import { isHomepageDocumentRequest } from "./seo/rootEntry";
 import { publicMenuDocumentId } from "./seo/menuHtml";
@@ -83,6 +84,13 @@ export async function setupVite(app: Express, server: Server, canonicalBaseUrl =
         res.setHeader("Cache-Control", "private, no-store");
         res.vary("Accept");
         res.vary("User-Agent");
+      } else if (appPageTitleForPath(url)) {
+        // Owner app pages carry their own title in the served document, not
+        // the marketing homepage title baked into the shell. The guard above
+        // has already answered unauthenticated requests to gated pages, so
+        // this only titles documents the requester may actually receive.
+        const titled = renderAppPageTitleDocument(template, url, canonicalBaseUrl);
+        if (titled) template = titled;
       }
       template = template.replace(
         `src="/src/main.tsx"`,
@@ -184,8 +192,36 @@ export function serveStatic(app: Express, options: { canonicalBaseUrl?: string; 
     res.status(404).json({ message: "Not found" });
   });
 
-  // Fall through to index.html for SPA routes only.
-  app.use("*", (_req, res) => {
-    res.sendFile(path.resolve(distPath, "index.html"));
+  // Fall through to index.html for SPA routes only. Owner app pages with a
+  // registered title get the shell rendered with their own title; every other
+  // route keeps the plain shell file. This runs after the protected-route
+  // gate above, so unauthenticated requests to gated pages never reach it.
+  app.use("*", async (req, res, next) => {
+    const page = appPageTitleForPath(req.originalUrl || req.url || req.path || "/");
+    if (!page) {
+      return res.sendFile(path.resolve(distPath, "index.html"));
+    }
+    try {
+      const template = await fs.promises.readFile(path.join(distPath, "index.html"), "utf8");
+      const html = renderAppPageTitleDocument(
+        template,
+        page.path,
+        options.canonicalBaseUrl || "https://www.mealscout.us",
+      );
+      if (!html) {
+        return res.sendFile(path.resolve(distPath, "index.html"));
+      }
+      return res
+        .status(200)
+        .set({
+          "Content-Type": "text/html; charset=utf-8",
+          "Cache-Control": "no-cache, no-store, must-revalidate",
+          Pragma: "no-cache",
+          Expires: "0",
+        })
+        .send(html);
+    } catch (error) {
+      return next(error);
+    }
   });
 }

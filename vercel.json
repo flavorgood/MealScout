@@ -197,6 +197,22 @@
       "destination": "https://mealscout.onrender.com/vendor-dashboard/:path*"
     },
     {
+      "source": "/orders",
+      "destination": "https://mealscout.onrender.com/orders"
+    },
+    {
+      "source": "/orders/:path*",
+      "destination": "https://mealscout.onrender.com/orders/:path*"
+    },
+    {
+      "source": "/menu-builder",
+      "destination": "https://mealscout.onrender.com/menu-builder"
+    },
+    {
+      "source": "/menu-builder/:path*",
+      "destination": "https://mealscout.onrender.com/menu-builder/:path*"
+    },
+    {
       "source": "/supplier-portal",
       "destination": "https://mealscout.onrender.com/supplier-portal"
     },
@@ -387,6 +403,14 @@
     {
       "src": "/vendor-dashboard(/.*)?",
       "dest": "https://mealscout.onrender.com/vendor-dashboard$1"
+    },
+    {
+      "src": "/orders(/.*)?",
+      "dest": "https://mealscout.onrender.com/orders$1"
+    },
+    {
+      "src": "/menu-builder(/.*)?",
+      "dest": "https://mealscout.onrender.com/menu-builder$1"
     },
     {
       "src": "/supplier-portal(/.*)?",
