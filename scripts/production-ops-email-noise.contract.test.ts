@@ -7,14 +7,18 @@ import {
 } from "../server/utils/marketingEmailWindow";
 
 const previousFlag = process.env[AUTOMATED_MARKETING_EMAILS_FLAG];
+// On by default (owner direction 2026-11-04): unset means ON; only an
+// explicit "false" — the kill-switch — turns automated marketing off.
 delete process.env[AUTOMATED_MARKETING_EMAILS_FLAG];
-assert.equal(areAutomatedMarketingEmailsEnabled(), false);
+assert.equal(areAutomatedMarketingEmailsEnabled(), true);
 assert.equal(
   describeAutomatedMarketingEmailFlag(),
-  "AUTOMATED_MARKETING_EMAILS_ENABLED=true",
+  "AUTOMATED_MARKETING_EMAILS_ENABLED=false",
 );
 process.env[AUTOMATED_MARKETING_EMAILS_FLAG] = "true";
 assert.equal(areAutomatedMarketingEmailsEnabled(), true);
+process.env[AUTOMATED_MARKETING_EMAILS_FLAG] = "false";
+assert.equal(areAutomatedMarketingEmailsEnabled(), false);
 if (previousFlag === undefined) {
   delete process.env[AUTOMATED_MARKETING_EMAILS_FLAG];
 } else {

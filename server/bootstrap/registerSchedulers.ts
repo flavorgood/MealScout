@@ -99,7 +99,7 @@ export async function registerSchedulers(app: Express): Promise<void> {
   );
   if (!areAutomatedMarketingEmailsEnabled()) {
     console.log(
-      `[schedulers] automated marketing/drip emails disabled (${describeAutomatedMarketingEmailFlag()} not set)`,
+      `[schedulers] automated marketing/drip emails disabled (${describeAutomatedMarketingEmailFlag()} set)`,
     );
   }
 
@@ -622,16 +622,23 @@ export async function registerSchedulers(app: Express): Promise<void> {
     finally { holdExpiryRunning = false; }
   });
 
-  // IndexNow daily sitemap submission — 4:00 AM (feature-flagged)
+  // IndexNow daily sitemap submission — 4:00 AM (on by default;
+  // INDEXNOW_ENABLED=false is the opt-out kill-switch)
   if (
     String(process.env.INDEXNOW_ENABLED || "")
       .trim()
-      .toLowerCase() === "true"
+      .toLowerCase() !== "false"
   ) {
     scheduleCron("0 4 * * *", async () => {
       try {
         const cfg = getIndexNowConfig();
-        if (!cfg.enabled || !cfg.key) return;
+        if (!cfg.enabled) return;
+        if (!cfg.key) {
+          console.log(
+            "[indexnow] daily submission skipped: IndexNow is on (default) but no INDEXNOW_KEY is configured yet",
+          );
+          return;
+        }
         const baseUrl = `https://${cfg.host}`;
         // Keep automated submissions to this reviewed static allowlist. Dynamic
         // city/profile membership is published through the eligible sitemaps.

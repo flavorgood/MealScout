@@ -560,6 +560,7 @@ export function registerGrowthRoutes(app: Express): void {
       res.json({
         ok: true,
         enabled: cfg.enabled,
+        state: cfg.state,
         host: cfg.host,
         keyConfigured: Boolean(cfg.key),
         keyLocation: cfg.keyLocation || null,
