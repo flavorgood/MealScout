@@ -1577,6 +1577,13 @@ export function registerPickupOrderRoutes(app: Express) {
       let subtotalCents = 0;
       for (const reqItem of body.items) {
         const item = itemMap.get(reqItem.menuItemId)!;
+        if (
+          typeof item.priceCents !== "number" ||
+          !Number.isInteger(item.priceCents) ||
+          item.priceCents < 0
+        ) {
+          throw new Error("Unpriced menu item passed checkout validation");
+        }
         let variantAddCents = 0;
         if (reqItem.selectedVariantId) {
           const variant = variantMap.get(reqItem.selectedVariantId);

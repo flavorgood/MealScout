@@ -231,7 +231,11 @@ export function registerHostRoutes(app: Express) {
             .filter(Boolean),
         ),
       );
-      const ownerRows =
+      const ownerRows: Array<{
+        id: string;
+        isDisabled: boolean | null;
+        publicProfileSettings: unknown;
+      }> =
         ownerIds.length > 0
           ? await db
               .select({
@@ -242,8 +246,13 @@ export function registerHostRoutes(app: Express) {
               .from(users)
               .where(inArray(users.id, ownerIds))
           : [];
-      const ownerById = new Map(
-        ownerRows.map((row: any) => [String(row.id), row]),
+      const ownerById = new Map<string, (typeof ownerRows)[number]>(
+        ownerRows.map(
+          (row): [string, (typeof ownerRows)[number]] => [
+            String(row.id),
+            row,
+          ],
+        ),
       );
 
       const publicHosts = allHosts

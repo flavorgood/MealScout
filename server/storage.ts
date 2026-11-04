@@ -4438,6 +4438,7 @@ export class DatabaseStorage implements IStorage {
         lat: number | null;
         lng: number | null;
         liveBroadcasting: boolean;
+        broadcastState: TruckPresence["broadcastState"];
         locationSource: "live";
         sessionId?: string;
       }

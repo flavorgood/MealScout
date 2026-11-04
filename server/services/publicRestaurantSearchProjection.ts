@@ -26,8 +26,22 @@ export function publicRestaurantDistanceKm(
   userLat: number,
   userLng: number,
 ): number | null {
-  const latRaw = restaurant?.currentLatitude ?? restaurant?.latitude ?? null;
-  const lngRaw = restaurant?.currentLongitude ?? restaurant?.longitude ?? null;
+  // A truck's last-known broadcast position is display data, labelled by
+  // broadcastState in the public listing — it is not a current position,
+  // so it must never drive distance math. Only a live broadcast (or a row
+  // carrying no presence label at all) may use the current* coordinates;
+  // anything else falls back to the static coordinates, which the listing
+  // projection has already visibility-gated.
+  const presenceLabel = restaurant?.broadcastState;
+  const currentIsLive = presenceLabel === undefined || presenceLabel === "live";
+  const latRaw =
+    (currentIsLive ? restaurant?.currentLatitude : null) ??
+    restaurant?.latitude ??
+    null;
+  const lngRaw =
+    (currentIsLive ? restaurant?.currentLongitude : null) ??
+    restaurant?.longitude ??
+    null;
   const coordinates = resolveCoordinatePair(latRaw, lngRaw);
   if (
     !Number.isFinite(userLat) ||

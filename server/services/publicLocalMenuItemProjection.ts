@@ -55,8 +55,19 @@ export function projectPublicLocalMenuItemRow(
       cuisineType: restaurant.cuisineType,
       // Both alternatives have already passed the canonical public-location
       // policy. A mobile business's administrative base is never a fallback.
-      restaurantLatitude: restaurant.currentLatitude ?? restaurant.latitude,
-      restaurantLongitude: restaurant.currentLongitude ?? restaurant.longitude,
+      // The listing's current* coordinates may carry a stale broadcast's
+      // last-known spot (kept for labelled map display); discovery by
+      // distance only ever uses them while the broadcast is live.
+      restaurantLatitude:
+        restaurant.broadcastState === "live" ||
+        restaurant.broadcastState === undefined
+          ? (restaurant.currentLatitude ?? restaurant.latitude)
+          : restaurant.latitude,
+      restaurantLongitude:
+        restaurant.broadcastState === "live" ||
+        restaurant.broadcastState === undefined
+          ? (restaurant.currentLongitude ?? restaurant.longitude)
+          : restaurant.longitude,
       isFoodTruck: restaurant.isFoodTruck,
       businessType: restaurant.businessType,
       favoriteCount: Number(row.favoriteCount || 0),
