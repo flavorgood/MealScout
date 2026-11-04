@@ -41,8 +41,12 @@ function resolveIndexNowKeyLocation(params: {
 }
 
 export function getIndexNowConfig() {
+  // On by default (owner direction 2026-11-04, set-it-and-forget-it):
+  // IndexNow runs unless INDEXNOW_ENABLED is explicitly "false". The key
+  // is still required before anything can be submitted — without one the
+  // state is "awaiting_key" (on, waiting for its key), not "disabled".
   const enabled =
-    String(process.env.INDEXNOW_ENABLED || "").toLowerCase() === "true";
+    String(process.env.INDEXNOW_ENABLED || "").trim().toLowerCase() !== "false";
   const key = String(process.env.INDEXNOW_KEY || "").trim();
   const host = String(
     process.env.INDEXNOW_HOST || process.env.SITEMAP_SITE_URL || "www.mealscout.us",
@@ -56,6 +60,7 @@ export function getIndexNowConfig() {
     key,
     host,
     keyLocation: resolveIndexNowKeyLocation({ configured: keyLocation, host, key }),
+    state: !enabled ? "disabled" : key ? "ready" : "awaiting_key",
   };
 }
 
@@ -69,7 +74,7 @@ export async function submitIndexNowUrls(
       status: 400,
       provider: "IndexNow",
       submitted: 0,
-      body: "INDEXNOW_ENABLED is false",
+      body: "INDEXNOW_ENABLED=false (IndexNow disabled)",
     };
   }
   if (!config.key || !config.host) {

@@ -143,7 +143,11 @@ function resolveIndexNowConfig() {
   }
 
   return {
-    enabled: isTruthy(process.env.INDEXNOW_ENABLED) || Boolean(key),
+    // Mirrors server/services/indexNow.ts: on by default, explicit
+    // INDEXNOW_ENABLED=false is the only opt-out.
+    enabled:
+      String(process.env.INDEXNOW_ENABLED || "").trim().toLowerCase() !==
+      "false",
     key,
     host,
     keyLocation,

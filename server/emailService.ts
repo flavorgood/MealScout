@@ -1121,7 +1121,7 @@ export class EmailService {
       !areAutomatedMarketingEmailsEnabled()
     ) {
       console.log(
-        `Marketing email skipped for ${params.to}: ${params.subject} (${describeAutomatedMarketingEmailFlag()} not set)`,
+        `Marketing email skipped for ${params.to}: ${params.subject} (${describeAutomatedMarketingEmailFlag()} set)`,
       );
       emailDeliveryAudit.add({
         id: crypto.randomUUID(),

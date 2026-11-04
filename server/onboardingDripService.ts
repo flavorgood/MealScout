@@ -71,7 +71,7 @@ export class OnboardingDripService {
   }> {
     if (!areAutomatedMarketingEmailsEnabled()) {
       console.log(
-        `[OnboardingDrip] skipped: automated marketing emails disabled (${describeAutomatedMarketingEmailFlag()} not set)`,
+        `[OnboardingDrip] skipped: automated marketing emails disabled (${describeAutomatedMarketingEmailFlag()} set)`,
       );
       return { day3Sent: 0, day7Sent: 0, errors: 0, skippedDisabled: true };
     }

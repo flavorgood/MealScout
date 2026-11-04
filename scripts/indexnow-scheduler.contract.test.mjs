@@ -39,6 +39,18 @@ function fixture(options = {}) {
     "../eventNotificationCron": {}, "../parkingPassReminder": {}, "../services/locationDemandActivation": {},
     "../services/supplyMarketIntel": {}, "../services/hostPartnerLeadDrip": {}, "../services/socialQueueProcessor": {},
     "../services/indexNow": service,
+    "../services/ownerAiSourceReviewCoverage": { readLatestSourceReviewRunCoverage: async () => ({}) },
+    "../services/ownerAiNativeProfiles": { runNativeOwnerSourceReviews: async () => ({ day: "isolated", results: [] }) },
+    "../services/ownerAiSourceReviews": {
+      summarizeOwnerAiSourceReviewReasons: async () => ({}),
+      ownerAiSourceReviewSchedule: () => ({ expression: "0 5 * * *", timezone: "America/Chicago" }),
+      runOwnerAiSourceReviews: async () => ({ day: "isolated", results: [], coverage: {} }),
+    },
+    "../services/publicProfileSourceChecks": {
+      sourceCheckDay: () => "isolated",
+      publicSourceCheckSchedule: () => ({ expression: "0 0 * * *", timezone: "America/Chicago" }),
+      runPublicProfileSourceChecks: async () => ({}),
+    },
     "../storiesCronJobs": { registerStoryCronJobs: () => registrations.push("stories") },
     "../featuredVideoCron": { registerFeaturedVideoCronJobs: async () => registrations.push("featured") },
     "../utils/marketingEmailWindow": {
@@ -84,10 +96,16 @@ test("scheduled callback delivers all nine reviewed public URLs through the actu
   assert(f.logs.some(row => row.text.includes("9 URLs, status 200")));
 });
 
-test("disabled integration registers no submission job", async () => {
-  for (const enabled of ["false", "", undefined]) {
+test("explicitly disabled integration registers no submission job", async () => {
+  const f = fixture({ env: { INDEXNOW_ENABLED: "false" } }); await f.register();
+  assert.equal(f.jobs.filter(job => job.expression === "0 4 * * *").length, 0);
+  assert.equal(f.posts.length, 0);
+});
+
+test("unset or empty flag registers the submission job (on by default)", async () => {
+  for (const enabled of ["", undefined]) {
     const f = fixture({ env: { INDEXNOW_ENABLED: enabled } }); await f.register();
-    assert.equal(f.jobs.filter(job => job.expression === "0 4 * * *").length, 0);
+    assert.equal(f.jobs.filter(job => job.expression === "0 4 * * *").length, 1);
     assert.equal(f.posts.length, 0);
   }
 });
