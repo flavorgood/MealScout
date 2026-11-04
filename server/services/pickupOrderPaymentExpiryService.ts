@@ -308,6 +308,7 @@ export async function reconcileExpiredPickupOrderPayments(input?: {
           "dispute_reversal_pending",
           "dispute_reinstatement_pending",
           "failed",
+          "disputed",
         ]),
         or(
           isNull(pickupOrders.disputeUpdatedAt),

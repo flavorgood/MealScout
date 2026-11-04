@@ -1154,6 +1154,59 @@ const checks: Array<[string, () => void]> = [
     },
   ],
   [
+    "a stale dispute snapshot cannot move a terminal dispute backwards",
+    () => {
+      assert.match(
+        netSettlementPolicy,
+        /isTerminalPickupDisputeStatus\(storedStatus\)[\s\S]*?!isTerminalPickupDisputeStatus\(incomingStatus\)[\s\S]*?return storedStatus/,
+      );
+      const lockIndex = disputeService.indexOf("pg_advisory_xact_lock");
+      const convergeIndex = disputeService.indexOf(
+        "resolveConvergedPickupDisputeStatus({",
+        lockIndex,
+      );
+      const phaseOneWriteIndex = disputeService.indexOf(
+        "stripeDisputeStatus: effectiveDisputeStatus",
+        convergeIndex,
+      );
+      assert.ok(
+        lockIndex >= 0 && convergeIndex > lockIndex,
+        "The stored-status convergence must be decided under the advisory lock",
+      );
+      assert.match(
+        disputeService,
+        /storedStatus: current\.stripeDisputeStatus/,
+      );
+      assert.ok(
+        phaseOneWriteIndex > convergeIndex,
+        "The phase-one write must record the converged dispute status",
+      );
+      const phaseTwo = disputeService.slice(
+        disputeService.indexOf("const needsCompletedSettlementReconciliation"),
+      );
+      assert.match(
+        phaseTwo,
+        /stripeDisputeStatus: effectiveDisputeStatus,\s+stripeDisputeAmountCents: input\.dispute\.amount/,
+      );
+      assert.match(
+        phaseTwo,
+        /payoutStatus: pickupOrderReconciledPayoutStatus\(\{\s+totalCents: current\.totalCents,\s+succeededRefundAmountCents: refundSummary\.succeededAmountCents,\s+stripeDisputeStatus: effectiveDisputeStatus,/,
+      );
+      const disputeCandidates = paymentExpiryService.slice(
+        paymentExpiryService.indexOf("const disputeReconciliationCandidates"),
+        paymentExpiryService.indexOf("const candidates = ["),
+      );
+      assert.match(disputeCandidates, /"dispute_reversal_pending"/);
+      assert.match(disputeCandidates, /"dispute_reinstatement_pending"/);
+      assert.match(disputeCandidates, /"failed"/);
+      assert.match(
+        disputeCandidates,
+        /"disputed"/,
+        "Orders stuck in the disputed payout state must re-enter dispute reconciliation",
+      );
+    },
+  ],
+  [
     "pending checkout replay revalidates exact current authority",
     () => {
       const replayStart = pickupRoutes.indexOf(

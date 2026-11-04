@@ -36,6 +36,45 @@ export function pickupOrderCustomerFinancialLossCents(input: {
   return Math.min(totalCents, refundCents + disputeCents);
 }
 
+const TERMINAL_PICKUP_DISPUTE_STATUSES = new Set([
+  "won",
+  "prevented",
+  "warning_closed",
+  "lost",
+]);
+
+export function isTerminalPickupDisputeStatus(status: unknown) {
+  return TERMINAL_PICKUP_DISPUTE_STATUSES.has(
+    String(status || "")
+      .trim()
+      .toLowerCase(),
+  );
+}
+
+/**
+ * The dispute object a reconcile runs with was retrieved before the
+ * per-order advisory lock is taken, so it can be a snapshot from just
+ * before the dispute closed. A terminal stored status is the final
+ * outcome for that dispute: a stale non-terminal snapshot must never
+ * move it backwards, so the reconcile converges on the stored terminal
+ * status instead. Every other transition follows the incoming status,
+ * including terminal-to-terminal re-decisions.
+ */
+export function resolveConvergedPickupDisputeStatus(input: {
+  storedStatus: unknown;
+  incomingStatus: unknown;
+}) {
+  const storedStatus = String(input.storedStatus || "").trim();
+  const incomingStatus = String(input.incomingStatus || "unknown");
+  if (
+    isTerminalPickupDisputeStatus(storedStatus) &&
+    !isTerminalPickupDisputeStatus(incomingStatus)
+  ) {
+    return storedStatus;
+  }
+  return incomingStatus;
+}
+
 export function pickupOrderReconciledPayoutStatus(input: {
   totalCents: unknown;
   succeededRefundAmountCents?: unknown;

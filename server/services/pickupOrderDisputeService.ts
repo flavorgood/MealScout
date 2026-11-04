@@ -20,6 +20,7 @@ import {
 import {
   pickupOrderCustomerFinancialLossCents,
   pickupOrderReconciledPayoutStatus,
+  resolveConvergedPickupDisputeStatus,
 } from "./pickupOrderNetSettlementPolicy";
 
 const ACTIVE_FULFILLMENT_STATUSES = new Set<string>([
@@ -51,10 +52,12 @@ export async function reconcilePickupOrderDispute(input: {
   stripe: Stripe;
 }): Promise<PickupOrder> {
   const disputeStatus = String(input.dispute.status || "unknown");
-  const requiresTransferReversal =
-    doesPickupDisputeRequireTransferReversal(disputeStatus);
-  const resolvedForMerchant = isPickupDisputeResolvedForMerchant(disputeStatus);
-  const disputeLost = disputeStatus.toLowerCase() === "lost";
+  // The dispute object was retrieved before the advisory lock below is
+  // taken, so it can be a snapshot from just before the dispute closed.
+  // Under the lock, a terminal stored status wins over a stale
+  // non-terminal snapshot; every status write and payout decision in
+  // this reconcile uses the converged status.
+  let effectiveDisputeStatus = disputeStatus;
   const recorded = await db.transaction(async (tx: any) => {
     await tx.execute(
       sql`select pg_advisory_xact_lock(hashtext(${pickupOrderFinancialLockKey(input.orderId)}))`,
@@ -84,6 +87,16 @@ export async function reconcilePickupOrderDispute(input: {
         `Stripe dispute ${input.dispute.id} does not match pickup order ${current.id}.`,
       );
     }
+
+    effectiveDisputeStatus = resolveConvergedPickupDisputeStatus({
+      storedStatus: current.stripeDisputeStatus,
+      incomingStatus: disputeStatus,
+    });
+    const requiresTransferReversal =
+      doesPickupDisputeRequireTransferReversal(effectiveDisputeStatus);
+    const resolvedForMerchant =
+      isPickupDisputeResolvedForMerchant(effectiveDisputeStatus);
+    const disputeLost = effectiveDisputeStatus.toLowerCase() === "lost";
 
     const fulfillmentWasActive = ACTIVE_FULFILLMENT_STATUSES.has(
       String(current.status || ""),
@@ -117,7 +130,7 @@ export async function reconcilePickupOrderDispute(input: {
         cancellationReason,
         cancelledAt: current.cancelledAt,
         stripeDisputeId: input.dispute.id,
-        stripeDisputeStatus: disputeStatus,
+        stripeDisputeStatus: effectiveDisputeStatus,
         stripeDisputeAmountCents: input.dispute.amount,
         stripeDisputeReason: input.dispute.reason,
         disputeFailureReason: null,
@@ -140,6 +153,10 @@ export async function reconcilePickupOrderDispute(input: {
     return updated;
   });
 
+  const requiresTransferReversal =
+    doesPickupDisputeRequireTransferReversal(effectiveDisputeStatus);
+  const resolvedForMerchant =
+    isPickupDisputeResolvedForMerchant(effectiveDisputeStatus);
   const needsCompletedSettlementReconciliation =
     resolvedForMerchant && recorded.status === ORDER_STATUS.COMPLETED;
   if (
@@ -193,7 +210,7 @@ export async function reconcilePickupOrderDispute(input: {
       const customerFinancialLossCents = pickupOrderCustomerFinancialLossCents({
         totalCents: current.totalCents,
         succeededRefundAmountCents: refundSummary.succeededAmountCents,
-        stripeDisputeStatus: disputeStatus,
+        stripeDisputeStatus: effectiveDisputeStatus,
         stripeDisputeAmountCents: input.dispute.amount,
       });
       if (needsCompletedSettlementReconciliation) {
@@ -237,7 +254,7 @@ export async function reconcilePickupOrderDispute(input: {
           payoutStatus: pickupOrderReconciledPayoutStatus({
             totalCents: current.totalCents,
             succeededRefundAmountCents: refundSummary.succeededAmountCents,
-            stripeDisputeStatus: disputeStatus,
+            stripeDisputeStatus: effectiveDisputeStatus,
           }),
           stripeTransferGroupId:
             paymentIntentTransferGroup || localTransferGroup,
