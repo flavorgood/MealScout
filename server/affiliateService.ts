@@ -5,6 +5,7 @@
  * Every user is automatically an affiliate - any shared link becomes trackable.
  */
 
+import { randomUUID } from 'crypto';
 import { db } from './db';
 import {
   affiliateLinks,
@@ -15,6 +16,66 @@ import {
 import { eq, and, sql, asc } from 'drizzle-orm';
 
 const AFFILIATE_CODE_LENGTH = 8;
+
+export const AFFILIATE_VISITOR_COOKIE = 'affiliateVisitorId';
+
+const AFFILIATE_VISITOR_COOKIE_MAX_AGE_MS = 1000 * 60 * 60 * 24 * 365;
+
+type AffiliateVisitorRequest = {
+  cookies?: Record<string, string | undefined>;
+  sessionID?: string;
+};
+
+type AffiliateVisitorResponse = {
+  cookie: (
+    name: string,
+    value: string,
+    options: Record<string, unknown>,
+  ) => void;
+};
+
+/**
+ * Resolve the stable identity affiliate first-click attribution is keyed by.
+ *
+ * Express sessions are configured with saveUninitialized: false, so an
+ * anonymous visitor's sessionID is not persisted between requests: keying
+ * clicks by it (or by a per-request fabricated id) gives the first click,
+ * later clicks, and the eventual signup three different identities, and
+ * first-click attribution can never match. The visitor-id cookie is set
+ * once and read back on every later request, so one browser keeps one
+ * identity across clicks and signup.
+ */
+export function resolveAffiliateVisitorIdentity(
+  req: AffiliateVisitorRequest,
+): string | null {
+  const cookieId = String(
+    req?.cookies?.[AFFILIATE_VISITOR_COOKIE] || '',
+  ).trim();
+  if (cookieId) return cookieId;
+  const sessionId = String(req?.sessionID || '').trim();
+  if (sessionId) return sessionId;
+  return null;
+}
+
+/**
+ * Return the request's stable affiliate visitor identity, minting and
+ * persisting one (cookie, one year — the same lifetime the click route
+ * already uses for its attribution cookies) when the visitor has none.
+ */
+export function ensureAffiliateVisitorIdentity(
+  req: AffiliateVisitorRequest,
+  res: AffiliateVisitorResponse,
+): string {
+  const visitorId = resolveAffiliateVisitorIdentity(req) || randomUUID();
+  if (String(req?.cookies?.[AFFILIATE_VISITOR_COOKIE] || '') !== visitorId) {
+    res.cookie(AFFILIATE_VISITOR_COOKIE, visitorId, {
+      maxAge: AFFILIATE_VISITOR_COOKIE_MAX_AGE_MS,
+      httpOnly: true,
+      sameSite: 'lax',
+    });
+  }
+  return visitorId;
+}
 
 /**
  * Generate random 8-character affiliate code
@@ -78,14 +139,17 @@ export async function createAffiliateLink(
 
 /**
  * Track a click on an affiliate link
- * First-click attribution: only count if no previous conversion in this session
+ * First-click attribution: only count if no previous conversion for this
+ * visitor. `visitorIdentity` is the stable affiliate visitor identity (see
+ * ensureAffiliateVisitorIdentity); it is stored in the clicks table's
+ * sessionId column, which is the attribution key signup later reads back.
  */
 export async function trackAffiliateClick(
   code: string,
   visitorIp: string,
   visitorUserAgent: string,
   referrerSource: string,
-  sessionId: string,
+  visitorIdentity: string,
 ) {
   // Find the affiliate link
   const link = (await db
@@ -98,12 +162,12 @@ export async function trackAffiliateClick(
     return null;
   }
 
-  // Check if this session already converted for this link (prevent double-counting)
+  // Check if this visitor already converted for this link (prevent double-counting)
   const existingClick = (await db
     .select()
     .from(affiliateClicks)
     .where(
-      and(eq(affiliateClicks.affiliateLinkId, link.id), eq(affiliateClicks.sessionId, sessionId)),
+      and(eq(affiliateClicks.affiliateLinkId, link.id), eq(affiliateClicks.sessionId, visitorIdentity)),
     )
     .limit(1))[0];
 
@@ -119,7 +183,7 @@ export async function trackAffiliateClick(
       visitorIp,
       visitorUserAgent,
       referrerSource,
-      sessionId,
+      sessionId: visitorIdentity,
     })
     .returning();
 
@@ -133,17 +197,25 @@ export async function trackAffiliateClick(
 
 /**
  * Attribute a signup to an affiliate link via first-click
- * Called when a restaurant completes signup after clicking an affiliate link
+ * Called when a restaurant completes signup after clicking an affiliate link.
+ * `visitorIdentity` must be the stable affiliate visitor identity resolved
+ * the same way the click route records it (resolveAffiliateVisitorIdentity);
+ * a bare per-request session id cannot match the click that was recorded
+ * before signup.
  */
 export async function attributeSignupToAffiliate(
-  sessionId: string,
+  visitorIdentity: string,
   restaurantUserId: string,
 ) {
-  // Find first click in this session (first-click wins)
+  if (!visitorIdentity) {
+    return null;
+  }
+
+  // Find first click for this visitor (first-click wins)
   const firstClick = (await db
     .select()
     .from(affiliateClicks)
-    .where(and(eq(affiliateClicks.sessionId, sessionId), sql`${affiliateClicks.convertedAt} IS NULL`))
+    .where(and(eq(affiliateClicks.sessionId, visitorIdentity), sql`${affiliateClicks.convertedAt} IS NULL`))
     .orderBy(asc(affiliateClicks.clickedAt))
     .limit(1))[0];
 
@@ -324,6 +396,8 @@ export default {
   createAffiliateLink,
   trackAffiliateClick,
   attributeSignupToAffiliate,
+  resolveAffiliateVisitorIdentity,
+  ensureAffiliateVisitorIdentity,
   processPendingCommissions,
   updateAffiliateWallet,
   getAffiliateStats,

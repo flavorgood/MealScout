@@ -122,7 +122,15 @@ router.post('/generate-link', isAuthenticated, async (req, res) => {
 router.get('/click/:code', async (req, res) => {
   try {
     const { code } = req.params;
-    const sessionId = req.sessionID || `anonymous-${Date.now()}`;
+    // One stable visitor identity per browser (cookie-backed, see
+    // affiliateService). The old fallback fabricated a fresh id on every
+    // request for a visitor without a persisted session, so that visitor's
+    // clicks were each recorded under a different identity and signup
+    // attribution could never match the first click.
+    const visitorIdentity = affiliateService.ensureAffiliateVisitorIdentity(
+      req as any,
+      res as any,
+    );
 
     // Track the click
     const click = await affiliateService.trackAffiliateClick(
@@ -130,7 +138,7 @@ router.get('/click/:code', async (req, res) => {
       req.ip || 'unknown',
       req.get('user-agent') || 'unknown',
       req.get('referer') || 'direct',
-      sessionId,
+      visitorIdentity,
     );
 
     if (!click) {

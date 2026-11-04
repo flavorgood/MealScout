@@ -14,7 +14,7 @@ import {
   restaurants,
   affiliateCommissionLedger,
 } from "@shared/schema";
-import { eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { resolveAffiliateUserId } from "./affiliateTagService";
 import { mirrorInfinitySignup } from "./integrations/infinityShadow";
 
@@ -253,18 +253,52 @@ export async function createCommissionForRestaurantPayment(
     // Calculate 10% commission
     const commissionAmount = (invoiceAmount / 100) * 0.1; // invoiceAmount is in cents, convert and take 10%
 
-    // Create commission ledger entry
-    const commission = await db
-      .insert(affiliateCommissionLedger)
-      .values({
-        affiliateUserId: referral.affiliateUserId,
-        referralId: referral.id,
-        restaurantId,
-        amount: commissionAmount.toString(),
-        commissionSource: "subscription_payment",
-        stripeInvoiceId: invoiceId,
-      })
-      .returning();
+    // Idempotency guard, the same one the bookings path uses in
+    // affiliateCommissionService: Stripe delivers events at least once, so
+    // a redelivered invoice.payment_succeeded must not create a second
+    // commission (and a second credit). Serialize on the same key the
+    // dedupe check uses — affiliate, commission source, Stripe invoice id —
+    // because a read-then-insert check alone races under concurrent
+    // deliveries of the same event.
+    const commission = await db.transaction(async (tx: any) => {
+      await tx.execute(
+        sql`SELECT pg_advisory_xact_lock(hashtext(${`affiliate_commission:${referral.affiliateUserId}:subscription_payment:${invoiceId}`}))`,
+      );
+
+      const existing = await tx
+        .select({ id: affiliateCommissionLedger.id })
+        .from(affiliateCommissionLedger)
+        .where(
+          and(
+            eq(affiliateCommissionLedger.affiliateUserId, referral.affiliateUserId),
+            eq(affiliateCommissionLedger.commissionSource, "subscription_payment"),
+            eq(affiliateCommissionLedger.stripeInvoiceId, invoiceId),
+          ),
+        )
+        .limit(1);
+
+      if (existing.length > 0) return null;
+
+      const [inserted] = await tx
+        .insert(affiliateCommissionLedger)
+        .values({
+          affiliateUserId: referral.affiliateUserId,
+          referralId: referral.id,
+          restaurantId,
+          amount: commissionAmount.toString(),
+          commissionSource: "subscription_payment",
+          stripeInvoiceId: invoiceId,
+        })
+        .returning();
+      return inserted;
+    });
+
+    if (!commission) {
+      console.log(
+        `[Phase 3] Duplicate subscription commission skipped for invoice ${invoiceId}`,
+      );
+      return null;
+    }
 
     // Update referral status to 'paid'
     await db
@@ -281,7 +315,7 @@ export async function createCommissionForRestaurantPayment(
       const { createCreditFromCommission } = await import("./creditService");
       await createCreditFromCommission(
         referral.affiliateUserId,
-        commission[0].id,
+        commission.id,
         commissionAmount,
       );
     } catch (creditError) {
@@ -299,7 +333,7 @@ export async function createCommissionForRestaurantPayment(
       invoiceId,
     });
 
-    return commission[0];
+    return commission;
   } catch (error) {
     console.error("[referralService] Error creating commission:", error);
     throw error;
