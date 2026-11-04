@@ -11,6 +11,7 @@ import { distributedRateLimit } from "../middleware/distributedRateLimit";
 import { sendAccountSetupInvite } from "../utils/accountSetup";
 import { sendEmailVerificationIfNeeded } from "../utils/emailVerification";
 import { sendSignInContinuationEmail } from "../utils/signInContinuation";
+import { logAudit } from "../auditLogger";
 import { buildFoodTruckClaimContinuationPath } from "@shared/businessSignupIntent";
 import {
   acquireFoodTruckIdentityLock,
@@ -42,6 +43,64 @@ const claimReminderLimiter = distributedRateLimit({
 });
 
 const escapeLikePattern = (value: string) => value.replace(/[\\%_]/g, "\\$&");
+
+// Best-effort durable trace for claim emails/requests that could not be
+// delivered. console logging alone loses these; the audit log is stored in
+// the database and visible to admins, tied to the listing or claim involved.
+// A failure to write the trace must never change the request's outcome.
+const recordUndeliveredClaimNotice = async (args: {
+  req: any;
+  action: string;
+  resourceType: string;
+  resourceId: string;
+  metadata?: Record<string, unknown>;
+}) => {
+  try {
+    await logAudit(
+      args.req.user?.id || "",
+      args.action,
+      args.resourceType,
+      args.resourceId,
+      args.req.ip,
+      args.req.headers?.["user-agent"],
+      args.metadata || {},
+    );
+  } catch (auditError) {
+    console.error("Failed to record undelivered claim notice", {
+      action: args.action,
+      resourceId: args.resourceId,
+      error:
+        auditError instanceof Error ? auditError.message : String(auditError),
+    });
+  }
+};
+
+// Imported listings often store names and cities in ALL CAPS. That is how
+// the source data arrived and the stored values are never rewritten, but
+// claim search is a recognition surface: fully-uppercase values are shown
+// in title case so owners can spot their own truck. Mixed-case values pass
+// through untouched.
+const CAPS_DISPLAY_KEEP = new Set(["LLC", "INC", "BBQ", "USA", "II", "III"]);
+const CAPS_DISPLAY_SMALL = new Set(["and", "of", "the"]);
+
+const displayCapsValue = (value: any): any => {
+  if (typeof value !== "string") return value;
+  const trimmed = value.trim();
+  if (!trimmed) return value;
+  if (trimmed !== trimmed.toUpperCase() || trimmed === trimmed.toLowerCase()) {
+    return value;
+  }
+  return trimmed
+    .toLowerCase()
+    .split(/\s+/)
+    .map((word, index) => {
+      const upper = word.toUpperCase();
+      if (CAPS_DISPLAY_KEEP.has(upper)) return upper;
+      if (index > 0 && CAPS_DISPLAY_SMALL.has(word)) return word;
+      return word.charAt(0).toUpperCase() + word.slice(1);
+    })
+    .join(" ");
+};
 
 const decorateTruckClaimRows = (
   rows: any[],
@@ -81,10 +140,11 @@ const decorateTruckClaimRows = (
 
     const common = {
       id: row.id,
-      name: row.name,
+      name: displayCapsValue(row.name),
       address: row.address,
-      city: row.city,
+      city: displayCapsValue(row.city),
       state: row.state,
+      cuisineType: row.cuisineType ?? null,
       invited: Boolean(hasInviteUser || row.status === "claim_requested"),
       canClaim,
       canRequest,
@@ -142,6 +202,7 @@ export function registerTruckClaimRoutes(
             externalId: truckImportListings.externalId,
             confidenceScore: truckImportListings.confidenceScore,
             email: truckImportListings.email,
+            cuisineType: truckImportListings.cuisineType,
             status: truckImportListings.status,
             hasPendingClaim: sql<boolean>`exists (
               select 1 from ${truckClaimRequests}
@@ -181,6 +242,7 @@ export function registerTruckClaimRoutes(
           externalId: truckImportListings.externalId,
           confidenceScore: truckImportListings.confidenceScore,
           email: truckImportListings.email,
+          cuisineType: truckImportListings.cuisineType,
           status: truckImportListings.status,
           hasPendingClaim: sql<boolean>`exists (
             select 1 from ${truckClaimRequests}
@@ -222,6 +284,7 @@ export function registerTruckClaimRoutes(
           externalId: truckImportListings.externalId,
           confidenceScore: truckImportListings.confidenceScore,
           email: truckImportListings.email,
+          cuisineType: truckImportListings.cuisineType,
           status: truckImportListings.status,
           hasPendingClaim: sql<boolean>`exists (
             select 1 from ${truckClaimRequests}
@@ -302,7 +365,13 @@ export function registerTruckClaimRoutes(
         .orderBy(desc(truckImportListings.confidenceScore))
         .limit(15);
 
-      res.json(rows);
+      res.json(
+        rows.map((row) => ({
+          ...row,
+          name: displayCapsValue(row.name),
+          city: displayCapsValue(row.city),
+        })),
+      );
     } catch (error) {
       console.error("Error public-searching truck listings:", error);
       res.status(500).json({ message: "Failed to search truck listings" });
@@ -338,9 +407,20 @@ export function registerTruckClaimRoutes(
         .trim()
         .toLowerCase();
       if (!listing.invitedUserId && !inviteEmail) {
+        // There is no contact path for this listing, so nothing can be
+        // sent. Record the request durably instead of letting it vanish,
+        // and tell the requester plainly that nothing was sent.
+        await recordUndeliveredClaimNotice({
+          req,
+          action: "truck_claim_setup_request_no_contact",
+          resourceType: "truck_import_listing",
+          resourceId: listing.id,
+          metadata: { listingName: listing.name },
+        });
         return res.status(202).json({
           success: true,
-          message: "If setup can be sent for this listing, the owner will receive it.",
+          message:
+            "We don't have an email address on file for this listing, so we couldn't send anything. Your request has been recorded for our team.",
         });
       }
 
@@ -478,6 +558,19 @@ export function registerTruckClaimRoutes(
             deliveryError instanceof Error
               ? deliveryError.message
               : String(deliveryError),
+        });
+        await recordUndeliveredClaimNotice({
+          req,
+          action: "truck_claim_setup_delivery_failed",
+          resourceType: "truck_import_listing",
+          resourceId: listing.id,
+          metadata: {
+            listingName: listing.name,
+            error:
+              deliveryError instanceof Error
+                ? deliveryError.message
+                : String(deliveryError),
+          },
         });
       }
 
@@ -815,7 +908,7 @@ export function registerTruckClaimRoutes(
         };
       });
 
-      await sendClaimAdminNotice(
+      const adminNoticeDelivered = await sendClaimAdminNotice(
         "notifications@mealscout.us",
         "Food Truck Claim Submitted",
         `
@@ -829,6 +922,20 @@ export function registerTruckClaimRoutes(
         console.error("[email] Failed to send truck-claim admin notice:", error);
         return false;
       });
+
+      if (!adminNoticeDelivered) {
+        // The claim itself is already committed; a notice that never
+        // arrived must still leave a durable trace tied to this claim.
+        // (The mailer's own delivery audit is an in-memory buffer, so it
+        // cannot be the only record.)
+        await recordUndeliveredClaimNotice({
+          req,
+          action: "truck_claim_admin_notice_not_delivered",
+          resourceType: "truck_claim_request",
+          resourceId: claimRequest?.id || "unknown",
+          metadata: { listingId: listing.id, restaurantId: restaurant.id },
+        });
+      }
 
       res.json({
         restaurant,
