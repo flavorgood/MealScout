@@ -37,6 +37,8 @@ import {
   scanPublicSeoRowsInBatches,
 } from "./publicSeoBatchTraversal";
 import {
+  canonicalPublicSeoCityName,
+  canonicalPublicSeoCitySlug,
   resolvePublicSeoLanding,
   buildPublicSeoProfilePath,
   filterPublicSeoTrucksActiveToday,
@@ -186,6 +188,15 @@ const loadFoodTrucks = async (
   return rows.map(buildCard);
 };
 
+const toLandingCity = (city: any): PublicSeoLandingCity => ({
+  id: String(city.id),
+  // The public name/slug are the canonical (correctly spelled) ones —
+  // see canonicalPublicSeoCityName in publicSeoLandingModel.
+  name: canonicalPublicSeoCityName(city.name),
+  slug: canonicalPublicSeoCitySlug(city.name),
+  state: String(city.state || "").trim() || null,
+});
+
 const repository: PublicSeoLandingRepository = {
   async resolveCityBySlug(citySlug: string): Promise<PublicSeoLandingCity | null> {
     const [city] = await db
@@ -204,14 +215,27 @@ const repository: PublicSeoLandingRepository = {
       )
       .orderBy(sql`${cities.createdAt} desc nulls last`, asc(cities.id))
       .limit(1);
-    return city
-      ? {
-          id: String(city.id),
-          name: String(city.name).trim(),
-          slug: normalizeCityRegistrySlug(city.slug),
-          state: String(city.state || "").trim() || null,
-        }
-      : null;
+    if (city) return toLandingCity(city);
+    // The requested slug may be the canonical spelling while the stored
+    // slug carries the original misspelling (e.g. /city/lake-worth-beach/
+    // for the row stored as "lakeworth-beach"). Fall back to matching the
+    // canonical slug derived from each stored city name.
+    const requestedSlug = normalizeCityRegistrySlug(citySlug);
+    if (!requestedSlug) return null;
+    const rows = await db
+      .select({
+        id: cities.id,
+        name: cities.name,
+        slug: cities.slug,
+        state: cities.state,
+      })
+      .from(cities)
+      .where(sql`btrim(coalesce(${cities.name}, '')) <> ''`)
+      .orderBy(sql`${cities.createdAt} desc nulls last`, asc(cities.id));
+    const canonicalHit = rows.find(
+      (row: any) => canonicalPublicSeoCitySlug(row.name) === requestedSlug,
+    );
+    return canonicalHit ? toLandingCity(canonicalHit) : null;
   },
 
   loadFoodTrucks,

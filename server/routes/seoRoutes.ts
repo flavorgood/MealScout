@@ -34,6 +34,8 @@ import {
   buildPublicTruckOperatingPlans,
 } from "../services/truckOperatingPlan";
 import {
+  canonicalPublicSeoCityName,
+  canonicalPublicSeoCitySlug,
   publicSeoActiveTodayStop,
   publicSeoBusinessProfileType,
   publicSeoCityIdentityMatches,
@@ -76,13 +78,28 @@ const loadCanonicalSitemapCities = async () => {
     .orderBy(sql`${cities.createdAt} desc nulls last`, asc(cities.id));
   const winnerBySlug = new Map<string, any>();
   for (const row of rows as any[]) {
-    const slug = normalizeCityRegistrySlug(row.slug);
-    const cityName = String(row.name || "").trim();
-    if (!slug || !cityName || winnerBySlug.has(slug)) continue;
+    const storedName = String(row.name || "").trim();
+    // Cities list under their canonical (correctly spelled) name and slug,
+    // not whatever free-text spelling was stored — see
+    // canonicalPublicSeoCityName in publicSeoLandingModel. The stored name
+    // rides along as storedName so row matching can still find businesses
+    // whose records carry the original spelling.
+    const cityName = canonicalPublicSeoCityName(storedName);
+    let slug = canonicalPublicSeoCitySlug(storedName);
+    if (!slug || !cityName) continue;
+    if (winnerBySlug.has(slug)) {
+      // Same canonical slug already claimed (e.g. same-named cities in
+      // different states): keep the later row reachable under its stored
+      // slug instead of dropping it.
+      const storedSlug = normalizeCityRegistrySlug(row.slug);
+      if (!storedSlug || winnerBySlug.has(storedSlug)) continue;
+      slug = storedSlug;
+    }
     winnerBySlug.set(slug, {
       ...row,
       name: cityName,
       slug,
+      storedName: storedName !== cityName ? storedName : null,
       state: String(row.state || "").trim() || null,
     });
   }
@@ -90,14 +107,22 @@ const loadCanonicalSitemapCities = async () => {
 };
 
 const sitemapCityIdentityWhere = (
-  city: PublicSeoLandingCity,
+  city: PublicSeoLandingCity & { storedName?: string | null },
   cityColumn: any,
   stateColumn: any,
-) =>
-  and(
-    normalizedCityFieldEquals(cityColumn, city.name),
+) => {
+  const nameEquals =
+    city.storedName && city.storedName !== city.name
+      ? or(
+          normalizedCityFieldEquals(cityColumn, city.name),
+          normalizedCityFieldEquals(cityColumn, city.storedName),
+        )
+      : normalizedCityFieldEquals(cityColumn, city.name);
+  return and(
+    nameEquals,
     normalizedCityFieldEquals(stateColumn, city.state),
   );
+};
 
 const toSlug = toPublicSeoSlug;
 
@@ -1081,10 +1106,13 @@ export function registerSeoRoutes(
         const slug = normalizeCityRegistrySlug(row.slug);
         const cityName = String(row.name || "").trim();
         if (!slug || !cityName) continue;
-        const canonicalCity: PublicSeoLandingCity = {
+        const canonicalCity: PublicSeoLandingCity & {
+          storedName?: string | null;
+        } = {
           id: String(row.id),
           name: cityName,
           slug,
+          storedName: (row as any).storedName ?? null,
           state: row.state || null,
         };
 

@@ -33,6 +33,7 @@ import { videoStories, restaurants, requestLogs } from "@shared/schema";
 import { parseCleanAffiliateBusinessRoute } from "@shared/cleanAffiliateLinks";
 import { and, eq } from "drizzle-orm";
 import { registerAcquisitionPrerenderRoutes } from "./seo/acquisitionPrerender";
+import { registerLegalPrerenderRoutes } from "./seo/legalPrerender";
 import { createRootHealthGuard } from "./seo/rootEntry";
 import { buildJsonLdScript } from "./seo/jsonLdScript";
 import { registerPublicProfilePrerenderRoutes } from "./seo/publicProfilePrerender";
@@ -1005,6 +1006,7 @@ app.use((req, res, next) => {
   // MUST be registered before any SPA routing or Vite middleware
   app.use(customProfileDomainRootRedirect);
   registerAcquisitionPrerenderRoutes(app, canonicalBaseUrl);
+  registerLegalPrerenderRoutes(app, canonicalBaseUrl);
   registerPublicProfileAppAssets(app);
   registerPublicProfilePrerenderRoutes(app, canonicalBaseUrl);
 
