@@ -408,8 +408,14 @@ export default function Login() {
           ) : (
             <form onSubmit={handleEmailLogin} className="space-y-4">
               <div>
+                <label htmlFor="login-email" className="sr-only">
+                  Email address
+                </label>
                 <input
+                  id="login-email"
+                  name="email"
                   type="email"
+                  autoComplete="email"
                   placeholder="Email address"
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
@@ -420,8 +426,14 @@ export default function Login() {
               </div>
 
               <div className="relative">
+                <label htmlFor="login-password" className="sr-only">
+                  Password
+                </label>
                 <input
+                  id="login-password"
+                  name="password"
                   type={showPassword ? "text" : "password"}
+                  autoComplete="current-password"
                   placeholder="Password"
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
@@ -432,6 +444,7 @@ export default function Login() {
                 <button
                   type="button"
                   onClick={() => setShowPassword(!showPassword)}
+                  aria-label={showPassword ? "Hide password" : "Show password"}
                   className="absolute right-3 top-1/2 transform -translate-y-1/2 text-[color:var(--text-secondary)] hover:text-[color:var(--text-primary)]"
                   data-testid="button-toggle-password"
                 >
