@@ -111,7 +111,7 @@ export async function registerSchedulers(app: Express): Promise<void> {
 
   // Weekly Digest — Monday 8:00 AM
   scheduleCron("0 8 * * 1", async () => {
-    if (!shouldRunMarketingEmailJobs()) return;
+    if (!areAutomatedMarketingEmailsEnabled() || !shouldRunMarketingEmailJobs()) return;
     console.log("⏰ Triggering Weekly Digest Cron Job");
     try {
       await DigestService.getInstance().sendWeeklyDigests();
@@ -418,7 +418,7 @@ export async function registerSchedulers(app: Express): Promise<void> {
 
   // Notify unbooked events — hourly (growth/lead-gen outreach to trucks)
   scheduleCron("0 * * * *", async () => {
-    if (!shouldRunMarketingEmailJobs()) return;
+    if (!areAutomatedMarketingEmailsEnabled() || !shouldRunMarketingEmailJobs()) return;
     try {
       const stats = await notifyUnbookedEvents();
       if ((stats as any)?.sent > 0) {

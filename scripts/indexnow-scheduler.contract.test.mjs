@@ -21,7 +21,7 @@ function compile(file, globals, requireImpl) {
 }
 function fixture(options = {}) {
   const env = { INDEXNOW_ENABLED: "true", INDEXNOW_KEY: "0123456789abcdef0123456789abcdef", INDEXNOW_HOST: "www.mealscout.us", ...options.env };
-  const logs = [], posts = [], jobs = [], registrations = [];
+  const logs = [], posts = [], jobs = [], registrations = [], outreach = [];
   const logger = Object.fromEntries(["log", "info", "warn", "error"].map(level => [level, (...args) => logs.push({ level, text: args.map(String).join(" ") })]));
   const unexpected = name => () => { throw new Error("Unrelated dependency invoked: " + name); };
   const common = { process: { env }, console: logger, URL };
@@ -35,8 +35,8 @@ function fixture(options = {}) {
   }, name => { throw new Error("Unexpected service dependency: " + name); });
   const modules = {
     "node-cron": { schedule: (expression, callback, config) => { jobs.push({ expression, callback, config }); return {}; } },
-    "../digestService": {}, "../dinerDigestService": {}, "../onboardingDripService": {}, "../restaurantActivationService": {},
-    "../eventNotificationCron": {}, "../parkingPassReminder": {}, "../services/locationDemandActivation": {},
+    "../digestService": { DigestService: { getInstance: () => ({ sendWeeklyDigests: async () => { outreach.push("weekly-digest"); } }) } }, "../dinerDigestService": {}, "../onboardingDripService": {}, "../restaurantActivationService": {},
+    "../eventNotificationCron": { notifyUnbookedEvents: async () => { outreach.push("event-outreach"); return { sent: 0 }; } }, "../parkingPassReminder": {}, "../services/locationDemandActivation": {},
     "../services/supplyMarketIntel": {}, "../services/hostPartnerLeadDrip": {}, "../services/socialQueueProcessor": {},
     "../services/indexNow": service,
     "../services/ownerAiSourceReviewCoverage": { readLatestSourceReviewRunCoverage: async () => ({}) },
@@ -55,8 +55,8 @@ function fixture(options = {}) {
     "../featuredVideoCron": { registerFeaturedVideoCronJobs: async () => registrations.push("featured") },
     "../utils/marketingEmailWindow": {
       MARKETING_EMAIL_TIMEZONE: "America/Chicago", MARKETING_EMAIL_WINDOW_START_HOUR: 8, MARKETING_EMAIL_WINDOW_END_HOUR: 19,
-      areAutomatedMarketingEmailsEnabled: () => false, describeAutomatedMarketingEmailFlag: () => "isolated",
-      isWithinMarketingEmailWindow: unexpected("marketing dispatch"),
+      areAutomatedMarketingEmailsEnabled: () => options.marketingEnabled ?? false, describeAutomatedMarketingEmailFlag: () => "isolated",
+      isWithinMarketingEmailWindow: options.inWindow ? () => true : unexpected("marketing dispatch"),
     },
     "../db": { db: new Proxy({}, { get: unexpected("database") }) },
     "@shared/schema": {}, "drizzle-orm": {},
@@ -65,7 +65,7 @@ function fixture(options = {}) {
     assert(Object.hasOwn(modules, name), "Unexpected scheduler import: " + name);
     return modules[name];
   });
-  return { env, logs, posts, jobs, registrations, register: () => scheduler.registerSchedulers({}) };
+  return { env, logs, posts, jobs, registrations, outreach, register: () => scheduler.registerSchedulers({}) };
 }
 async function registered(options) {
   const f = fixture(options); await f.register();
@@ -135,4 +135,34 @@ test("network failure is surfaced with one attempt and no unrelated scheduler ex
   const f = await registered({ networkFailure: true }); await f.run();
   assert.equal(f.posts.length, 1);
   assert(f.logs.some(row => row.level === "error" && row.text.includes("[indexnow] daily cron failed:")));
+});
+
+// Essential-only switch: the weekly host digest and the event outreach send
+// with no mail-layer category, so the scheduler gate is the only place the
+// master switch (AUTOMATED_MARKETING_EMAILS_ENABLED=false) can stop them.
+// With the switch off the callbacks must return before the window check and
+// before either sender runs; the fixture's window mock throws if reached.
+function jobByExpression(f, expression) {
+  const matching = f.jobs.filter(job => job.expression === expression);
+  assert.equal(matching.length, 1, `job ${expression} is registered exactly once`);
+  return matching[0];
+}
+
+test("weekly digest does not run while automated marketing emails are disabled", async () => {
+  const f = fixture(); await f.register();
+  await jobByExpression(f, "0 8 * * 1").callback();
+  assert.deepEqual(f.outreach, []);
+});
+
+test("event outreach does not run while automated marketing emails are disabled", async () => {
+  const f = fixture(); await f.register();
+  await jobByExpression(f, "0 * * * *").callback();
+  assert.deepEqual(f.outreach, []);
+});
+
+test("weekly digest and event outreach still run when the switch is on inside the window", async () => {
+  const f = fixture({ marketingEnabled: true, inWindow: true }); await f.register();
+  await jobByExpression(f, "0 8 * * 1").callback();
+  await jobByExpression(f, "0 * * * *").callback();
+  assert.deepEqual(f.outreach, ["weekly-digest", "event-outreach"]);
 });
