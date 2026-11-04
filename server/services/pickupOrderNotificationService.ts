@@ -2,6 +2,7 @@ import { and, asc, eq, inArray, lt, notExists, or, sql } from "drizzle-orm";
 
 import {
   orderNotifications,
+  pickupOrderItems,
   pickupOrders,
   restaurants,
   users,
@@ -9,6 +10,7 @@ import {
 } from "@shared/schema";
 import { db } from "../db";
 import { emailService } from "../emailService";
+import { notifyUser } from "../productNotifications";
 import { sendSms } from "../smsService";
 import { buildPickupOrderStatusUrl } from "../utils/pickupOrderStatusUrl";
 import {
@@ -21,7 +23,7 @@ const NOTIFICATION_ATTEMPT_STALE_MS = 10 * 60 * 1000;
 
 async function claimNotificationAttempt(input: {
   orderId: string;
-  channel: "email" | "sms";
+  channel: "email" | "sms" | "in_app";
   type: string;
   recipient: string;
 }) {
@@ -139,13 +141,71 @@ async function sendSmsOnce(input: {
     .where(eq(orderNotifications.id, claim.id));
 }
 
+// Writes the owner's in-app notification through the same durable claim
+// machinery as email/SMS, so the confirmed-order event lands exactly once in
+// the owner's notification list (GET /api/notifications) even when the
+// webhook, a checkout replay, and the retry scheduler all fire for one order.
+async function sendInAppOnce(input: {
+  orderId: string;
+  type: string;
+  user: {
+    id: string;
+    email?: string | null;
+    phone?: string | null;
+    accountSettings?: unknown;
+  };
+  topic: string;
+  title: string;
+  body: string;
+  actionUrl: string;
+  sourceId: string;
+}) {
+  const claim = await claimNotificationAttempt({
+    orderId: input.orderId,
+    channel: "in_app",
+    type: input.type,
+    recipient: input.user.id,
+  });
+  if (!claim) return;
+
+  let status = "failed";
+  let errorMessage: string | undefined;
+  try {
+    await notifyUser({
+      user: input.user,
+      topic: input.topic,
+      title: input.title,
+      body: input.body,
+      actionUrl: input.actionUrl,
+      priority: "high",
+      sourceType: "pickup_order",
+      sourceId: input.sourceId,
+      // Email for this event is sent separately by the deduped merchant
+      // send above; notifyUser is used here for the in-app record only.
+      channels: ["in_app"],
+      metadata: { orderId: input.orderId },
+    });
+    status = "sent";
+  } catch (error: any) {
+    errorMessage = String(error?.message || error);
+  }
+
+  await db
+    .update(orderNotifications)
+    .set({ status, errorMessage })
+    .where(eq(orderNotifications.id, claim.id));
+}
+
 export async function sendPickupOrderConfirmedNotifications(
   order: PickupOrder,
 ) {
   const [restaurant] = await db
     .select({
       name: restaurants.name,
+      ownerId: restaurants.ownerId,
       ownerEmail: users.email,
+      ownerPhone: users.phone,
+      ownerAccountSettings: users.accountSettings,
     })
     .from(restaurants)
     .leftJoin(users, eq(restaurants.ownerId, users.id))
@@ -156,6 +216,40 @@ export async function sendPickupOrderConfirmedNotifications(
   const orderNumber = shortOrderId(order.id);
   const total = `$${(order.totalCents / 100).toFixed(2)}`;
   const statusUrl = buildPickupOrderStatusUrl(order.id);
+  const ordersUrl = statusUrl.replace(
+    /\/order-confirmation\/[^/]+$/,
+    "/orders",
+  );
+
+  const items = await db
+    .select({
+      itemName: pickupOrderItems.itemName,
+      quantity: pickupOrderItems.quantity,
+      lineTotalCents: pickupOrderItems.lineTotalCents,
+    })
+    .from(pickupOrderItems)
+    .where(eq(pickupOrderItems.orderId, order.id));
+  const money = (cents: number) => `$${(cents / 100).toFixed(2)}`;
+  const escapeHtml = (value: string) =>
+    value
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+  const itemLinesText = items.map(
+    (item) =>
+      `${item.quantity} × ${item.itemName} — ${money(item.lineTotalCents)}`,
+  );
+  const itemLinesHtml = items
+    .map(
+      (item) =>
+        `<li>${item.quantity} × ${escapeHtml(item.itemName)} — ${money(item.lineTotalCents)}</li>`,
+    )
+    .join("");
+  const pickupTimeText = order.scheduledFor
+    ? `Pickup time: ${new Date(order.scheduledFor).toISOString()}`
+    : "Pickup time: as soon as possible";
   const acknowledgementMinutes = Number(
     order.merchantAcknowledgementMinutesSnapshot,
   );
@@ -194,14 +288,39 @@ export async function sendPickupOrderConfirmedNotifications(
     );
   }
   if (restaurant?.ownerEmail) {
+    const specialInstructions = order.specialInstructions
+      ? `<p>Customer note: ${escapeHtml(order.specialInstructions)}</p>`
+      : "";
+    const specialInstructionsText = order.specialInstructions
+      ? `\nCustomer note: ${order.specialInstructions}`
+      : "";
     sends.push(
       sendOnce({
         orderId: order.id,
         type: "merchant_new_order",
         recipient: restaurant.ownerEmail,
         subject: `New MealScout order #${orderNumber}`,
-        html: `<p>${businessName} has a new ${order.orderType.replaceAll("_", " ")} order.</p><p><strong>#${orderNumber}</strong> · ${total}</p><p>${merchantResponseWindow}</p><p>Open the MealScout Orders workspace now.</p>`,
-        text: `${businessName} has a new ${order.orderType.replaceAll("_", " ")} order. #${orderNumber} · ${total}. ${merchantResponseWindow} Open the MealScout Orders workspace now.`,
+        html: `<p>${escapeHtml(businessName)} has a new ${order.orderType.replaceAll("_", " ")} order.</p><p><strong>#${orderNumber}</strong> · ${total}</p><p>Customer: ${escapeHtml(order.customerName)}</p><ul>${itemLinesHtml}</ul><p>${pickupTimeText}</p>${specialInstructions}<p>${merchantResponseWindow}</p><p><a href="${ordersUrl}">Open the MealScout Orders workspace</a>.</p>`,
+        text: `${businessName} has a new ${order.orderType.replaceAll("_", " ")} order. #${orderNumber} · ${total}. Customer: ${order.customerName}. Items: ${itemLinesText.join("; ")}. ${pickupTimeText}.${specialInstructionsText} ${merchantResponseWindow} Open the MealScout Orders workspace: ${ordersUrl}`,
+      }),
+    );
+  }
+  if (restaurant?.ownerId) {
+    sends.push(
+      sendInAppOnce({
+        orderId: order.id,
+        type: "merchant_new_order",
+        user: {
+          id: restaurant.ownerId,
+          email: restaurant.ownerEmail,
+          phone: restaurant.ownerPhone,
+          accountSettings: restaurant.ownerAccountSettings,
+        },
+        topic: "orderUpdates",
+        title: `New order #${orderNumber} · ${total}`,
+        body: `${businessName} has a new ${order.orderType.replaceAll("_", " ")} order from ${order.customerName}. Items: ${itemLinesText.join("; ")}. ${pickupTimeText}.`,
+        actionUrl: "/orders",
+        sourceId: order.id,
       }),
     );
   }
