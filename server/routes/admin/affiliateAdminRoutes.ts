@@ -1,5 +1,6 @@
 import type { Express } from "express";
 import { eq, and, or, sql, desc, isNull } from "drizzle-orm";
+import Stripe from "stripe";
 import { isAuthenticated, isStaffOrAdmin } from "../../unifiedAuth";
 import { db } from "../../db";
 import {
@@ -11,7 +12,37 @@ import {
   affiliateCommissionLedger,
   affiliateWithdrawals,
   creditLedger,
+  userPayoutPreferences,
 } from "@shared/schema";
+
+// Same module-level Stripe client pattern as the host payout admin routes
+// (server/routes/hostPayoutAdminRoutes.ts).
+const stripe = process.env.STRIPE_SECRET_KEY
+  ? new Stripe(process.env.STRIPE_SECRET_KEY)
+  : null;
+
+// The provider reference for a sent affiliate payout is recorded on the
+// withdrawal row itself, appended to its notes as a `stripe_transfer:<id>`
+// token — the same audit convention the host payout flow uses on
+// hostPayoutRequests.notes. Notes are preserved; the token is appended,
+// never overwritten in.
+const STRIPE_TRANSFER_REF_PATTERN = /stripe_transfer:(tr_[A-Za-z0-9]+)/;
+
+function extractStripeTransferId(
+  notes: string | null | undefined,
+): string | null {
+  if (!notes) return null;
+  const match = notes.match(STRIPE_TRANSFER_REF_PATTERN);
+  return match ? match[1] : null;
+}
+
+function appendStripeTransferRef(
+  notes: string | null | undefined,
+  transferId: string,
+): string {
+  const ref = `stripe_transfer:${transferId}`;
+  return notes ? `${notes} ${ref}` : ref;
+}
 
 type RequireAdminUser = (req: any, res: any) => boolean;
 
@@ -393,13 +424,93 @@ export function registerAffiliateAdminRoutes(
         if (existing.status === "rejected") {
           return res.status(409).json({ message: "Payout was rejected" });
         }
+        if (existing.status !== "approved") {
+          return res.status(409).json({ message: "Payout is not approved" });
+        }
 
+        // A withdrawal that already carries a Stripe transfer reference was
+        // already sent money — never send it twice. Fail closed and name the
+        // recorded reference so the admin can verify it in Stripe.
+        const recordedTransferId = extractStripeTransferId(existing.notes);
+        if (recordedTransferId) {
+          return res.status(409).json({
+            message: `A Stripe transfer (${recordedTransferId}) is already recorded for this payout`,
+          });
+        }
+
+        // Resolve the affiliate's Stripe payout destination from their
+        // payout preferences. There is no PayPal rail in this codebase, so
+        // without a Stripe Connect destination there is nothing this action
+        // can actually send — say so plainly instead of relabelling the row
+        // as paid when no money moved.
+        const [prefs] = await db
+          .select({
+            stripeConnectedId: userPayoutPreferences.stripeConnectedId,
+          })
+          .from(userPayoutPreferences)
+          .where(eq(userPayoutPreferences.userId, existing.userId))
+          .limit(1);
+
+        const destination = prefs?.stripeConnectedId?.trim();
+        if (!destination) {
+          return res.status(409).json({
+            message:
+              "Cannot pay: no Stripe payout destination on file for this affiliate",
+          });
+        }
+        if (!stripe) {
+          return res.status(503).json({
+            message: "Stripe is not configured on this server",
+          });
+        }
+
+        const amountCents = Math.round(
+          parseFloat(existing.amount?.toString() || "0") * 100,
+        );
+        if (!Number.isFinite(amountCents) || amountCents <= 0) {
+          return res.status(400).json({ message: "Payout amount is invalid" });
+        }
+
+        // Send the money FIRST. Only a confirmed transfer may mark the row
+        // paid; a provider failure leaves the row approved and unpaid, with
+        // the provider's error surfaced to the admin. The idempotency key is
+        // the withdrawal id, so retrying after a crash between the transfer
+        // and the row update replays the same transfer instead of paying
+        // twice.
+        let transfer: Stripe.Transfers.Transfer;
+        try {
+          transfer = await stripe.transfers.create(
+            {
+              amount: amountCents,
+              currency: "usd",
+              destination,
+              description: `MealScout affiliate payout — withdrawal ${existing.id}`,
+              metadata: {
+                affiliateWithdrawalId: existing.id,
+                affiliateUserId: existing.userId,
+                adminUserId: String(req.user?.id || ""),
+              },
+            },
+            { idempotencyKey: `affiliate_withdrawal_${existing.id}` },
+          );
+        } catch (transferErr: any) {
+          console.error(
+            `Error creating Stripe transfer for affiliate payout ${existing.id}:`,
+            transferErr,
+          );
+          return res.status(502).json({
+            message: `Stripe transfer failed: ${transferErr?.message || "unknown error"}`,
+          });
+        }
+
+        const paidAt = new Date();
         const [updated] = await db
           .update(affiliateWithdrawals)
           .set({
             status: "paid",
-            paidAt: new Date(),
-            processedAt: new Date(),
+            paidAt,
+            processedAt: paidAt,
+            notes: appendStripeTransferRef(existing.notes, transfer.id),
           })
           .where(eq(affiliateWithdrawals.id, payoutId))
           .returning();
