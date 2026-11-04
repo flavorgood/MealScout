@@ -523,11 +523,20 @@ export function registerSeoRoutes(
 
       restaurantRows.forEach((row: any) => {
         const profileType = publicSeoBusinessProfileType(row);
-        // Trucks/bars have dedicated sitemaps.
-        if (profileType !== "restaurant") return;
+        // Every public profile family belongs in the main sitemap itself.
+        // Trucks and bars also keep their dedicated child sitemaps, but those
+        // files are advertised only through robots.txt, so a crawler that
+        // reads just /sitemap.xml would never reach a truck or bar profile.
+        if (
+          profileType !== "restaurant" &&
+          profileType !== "truck" &&
+          profileType !== "bar"
+        ) {
+          return;
+        }
         mergeUrl(
           `${baseUrl}${buildPublicProfilePath({
-            profileType: "restaurant",
+            profileType,
             id: String(row.id),
             name: String(row.name || ""),
           })}`,

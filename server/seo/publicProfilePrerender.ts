@@ -740,8 +740,24 @@ async function restaurantPage(
     itemListElement: breadcrumbItems,
   };
 
+  // The served document must carry the ordering call to action itself, not
+  // only describe the menu: a crawler (or any non-JS reader) that lands here
+  // otherwise has no path from this page to the menu or ordering at all.
+  const externalMenuUrl =
+    menuSnippet.itemCount > 0 ? undefined : externalUrl(row.menuUrl);
+  const menuLink: PageLink | null =
+    menuSnippet.itemCount > 0
+      ? {
+          label: "View menu and order",
+          href: `/menu/${encodeURIComponent(row.id)}`,
+        }
+      : externalMenuUrl
+        ? { label: "View menu", href: externalMenuUrl }
+        : null;
+
   const discoveryLinks: PageLink[] = [
     { label: "Open profile", href: `${canonicalPath}?view=app` },
+    ...(menuLink ? [menuLink] : []),
     ...(offersCatering
       ? [{ label: "Catering", href: `${canonicalPath}?service=catering` }]
       : []),
@@ -860,6 +876,9 @@ async function hostPage(baseUrl: string, hostId: string) {
   const publicPhoneHref = publicProfile.cta.find(
     (cta) => cta.type === "phone",
   )?.href;
+  const directionsHref = publicProfile.cta.find(
+    (cta) => cta.type === "map",
+  )?.href;
   const publicPhone = publicPhoneHref?.replace(/^tel:/i, "") || null;
   const name = cleanText(row.businessName, "MealScout host location");
   const cityState = [row.city, row.state]
@@ -886,6 +905,48 @@ async function hostPage(baseUrl: string, hostId: string) {
     name: row.businessName,
     isActive: true,
   });
+
+  // Print the facts the host record actually carries. The served page
+  // previously showed only a type label and the city: the street address
+  // existed solely inside the JSON-LD, and the stored spots, amenities and
+  // parking-pass prices were never rendered anywhere in the document.
+  const amenityLabels: Record<string, string> = {
+    power: "Power hookups",
+    wifi: "Wi-Fi",
+    seating: "Seating",
+    restrooms: "Restrooms",
+    water: "Water hookups",
+    shade: "Shade",
+    covered: "Covered spots",
+  };
+  const amenityFacts =
+    row.amenities && typeof row.amenities === "object"
+      ? Object.entries(row.amenities as Record<string, unknown>)
+          .filter(([key, value]) => value === true && amenityLabels[key])
+          .map(([key]) => amenityLabels[key])
+      : [];
+  const parkingPriceFacts = (
+    [
+      ["breakfast", row.parkingPassBreakfastPriceCents],
+      ["lunch", row.parkingPassLunchPriceCents],
+      ["dinner", row.parkingPassDinnerPriceCents],
+      ["day", row.parkingPassDailyPriceCents],
+      ["week", row.parkingPassWeeklyPriceCents],
+      ["month", row.parkingPassMonthlyPriceCents],
+    ] as Array<[string, unknown]>
+  )
+    .map(([label, cents]) => {
+      const amount = Number(cents);
+      if (!Number.isFinite(amount) || amount <= 0) return "";
+      const dollars =
+        amount % 100 === 0
+          ? `$${amount / 100}`
+          : `$${(amount / 100).toFixed(2)}`;
+      return `${dollars}/${label}`;
+    })
+    .filter(Boolean);
+  const spotCount = Number(row.spotCount);
+  const footTraffic = Number(row.expectedFootTraffic);
 
   const locationSchema = {
     "@context": "https://schema.org",
@@ -963,6 +1024,9 @@ async function hostPage(baseUrl: string, hostId: string) {
     ],
     links: [
       { label: "Open profile", href: `${canonicalPath}?view=app` },
+      ...(directionsHref
+        ? [{ label: "Get directions", href: directionsHref }]
+        : []),
       ...(canonicalCity
         ? [{
             label: `Food in ${canonicalCity.name}`,
@@ -974,7 +1038,21 @@ async function hostPage(baseUrl: string, hostId: string) {
     ],
     body: [
       locationTypeLabel ? `Location type: ${locationTypeLabel}` : "",
-      cityState ? `Area: ${cityState}` : "",
+      publicProfile.addressPublicLabel
+        ? `Address: ${publicProfile.addressPublicLabel}`
+        : cityState
+          ? `Area: ${cityState}`
+          : "",
+      Number.isFinite(spotCount) && spotCount > 0
+        ? `Food truck spots: ${spotCount}`
+        : "",
+      amenityFacts.length ? `Amenities: ${amenityFacts.join(", ")}` : "",
+      parkingPriceFacts.length
+        ? `Parking pass: ${parkingPriceFacts.join(", ")}`
+        : "",
+      Number.isFinite(footTraffic) && footTraffic > 0
+        ? `Expected foot traffic: ${footTraffic}`
+        : "",
       profileUpdatedAt
         ? `Public profile updated: ${profileUpdatedAt.slice(0, 10)}`
         : "",
