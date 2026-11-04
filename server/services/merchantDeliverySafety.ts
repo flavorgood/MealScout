@@ -95,6 +95,7 @@ export function projectOrderForCustomer(
   } = order;
   if (canViewPrivateFulfillment) return withoutSecrets;
   const {
+    customerName: _customerName,
     customerEmail: _customerEmail,
     customerPhone: _customerPhone,
     deliveryAddress: _deliveryAddress,
