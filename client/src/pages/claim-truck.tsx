@@ -360,9 +360,9 @@ export default function ClaimTruckPage() {
                             ) : null}
                           </div>
                           <div className="text-xs text-muted-foreground truncate">
-                            {row.address || ""}
-                            {row.city ? `, ${row.city}` : ""}
-                            {row.state ? `, ${row.state}` : ""}
+                            {[row.address, row.city, row.state]
+                              .filter(Boolean)
+                              .join(", ")}
                           </div>
                           {cooldown > 0 ? (
                             <div className="text-xs text-muted-foreground">

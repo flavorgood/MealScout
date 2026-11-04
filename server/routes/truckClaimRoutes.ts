@@ -269,13 +269,20 @@ export function registerTruckClaimRoutes(
       if (query.length < 2) return res.json([]);
 
       const searchValue = `%${escapeLikePattern(query.toLowerCase())}%`;
+      // Anonymous claim search is a recognition surface only: a searcher
+      // identifies their business by name, city, state and cuisine. The
+      // listing's street address is never selected here, so it cannot leave
+      // the server for signed-out callers, and the address column is not a
+      // match field either (otherwise this endpoint would confirm guessed
+      // street addresses). The full record, address included, stays on the
+      // authenticated /api/truck-claims/search used once a claim starts.
       const rows = await db
         .select({
           id: truckImportListings.id,
           name: truckImportListings.name,
-          address: truckImportListings.address,
           city: truckImportListings.city,
           state: truckImportListings.state,
+          cuisineType: truckImportListings.cuisineType,
         })
         .from(truckImportListings)
         .where(
@@ -286,7 +293,6 @@ export function registerTruckClaimRoutes(
             ] as any),
             or(
               sql`lower(${truckImportListings.name}) like ${searchValue} escape E'\\\\'`,
-              sql`lower(coalesce(${truckImportListings.address}, '')) like ${searchValue} escape E'\\\\'`,
               sql`lower(coalesce(${truckImportListings.city}, '')) like ${searchValue} escape E'\\\\'`,
               sql`lower(coalesce(${truckImportListings.state}, '')) like ${searchValue} escape E'\\\\'`,
               sql`lower(coalesce(${truckImportListings.externalId}, '')) like ${searchValue} escape E'\\\\'`,
