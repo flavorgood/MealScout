@@ -238,6 +238,8 @@ export function registerDiscoveryRoutes(app: Express) {
               r.address as "profileAddress",
               r.city,
               r.state,
+              r.latitude as "latitude",
+              r.longitude as "longitude",
               r.cuisine_type as "cuisineType",
               r.logo_url as "logoUrl",
               r.cover_image_url as "coverImageUrl",
