@@ -9,12 +9,18 @@
  * One-way action (no un-recommend) - the API already treats a duplicate
  * recommend as a graceful no-op. The button confirms only acknowledged success.
  *
- * For guests, tapping the button routes to /login with a continuation path.
+ * For guests, tapping the button first explains in place that an account is
+ * needed to recommend a place, and offers Log in / Create account actions
+ * that carry a continuation path back to this profile. It never bounces a
+ * guest straight to /login without that explanation.
  */
 import { useState, useCallback, useEffect, useRef } from "react";
 import { ThumbsUp } from "lucide-react";
 import { apiUrl } from "@/lib/api";
-import { publicProfileLoginHref } from "@/lib/public-profile-recovery";
+import {
+  publicProfileLoginHref,
+  publicProfileSignupHref,
+} from "@/lib/public-profile-recovery";
 import { useToast } from "@/hooks/use-toast";
 import {
   Dialog,
@@ -43,6 +49,7 @@ export function ProfileRecommendButton({
   const actionBusy = useRef(false);
   const [isRecommended, setIsRecommended] = useState(false);
   const [isPending, setIsPending] = useState(false);
+  const [showGuestPrompt, setShowGuestPrompt] = useState(false);
   const [isDialogOpen, setIsDialogOpen] = useState(false);
   const [isSubmittingContext, setIsSubmittingContext] = useState(false);
   const [contextSaved, setContextSaved] = useState(false);
@@ -68,6 +75,7 @@ export function ProfileRecommendButton({
   useEffect(() => {
     setIsRecommended(false);
     setIsPending(false);
+    setShowGuestPrompt(false);
     setIsDialogOpen(false);
     setIsSubmittingContext(false);
     setContextSaved(false);
@@ -108,7 +116,7 @@ export function ProfileRecommendButton({
 
   const handleRecommend = useCallback(async () => {
     if (!isAuthenticated) {
-      window.location.href = publicProfileLoginHref(profilePath);
+      setShowGuestPrompt(true);
       return;
     }
     if (isPending || actionBusy.current) return;
@@ -199,6 +207,41 @@ export function ProfileRecommendButton({
         />
         {isRecommended ? "Recommended" : "Recommend"}
       </button>
+
+      <Dialog open={showGuestPrompt} onOpenChange={setShowGuestPrompt}>
+        <DialogContent className="w-[calc(100vw-1rem)] max-w-md border-[#ead9cc] bg-white text-[#2b160d]">
+          <DialogHeader>
+            <DialogTitle className="text-[#2b160d]">Recommend this place</DialogTitle>
+            <DialogDescription className="text-[#806657]">
+              Recommending takes a free MealScout account, so your
+              recommendations are tied to you and count toward this place.
+              Log in or create an account and you will come right back to
+              this page.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex flex-col gap-2 sm:flex-row sm:justify-end">
+            <button
+              type="button"
+              onClick={() => setShowGuestPrompt(false)}
+              className="min-h-10 rounded-xl border border-[#d8c2b3] bg-white px-4 text-sm font-bold text-[#2b160d] hover:bg-orange-50"
+            >
+              Not now
+            </button>
+            <a
+              href={publicProfileSignupHref(profilePath)}
+              className="inline-flex min-h-10 items-center justify-center rounded-xl border border-[#d8c2b3] bg-white px-4 text-sm font-bold text-[#2b160d] hover:bg-orange-50"
+            >
+              Create account
+            </a>
+            <a
+              href={publicProfileLoginHref(profilePath, "recommend")}
+              className="inline-flex min-h-10 items-center justify-center rounded-xl bg-[#f4512c] px-4 text-sm font-bold text-white hover:bg-[#dc3f1e]"
+            >
+              Log in
+            </a>
+          </div>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>
         <DialogContent className="max-h-[86vh] w-[calc(100vw-1rem)] max-w-lg overflow-y-auto border-[#ead9cc] bg-white text-[#2b160d]">

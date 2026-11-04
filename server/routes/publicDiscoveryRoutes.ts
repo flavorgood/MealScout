@@ -1363,8 +1363,7 @@ const buildClaimedWebsiteTruth = async (row: any, menuPayload: any) => {
       ordering: {
         path: null,
         enabled: false,
-        unavailableReason:
-          "This profile is not yet attached to an active business owner",
+        unavailableReason: "Online ordering is not available",
       },
       fulfillment: {
         pickup: {
@@ -1395,19 +1394,23 @@ const buildClaimedWebsiteTruth = async (row: any, menuPayload: any) => {
     ordering: {
       path: pickupEnabled || deliveryEnabled ? orderingPath : null,
       enabled: pickupEnabled || deliveryEnabled,
+      // Visitor-facing copy only. The readiness blockingReasons are the
+      // owner's internal setup checklist (Stripe onboarding, response
+      // windows, stop confirmation) and some labels read as positive
+      // claims ("Secure card checkout is ready for this menu"), so joining
+      // them here both leaked system notes and contradicted the
+      // "Pickup unavailable" state shown next to this text.
       unavailableReason:
         pickupEnabled || deliveryEnabled
           ? null
-          : readiness.blockingReasons.join(", ") ||
-            "Online ordering is not available",
+          : "Online ordering is not available",
     },
     fulfillment: {
       pickup: {
         enabled: pickupEnabled,
         unavailableReason: pickupEnabled
           ? null
-          : readiness.blockingReasons.join(", ") ||
-            "Pickup ordering is not available",
+          : "Pickup ordering is not available",
       },
       delivery: {
         configured: Boolean(delivery?.configured),

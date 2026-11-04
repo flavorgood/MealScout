@@ -972,10 +972,12 @@ export function toPublicRestaurantProfile(input: {
     displayName,
     slug,
     description: String(row.description || "").trim() || null,
+    // "other" is the stored placeholder for an unset category (common on
+    // imported listings); it is not a cuisine and is never published as one.
     cuisineTags: String(row.cuisineType || "")
       .split(",")
       .map((v) => v.trim())
-      .filter(Boolean),
+      .filter((v) => Boolean(v) && v.toLowerCase() !== "other"),
     serviceType: String(row.businessType || "").trim() || null,
     addressPublicLabel,
     city: String(row.city || "").trim() || null,
