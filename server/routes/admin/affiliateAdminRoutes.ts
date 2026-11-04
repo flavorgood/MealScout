@@ -657,7 +657,7 @@ export function registerAffiliateAdminRoutes(
           // (outcome uncertain): reject stays refused and a mark-paid
           // retry reconciles — the row is never silently returned to
           // approved.
-          let transfer: Stripe.Transfers.Transfer;
+          let transfer: Stripe.Transfer;
           try {
             transfer = await stripe.transfers.create(
               {

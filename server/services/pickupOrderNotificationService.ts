@@ -7,6 +7,7 @@ import {
   restaurants,
   users,
   type PickupOrder,
+  type PickupOrderItem,
 } from "@shared/schema";
 import { db } from "../db";
 import { emailService } from "../emailService";
@@ -238,12 +239,17 @@ export async function sendPickupOrderConfirmedNotifications(
       .replace(/"/g, "&quot;")
       .replace(/'/g, "&#39;");
   const itemLinesText = items.map(
-    (item) =>
+    (item: Pick<PickupOrderItem, "itemName" | "quantity" | "lineTotalCents">) =>
       `${item.quantity} × ${item.itemName} — ${money(item.lineTotalCents)}`,
   );
   const itemLinesHtml = items
     .map(
-      (item) =>
+      (
+        item: Pick<
+          PickupOrderItem,
+          "itemName" | "quantity" | "lineTotalCents"
+        >,
+      ) =>
         `<li>${item.quantity} × ${escapeHtml(item.itemName)} — ${money(item.lineTotalCents)}</li>`,
     )
     .join("");
