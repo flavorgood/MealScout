@@ -4004,7 +4004,7 @@ export const hostPayoutRequests = pgTable(
       .notNull()
       .references(() => users.id, { onDelete: "cascade" }),
     amountCents: integer("amount_cents").notNull(),
-    status: varchar("status").notNull().default("pending"), // 'pending' | 'approved' | 'paid' | 'rejected' | 'cancelled'
+    status: varchar("status").notNull().default("pending"), // 'pending' | 'approved' | 'processing' | 'paid' | 'rejected' | 'cancelled'
     notes: text("notes"),
     reviewedByUserId: varchar("reviewed_by_user_id").references(
       () => users.id,

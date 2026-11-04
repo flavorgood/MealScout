@@ -2,6 +2,27 @@ import { and, eq, inArray, sql } from "drizzle-orm";
 import { db } from "./db";
 import { hostEarningsLedger, hostPayoutRequests } from "@shared/schema";
 
+// Available-balance formula. Payouts are carried by the LEDGER: a paid
+// payout writes exactly one negative `payout` row into hostEarningsLedger
+// (inside accruedCents) in the same transaction that marks the request
+// paid. Requests in flight (pending / approved / processing) are reserved
+// through pendingPayoutCents. paidOutCents is computed and returned for
+// display only and must NOT be subtracted here — subtracting it as well
+// counted every payout twice (once via its ledger row, once via the paid
+// request sum), permanently understating every host's available balance
+// by the total of everything they had ever been paid.
+//
+// Existing data needs no migration for this correction: every historical
+// paid payout already has its negative ledger row (the old mark-paid path
+// always inserted one), so counting the ledger alone counts each of them
+// exactly once.
+export function computeHostAvailableCents(
+  accruedCents: number,
+  pendingPayoutCents: number,
+) {
+  return Math.max(0, accruedCents - pendingPayoutCents);
+}
+
 // Accepts an optional transaction client so callers that need an atomic
 // read-check-write (e.g. validating a payout request against the balance
 // before inserting it) can run this inside the same locked transaction
@@ -23,7 +44,13 @@ export async function getHostEarningsSummary(hostId: string, dbClient: any = db)
     .where(
       and(
         eq(hostPayoutRequests.hostId, hostId),
-        inArray(hostPayoutRequests.status, ["pending", "approved"]),
+        // "processing" stays reserved: the payout's money may be moving,
+        // so it must not free up for a new request until it resolves.
+        inArray(hostPayoutRequests.status, [
+          "pending",
+          "approved",
+          "processing",
+        ]),
       ),
     );
 
@@ -48,8 +75,13 @@ export async function getHostEarningsSummary(hostId: string, dbClient: any = db)
 
   const accruedCents = Number(earnedRow?.total || 0);
   const pendingPayoutCents = Number(pendingRow?.total || 0);
+  // Display figure only — payouts are already subtracted inside
+  // accruedCents via their ledger rows. See computeHostAvailableCents.
   const paidOutCents = Number(paidRow?.total || 0);
-  const availableCents = Math.max(0, accruedCents - pendingPayoutCents - paidOutCents);
+  const availableCents = computeHostAvailableCents(
+    accruedCents,
+    pendingPayoutCents,
+  );
 
   return {
     accruedCents,

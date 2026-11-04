@@ -3,6 +3,10 @@ import { and, desc, eq, gte, like, lt, or, sql } from "drizzle-orm";
 import Stripe from "stripe";
 
 import { db } from "../db";
+import {
+  executeHostPayout,
+  type HostPayoutStore,
+} from "../hostPayoutExecutionService";
 import { isAdmin, isAuthenticated } from "../unifiedAuth";
 import {
   hostEarningsLedger,
@@ -19,6 +23,7 @@ const VALID_STATUSES = [
   "all",
   "pending",
   "approved",
+  "processing",
   "paid",
   "rejected",
   "cancelled",
@@ -109,6 +114,7 @@ export function registerHostPayoutAdminRoutes(app: Express) {
           .select({
             pending: sql<number>`coalesce(sum(case when ${hostPayoutRequests.status} = 'pending' then 1 else 0 end), 0)`,
             approved: sql<number>`coalesce(sum(case when ${hostPayoutRequests.status} = 'approved' then 1 else 0 end), 0)`,
+            processing: sql<number>`coalesce(sum(case when ${hostPayoutRequests.status} = 'processing' then 1 else 0 end), 0)`,
             paid: sql<number>`coalesce(sum(case when ${hostPayoutRequests.status} = 'paid' then 1 else 0 end), 0)`,
             rejected: sql<number>`coalesce(sum(case when ${hostPayoutRequests.status} = 'rejected' then 1 else 0 end), 0)`,
           })
@@ -165,6 +171,7 @@ export function registerHostPayoutAdminRoutes(app: Express) {
           totals: {
             pending: Number(totalsRow?.pending || 0),
             approved: Number(totalsRow?.approved || 0),
+            processing: Number(totalsRow?.processing || 0),
             paid: Number(totalsRow?.paid || 0),
             rejected: Number(totalsRow?.rejected || 0),
           },
@@ -238,15 +245,31 @@ export function registerHostPayoutAdminRoutes(app: Express) {
           });
         }
 
+        // A processing payout's money may already be moving and its
+        // outcome is unknown. Its state cannot change — including
+        // rejection — until a mark-paid retry reconciles it. (Mirrors the
+        // affiliate payout rule: restoring availability on top of a sent
+        // or possibly-sent transfer pays the host twice.)
+        if (existing.status === "processing" && nextStatus !== "paid") {
+          return res.status(409).json({
+            message:
+              "Payout is being processed — it cannot change state until the payment outcome is known; retry mark-paid to reconcile it",
+          });
+        }
+
         if (nextStatus === "approved" && existing.status !== "pending") {
           return res.status(400).json({
             message: "Only pending requests can be approved",
           });
         }
 
-        if (nextStatus === "paid" && existing.status !== "approved") {
+        if (
+          nextStatus === "paid" &&
+          !["approved", "processing"].includes(String(existing.status || ""))
+        ) {
           return res.status(400).json({
-            message: "Only approved requests can be marked paid",
+            message:
+              "Only approved requests can be marked paid (a processing payout is retried with the same action)",
           });
         }
 
@@ -268,6 +291,170 @@ export function registerHostPayoutAdminRoutes(app: Express) {
           });
         }
 
+        if (nextStatus === "paid") {
+          // Money movement goes through the hardened execution path
+          // (hostPayoutExecutionService): atomic claim into "processing",
+          // idempotent Stripe transfer, finalize + ledger in one
+          // transaction only after the transfer succeeds. A failed or
+          // never-attempted transfer can no longer leave the request
+          // marked paid.
+          const [hostRow] = await db
+            .select({
+              stripeConnectAccountId: hosts.stripeConnectAccountId,
+              stripePayoutsEnabled: hosts.stripePayoutsEnabled,
+            })
+            .from(hosts)
+            .where(eq(hosts.id, existing.hostId))
+            .limit(1);
+
+          const store: HostPayoutStore = {
+            claimProcessing: async (input) => {
+              const claimNow = new Date();
+              const [claimed] = await db
+                .update(hostPayoutRequests)
+                .set({
+                  status: "processing",
+                  notes: input.notes,
+                  reviewedByUserId: input.adminUserId || null,
+                  reviewedAt: claimNow,
+                  updatedAt: claimNow,
+                })
+                .where(
+                  and(
+                    eq(hostPayoutRequests.id, input.requestId),
+                    eq(hostPayoutRequests.status, "approved"),
+                  ),
+                )
+                .returning();
+              return claimed ?? null;
+            },
+            finalizePaid: async (input) => {
+              return await db.transaction(async (tx: any) => {
+                const [row] = await tx
+                  .update(hostPayoutRequests)
+                  .set({
+                    status: "paid",
+                    paidAt: input.paidAt,
+                    notes: input.notes,
+                    reviewedByUserId: input.adminUserId || null,
+                    reviewedAt: input.paidAt,
+                    updatedAt: input.paidAt,
+                  })
+                  .where(
+                    and(
+                      eq(hostPayoutRequests.id, input.requestId),
+                      eq(hostPayoutRequests.status, "processing"),
+                    ),
+                  )
+                  .returning();
+                if (!row) return null;
+                await tx.insert(hostEarningsLedger).values({
+                  hostId: input.hostId,
+                  bookingId: null,
+                  stripePaymentIntentId: input.transferId,
+                  entryType: "payout",
+                  sourceType: "host_payout_request",
+                  amountCents: -Math.abs(Number(input.amountCents || 0)),
+                  description: input.description,
+                  createdAt: input.paidAt,
+                });
+                return row;
+              });
+            },
+          };
+
+          const transferClient = stripe
+            ? {
+                createTransfer: async (
+                  transferRequest: {
+                    amountCents: number;
+                    destination: string;
+                    description: string;
+                    metadata: Record<string, string>;
+                  },
+                  idempotencyKey: string,
+                ) =>
+                  stripe.transfers.create(
+                    {
+                      amount: transferRequest.amountCents,
+                      currency: "usd",
+                      destination: transferRequest.destination,
+                      description: transferRequest.description,
+                      metadata: transferRequest.metadata,
+                    },
+                    { idempotencyKey },
+                  ),
+              }
+            : null;
+
+          const result = await executeHostPayout(store, transferClient, {
+            request: existing,
+            destination: {
+              stripeConnectAccountId: hostRow?.stripeConnectAccountId ?? null,
+              stripePayoutsEnabled: hostRow?.stripePayoutsEnabled ?? null,
+            },
+            stripeConfigured: Boolean(stripe),
+            adminUserId: String((req as any).user?.id || ""),
+            notes: notes ?? existing.notes ?? null,
+            manualPayoutConfirmed:
+              (req.body as any)?.manualPayoutConfirmed === true,
+          });
+
+          if (result.outcome === "claim_conflict") {
+            return res.status(409).json({
+              ok: false,
+              message:
+                "Payout state changed before payment could start — reload and retry",
+            });
+          }
+          if (result.outcome === "transfer_failed") {
+            console.error(
+              `[host-payout] Stripe transfer failed for request ${existing.id}:`,
+              result.message,
+            );
+            return res.status(502).json({
+              ok: false,
+              message: `Stripe transfer failed: ${result.message} — the payout stays in processing and no payment was recorded; retry mark-paid to reconcile before taking any other action`,
+            });
+          }
+          if (result.outcome === "stripe_unconfigured") {
+            return res.status(503).json({
+              ok: false,
+              message: "Stripe is not configured on this server",
+            });
+          }
+          if (result.outcome === "manual_confirmation_required") {
+            return res.status(422).json({
+              ok: false,
+              message:
+                "This host has no Stripe payout destination on file, so marking paid records an out-of-band manual payout. Resend with manualPayoutConfirmed: true only if the host has actually been paid outside Stripe.",
+            });
+          }
+          if (result.outcome === "finalize_conflict") {
+            return res.status(409).json({
+              ok: false,
+              message: result.transferId
+                ? `Stripe transfer ${result.transferId} was sent for this payout, but the payout row changed state before it could be marked paid — reconcile it manually in Stripe`
+                : "Payout row changed state before it could be marked paid — reload and reconcile it manually",
+            });
+          }
+          if (result.outcome === "invalid_amount") {
+            return res.status(400).json({
+              ok: false,
+              message: "Payout amount is invalid",
+            });
+          }
+
+          const { getHostEarningsSummary } =
+            await import("../hostEarningsService");
+          const paidSummary = await getHostEarningsSummary(existing.hostId);
+          return res.json({
+            ok: true,
+            request: result.request,
+            summary: paidSummary,
+          });
+        }
+
         const now = new Date();
         const [updated] = await db
           .update(hostPayoutRequests)
@@ -276,88 +463,11 @@ export function registerHostPayoutAdminRoutes(app: Express) {
             notes: notes ?? existing.notes ?? null,
             reviewedByUserId: req.user?.id || null,
             reviewedAt: now,
-            paidAt: nextStatus === "paid" ? now : existing.paidAt,
+            paidAt: existing.paidAt,
             updatedAt: now,
           })
           .where(eq(hostPayoutRequests.id, requestId))
           .returning();
-
-        if (nextStatus === "paid") {
-          // Attempt Stripe Connect transfer if the host has a connected account
-          let stripeTransferId: string | null = null;
-          let stripeTransferError: string | null = null;
-          if (stripe) {
-            const [hostRow] = await db
-              .select({
-                stripeConnectAccountId: hosts.stripeConnectAccountId,
-                stripePayoutsEnabled: hosts.stripePayoutsEnabled,
-                stripeChargesEnabled: hosts.stripeChargesEnabled,
-              })
-              .from(hosts)
-              .where(eq(hosts.id, existing.hostId))
-              .limit(1);
-
-            const connectAccountId = hostRow?.stripeConnectAccountId;
-            const payoutsEnabled = Boolean(hostRow?.stripePayoutsEnabled);
-
-            if (connectAccountId && payoutsEnabled) {
-              try {
-                const transfer = await stripe.transfers.create({
-                  amount: Math.abs(Number(existing.amountCents || 0)),
-                  currency: "usd",
-                  destination: connectAccountId,
-                  description: `MealScout host payout — request ${existing.id}`,
-                  metadata: {
-                    payoutRequestId: existing.id,
-                    hostId: existing.hostId,
-                    adminUserId: String((req as any).user?.id || ""),
-                  },
-                });
-                stripeTransferId = transfer.id;
-                console.log(
-                  `[host-payout] Stripe transfer ${transfer.id} created for request ${existing.id} → ${connectAccountId}`,
-                );
-              } catch (transferErr: unknown) {
-                // Log but do not block the status update — admin can retry manually
-                stripeTransferError =
-                  transferErr instanceof Error
-                    ? transferErr.message
-                    : String(transferErr);
-                console.error(
-                  `[host-payout] Stripe transfer failed for request ${existing.id}:`,
-                  stripeTransferError,
-                );
-              }
-            } else {
-              console.log(
-                `[host-payout] Host ${existing.hostId} has no Connect account or payouts not enabled — skipping transfer, manual payout required`,
-              );
-            }
-          }
-
-          await db.insert(hostEarningsLedger).values({
-            hostId: existing.hostId,
-            bookingId: null,
-            stripePaymentIntentId: stripeTransferId,
-            entryType: "payout",
-            sourceType: "host_payout_request",
-            amountCents: -Math.abs(Number(existing.amountCents || 0)),
-            description: stripeTransferId
-              ? `Host payout via Stripe Connect transfer ${stripeTransferId} (${existing.id})`
-              : stripeTransferError
-                ? `Host payout processed manually — Stripe transfer failed: ${stripeTransferError} (${existing.id})`
-                : `Host payout processed manually — no Connect account (${existing.id})`,
-            createdAt: now,
-          });
-
-          // Update the payout request with the transfer ID for audit trail
-          if (stripeTransferId) {
-            await db
-              .update(hostPayoutRequests)
-              .set({ notes: `stripe_transfer:${stripeTransferId}` })
-              .where(eq(hostPayoutRequests.id, existing.id));
-          }
-        }
 
         const { getHostEarningsSummary } =
           await import("../hostEarningsService");
