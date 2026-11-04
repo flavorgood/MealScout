@@ -78,6 +78,16 @@ export function toPublicRestaurantListing(
     : null;
   const liveCoordinates =
     truckPresence?.broadcastState === "live" ? truckPresence.location : null;
+  // A stale broadcast still proves where the truck last confirmed it was.
+  // Expose that last-known spot (never for "offline" — the owner's switch
+  // is off and presence carries no location then) so a claimed truck keeps
+  // a durable map presence; broadcastState below keeps freshness honest.
+  const lastKnownCoordinates =
+    truckPresence?.broadcastState === "stale" ? truckPresence.location : null;
+  const exposedCoordinates = liveCoordinates ?? lastKnownCoordinates;
+  const broadcastState = isTruck
+    ? (truckPresence?.broadcastState ?? "unknown")
+    : undefined;
   const contactFieldVisible = (
     evidenceId:
       "website_link" | "social_instagram" | "social_facebook" | "social_x",
@@ -149,8 +159,8 @@ export function toPublicRestaurantListing(
     state,
     isFoodTruck,
     mobileOnline: Boolean(liveCoordinates),
-    currentLatitude: liveCoordinates?.latitude ?? null,
-    currentLongitude: liveCoordinates?.longitude ?? null,
+    currentLatitude: exposedCoordinates?.latitude ?? null,
+    currentLongitude: exposedCoordinates?.longitude ?? null,
     lastBroadcastAt,
     liveUntilAt,
     operatingHours,
@@ -178,6 +188,7 @@ export function toPublicRestaurantListing(
     featuredMenuItemId,
     createdAt,
     updatedAt,
+    ...(broadcastState !== undefined ? { broadcastState } : {}),
     ...(distance !== undefined ? { distance } : {}),
     ...(favoriteCount !== undefined ? { favoriteCount } : {}),
     ...(followCount !== undefined ? { followCount } : {}),
