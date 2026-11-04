@@ -39,6 +39,7 @@ import {
 import {
   canonicalPublicSeoCityName,
   canonicalPublicSeoCitySlug,
+  canonicalPublicSeoStateLabel,
   resolvePublicSeoLanding,
   buildPublicSeoProfilePath,
   filterPublicSeoTrucksActiveToday,
@@ -138,8 +139,11 @@ const buildCard = (row: any): PublicSeoLandingItem => {
     displayName: normalizeStoredLabel(name || "Local business"),
     slug: toPublicSeoSlug(name) || id,
     profilePath,
-    city: row.city || null,
-    state: row.state || null,
+    // Card city/state are display labels built from the same free-text
+    // storage as the city registry; print them through the canonical
+    // display-case/state normalizers so cards never show "Milton, Fl".
+    city: row.city ? canonicalPublicSeoCityName(row.city) || null : null,
+    state: row.state ? canonicalPublicSeoStateLabel(row.state) || null : null,
     imageUrl: publicMedia.coverImageUrl || publicMedia.logoUrl || null,
     cuisineTags:
       row.cuisineType && String(row.cuisineType).trim().toLowerCase() !== "other"
@@ -194,7 +198,7 @@ const toLandingCity = (city: any): PublicSeoLandingCity => ({
   // see canonicalPublicSeoCityName in publicSeoLandingModel.
   name: canonicalPublicSeoCityName(city.name),
   slug: canonicalPublicSeoCitySlug(city.name),
-  state: String(city.state || "").trim() || null,
+  state: canonicalPublicSeoStateLabel(city.state) || null,
 });
 
 const repository: PublicSeoLandingRepository = {
