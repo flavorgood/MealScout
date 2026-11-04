@@ -76,10 +76,61 @@ export function MenuDraftPreview({ draft }: { draft: GuestMenuDraft }) {
   </aside>;
 }
 
-export function PrivateMenuDraftPage({ user }: { user: { emailVerified?: unknown } | null | undefined }) {
+// Companion local record naming the account the on-device draft cache was
+// last reconciled with. The draft key itself is shared and account-less by
+// design (it is the pre-signup guest artifact); this marker is what stops
+// one account's cached draft from being adopted by — or uploaded into — a
+// different account that signs in later on the same browser.
+const DRAFT_SYNC_ACCOUNT_KEY = "mealscout:guest-menu-draft:account";
+
+export function PrivateMenuDraftPage({ user }: { user: { id?: unknown; emailVerified?: unknown } | null | undefined }) {
   const { toast } = useToast();
-  const [draft, setDraft] = useState(() => readGuestMenuDraft(() => window.localStorage) || emptyGuestMenuDraft());
+  const accountId = typeof user?.id === "string" ? user.id : null;
+  // Snapshot the on-device draft BEFORE anything can re-stamp it. The
+  // persist effect below used to run on mount and stamp Date.now() onto
+  // the untouched initial state; the reconcile then read that fresh stamp,
+  // concluded the local copy was the newest, and uploaded the initial
+  // (empty or stale) draft over the account's saved copy. All freshness
+  // comparisons in this page now use this pre-hydration snapshot.
+  const bootRef = useRef<{
+    localDraft: GuestMenuDraft | null;
+    localSavedAt: number | null;
+    foreign: boolean;
+  } | null>(null);
+  if (bootRef.current === null) {
+    const localDraft = readGuestMenuDraft(() => window.localStorage);
+    const localSavedAt = readGuestMenuDraftSavedAt(() => window.localStorage);
+    let recordedAccount: string | null = null;
+    try {
+      recordedAccount = window.localStorage.getItem(DRAFT_SYNC_ACCOUNT_KEY);
+    } catch {
+      // Storage unavailable: no isolation marker; behaviour falls back to
+      // the snapshot-only protections.
+    }
+    bootRef.current = {
+      localDraft,
+      localSavedAt,
+      // A local draft last reconciled under a DIFFERENT account is not
+      // this account's draft: it is neither adopted as the starting state
+      // nor uploaded into this account.
+      foreign: Boolean(
+        accountId && localDraft && recordedAccount && recordedAccount !== accountId,
+      ),
+    };
+  }
+  const [draft, setDraftState] = useState<GuestMenuDraft>(() =>
+    bootRef.current!.foreign
+      ? emptyGuestMenuDraft()
+      : bootRef.current!.localDraft || emptyGuestMenuDraft(),
+  );
   const [kept, setKept] = useState(false);
+  // True only when the draft changed through the editor (a real user
+  // edit), as opposed to initial state or a programmatic adoption.
+  const dirtyRef = useRef(false);
+  const setDraft = (next: GuestMenuDraft) => {
+    dirtyRef.current = true;
+    setDraftState(next);
+  };
   // Signed-in owners also keep this draft on their account, so it survives a
   // new phone or cleared browser data. The local copy stays as the on-device
   // cache; true guests (no account yet) keep the local-only behaviour.
@@ -88,8 +139,9 @@ export function PrivateMenuDraftPage({ user }: { user: { emailVerified?: unknown
   const suppressNextSyncRef = useRef(false);
 
   // On open, reconcile with the account copy: adopt it when it is newer
-  // than this device's copy; otherwise seed/refresh the account with this
-  // device's newer copy.
+  // than this device's pre-hydration snapshot; otherwise seed/refresh the
+  // account with this device's newer copy. Edits the user makes while the
+  // read is in flight always win — the read never adopts over them.
   useEffect(() => {
     if (!canSyncToAccount) return;
     let cancelled = false;
@@ -101,30 +153,53 @@ export function PrivateMenuDraftPage({ user }: { user: { emailVerified?: unknown
         const serverDraft = (payload?.draft ?? null) as GuestMenuDraft | null;
         const serverSavedAt = typeof payload?.savedAt === "number" ? payload.savedAt : null;
         if (cancelled) return;
-        const localDraft = readGuestMenuDraft(() => window.localStorage);
-        const localSavedAt = readGuestMenuDraftSavedAt(() => window.localStorage);
-        if (serverDraft && serverSavedAt && (localSavedAt === null || serverSavedAt > localSavedAt)) {
+        const boot = bootRef.current!;
+        if (dirtyRef.current) {
+          // The user typed while the account read was in flight. Their
+          // edits are the live copy: do not adopt the account copy over
+          // them, and do not upload the pre-edit snapshot either. The
+          // persist effect syncs the edited draft once hydration settles.
+        } else if (
+          serverDraft &&
+          serverSavedAt &&
+          (boot.foreign || boot.localSavedAt === null || serverSavedAt > boot.localSavedAt)
+        ) {
           suppressNextSyncRef.current = true;
           persistGuestMenuDraft(() => window.localStorage, serverDraft, serverSavedAt);
-          setDraft(serverDraft);
-        } else if (localDraft && localSavedAt) {
+          setDraftState(serverDraft);
+        } else if (!boot.foreign && boot.localDraft && boot.localSavedAt) {
           await fetch("/api/settings/me/menu-draft", {
             method: "PUT",
             credentials: "include",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ draft: localDraft, savedAt: localSavedAt }),
+            body: JSON.stringify({ draft: boot.localDraft, savedAt: boot.localSavedAt }),
           }).catch(() => { /* the local copy remains the fallback */ });
         }
       } catch {
         // Offline or signed out mid-flight: the local copy remains the fallback.
       } finally {
-        if (!cancelled) hydratedRef.current = true;
+        if (!cancelled) {
+          hydratedRef.current = true;
+          if (accountId) {
+            try {
+              window.localStorage.setItem(DRAFT_SYNC_ACCOUNT_KEY, accountId);
+            } catch {
+              // Marker is best-effort; the snapshot protections still hold.
+            }
+          }
+        }
       }
     })();
     return () => { cancelled = true; };
   }, [canSyncToAccount]);
 
   useEffect(() => {
+    // Gate automatic writes until hydration settles: never stamp a fresh
+    // timestamp onto state the user has not touched. (A mount-time write
+    // of the initial draft is what made it look newer than the account
+    // copy.) Real user edits are never gated — they persist immediately,
+    // locally and, once hydration has settled, to the account.
+    if (canSyncToAccount && !hydratedRef.current && !dirtyRef.current) return;
     const savedAt = Date.now();
     persistGuestMenuDraft(() => window.localStorage, draft, savedAt);
     if (!canSyncToAccount || !hydratedRef.current) return;
