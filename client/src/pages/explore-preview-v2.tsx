@@ -4992,6 +4992,23 @@ function ScoutDiscoveryView({ account }: { account: string | null }) {
     ],
   );
 
+  // Rotating-spot fillers render under local section headings (the empty
+  // "Open Now Near You" row becomes "Places to Try"), so a network candidate
+  // may only fill a local row when it actually sits inside the viewer's
+  // discovery area. Before this filter the pool was platform-wide trending
+  // and search results with no distance check, which put a Kingston, PA
+  // business on the Pensacola market page.
+  const localNetworkRotatingSpotCandidates = useMemo(() => {
+    if (!resolvedScoutCoords) return [];
+    const radiusMiles = discoveryRadiusKm / 1.60934;
+    return activityFallbackRestaurants.filter((restaurant) => {
+      const lat = readNumberField(restaurant, ["latitude", "lat"]);
+      const lng = readNumberField(restaurant, ["longitude", "lng"]);
+      if (lat === null || lng === null) return false;
+      return getDistanceMiles(resolvedScoutCoords, { lat, lng }) <= radiusMiles;
+    });
+  }, [activityFallbackRestaurants, discoveryRadiusKm, resolvedScoutCoords]);
+
   const activityFallbackDishes = useMemo(
     () =>
       canonicalizeScoutRows(
@@ -5920,7 +5937,7 @@ function ScoutDiscoveryView({ account }: { account: string | null }) {
               visibleOpenRestaurants={visibleOpenRestaurants}
               nearbyRestaurants={effectiveRestaurantsForFeed}
               localRotatingSpotCandidates={localRotatingSpotCandidatesForFeed}
-              networkRotatingSpotCandidates={activityFallbackRestaurants}
+              networkRotatingSpotCandidates={localNetworkRotatingSpotCandidates}
               spotRotationBucket={scoutSpotRotationBucket}
               visibleDeals={visibleDeals}
               hotDealCandidates={hotDealCandidates}
