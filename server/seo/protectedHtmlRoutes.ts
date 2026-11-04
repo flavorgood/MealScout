@@ -50,20 +50,27 @@ function escapeHtml(value: string): string {
 export function buildProtectedRouteInterstitialHtml(requestPath: string): string {
   const safePath = escapeHtml(normalizeRequestPath(requestPath));
   const loginHref = `/login?redirect=${encodeURIComponent(normalizeRequestPath(requestPath))}`;
+  const safeLoginHref = escapeHtml(loginHref);
+  // The gate still answers 401 and never serves the app shell, but a person
+  // who lands here should end up on the real sign-in screen, not a dead-end
+  // page: forward immediately (meta refresh + script), with the link kept
+  // as the no-script/no-refresh fallback.
   return `<!DOCTYPE html>
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="robots" content="noindex, nofollow, noarchive" />
+    <meta http-equiv="refresh" content="0; url=${safeLoginHref}" />
     <title>MealScout | Sign in required</title>
+    <script>window.location.replace(${JSON.stringify(loginHref)});</script>
   </head>
   <body>
     <main>
       <h1>Sign in required</h1>
       <p>This MealScout workspace page is private.</p>
       <p>Requested path: <code>${safePath}</code></p>
-      <p><a href="${escapeHtml(loginHref)}">Sign in to continue</a></p>
+      <p>Taking you to sign in&hellip; <a href="${safeLoginHref}">Sign in to continue</a></p>
     </main>
   </body>
 </html>`;

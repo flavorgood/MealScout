@@ -146,10 +146,61 @@ const PUBLIC_SEO_CITY_NAME_CORRECTIONS: Record<string, string> = {
   "lakeworth beach": "Lake Worth Beach",
 };
 
+// The same free-text storage also produces sloppy display case in public
+// titles and cards ("Milton, Fl", "Fort walton beach"): a city typed in
+// lowercase or caps stays that way everywhere it is printed. Repair the
+// case at the same canonical read point as the spelling corrections.
+// Only words carrying no case information of their own — all lowercase or
+// ALL UPPERCASE — are rewritten; a stored mixed-case word already says how
+// it wants to look (McKinney, DeLand, Winston-Salem) and is left untouched.
+// Identity keys and slugs lowercase their input, so this display repair
+// cannot change which city a row belongs to or which URL it lives at.
+const formatPublicSeoCityWordCase = (word: string): string => {
+  if (!word) return word;
+  if (word !== word.toLowerCase() && word !== word.toUpperCase()) return word;
+  return word
+    .toLowerCase()
+    .split("-")
+    .map((part) => {
+      if (!part) return part;
+      if (part.startsWith("mc") && part.length > 2) {
+        return `Mc${part.charAt(2).toUpperCase()}${part.slice(3)}`;
+      }
+      const segments = part.split("'");
+      return segments
+        .map((segment, index) => {
+          if (!segment) return segment;
+          // Capitalize the word's first letter, and the letter after an
+          // apostrophe only for short prefixes (O'Fallon, D'Iberville) —
+          // a long prefix is a possessive and stays lowercase (Morocco's).
+          const prefixLength = segments.slice(0, index).join("'").length;
+          return index === 0 || prefixLength <= 2
+            ? `${segment.charAt(0).toUpperCase()}${segment.slice(1)}`
+            : segment;
+        })
+        .join("'");
+    })
+    .join("-");
+};
+
+const formatPublicSeoCityDisplayCase = (name: string): string =>
+  name.split(" ").map(formatPublicSeoCityWordCase).join(" ");
+
 export const canonicalPublicSeoCityName = (value: unknown): string => {
   const collapsed = String(value ?? "").replace(/\s+/g, " ").trim();
   if (!collapsed) return "";
-  return PUBLIC_SEO_CITY_NAME_CORRECTIONS[collapsed.toLowerCase()] ?? collapsed;
+  const corrected =
+    PUBLIC_SEO_CITY_NAME_CORRECTIONS[collapsed.toLowerCase()] ?? collapsed;
+  return formatPublicSeoCityDisplayCase(corrected);
+};
+
+// State values arrive from the same free text ("Fl", "fl", "FL"). A
+// two-letter state is a postal abbreviation and displays uppercase;
+// anything longer is left as stored apart from whitespace cleanup.
+export const canonicalPublicSeoStateLabel = (value: unknown): string => {
+  const collapsed = String(value ?? "").replace(/\s+/g, " ").trim();
+  if (!collapsed) return "";
+  return /^[a-z]{2}$/i.test(collapsed) ? collapsed.toUpperCase() : collapsed;
 };
 
 export const canonicalPublicSeoCitySlug = (value: unknown): string =>

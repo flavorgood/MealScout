@@ -121,6 +121,7 @@ function CheckoutSession() {
   );
   const [menuInfo, setMenuInfo] = useState<MenuInfo | null>(null);
   const [menuInfoError, setMenuInfoError] = useState(false);
+  const [menuNotFound, setMenuNotFound] = useState(false);
   const [menuInfoLoading, setMenuInfoLoading] = useState(true);
   const [menuInfoAttempt, setMenuInfoAttempt] = useState(0);
   const createOrderPendingRef = useRef(false);
@@ -211,6 +212,7 @@ function CheckoutSession() {
     let cancelled = false;
     setMenuInfoLoading(true);
     setMenuInfoError(false);
+    setMenuNotFound(false);
     setOrderingEnabled(false);
     setMenuInfo(null);
     setReadiness(null);
@@ -224,11 +226,21 @@ function CheckoutSession() {
       setMenuInfoError(false);
       fetch(`/api/menus/${encodeURIComponent(restaurantId)}`)
         .then((r) => {
+          // A 404 is a different fact from a failed lookup: the checkout
+          // link itself is wrong, and retrying can never fix it.
+          if (r.status === 404) return { menuNotFound: true } as any;
           if (!r.ok) throw new Error(`Menu lookup failed (${r.status})`);
           return r.json();
         })
         .then((payload: any) => {
           if (cancelled) return;
+          if (payload?.menuNotFound) {
+            setMenuNotFound(true);
+            setMenuInfoError(false);
+            setMenuInfo(null);
+            setOrderingEnabled(false);
+            return;
+          }
           setReadiness(payload?.readiness || null);
           const menus = Array.isArray(payload?.menus) ? payload.menus : [];
           const cartMenuIds = new Set(
@@ -512,6 +524,46 @@ function CheckoutSession() {
                 ) : null}
               </div>
             )}
+          </section>
+        </main>
+      </div>
+    );
+  }
+
+  if (menuNotFound && !hasVerifiedPayment) {
+    return (
+      <div
+        className="mealscout-public-profile min-h-screen bg-[color:var(--profile-page)]"
+        data-public-checkout-shell="warm-food-led"
+      >
+        <PublicOrderingTopBar secondaryHref="/scout" secondaryLabel="Scout" />
+        <main className="mx-auto flex min-h-[70vh] w-full max-w-2xl items-center justify-center px-4 py-20">
+          <section className="profile-surface w-full rounded-[2rem] p-7 text-center sm:p-10">
+            <span className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-[color:var(--profile-surface-strong)] text-destructive">
+              <AlertCircle className="h-6 w-6" />
+            </span>
+            <h1 className="mt-4 text-2xl font-black tracking-tight text-[color:var(--profile-ink)]">
+              Checkout not found
+            </h1>
+            <p className="mt-2 text-sm text-[color:var(--profile-muted)]">
+              This checkout link doesn&apos;t match a business on MealScout,
+              so there is nothing to check out here. The link may be mistyped
+              or out of date.
+            </p>
+            <div className="mt-6 flex flex-wrap justify-center gap-3">
+              <Link
+                href="/scout"
+                className="profile-action-primary inline-flex min-h-11 items-center rounded-full px-5 text-sm font-black"
+              >
+                Find food near you
+              </Link>
+              <Link
+                href="/"
+                className="profile-action-secondary inline-flex min-h-11 items-center rounded-full px-5 text-sm font-black"
+              >
+                MealScout home
+              </Link>
+            </div>
           </section>
         </main>
       </div>

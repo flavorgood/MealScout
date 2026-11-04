@@ -263,17 +263,37 @@ export function useFoodTruckSocket({
 export const useFoodTruckWebSocket = useFoodTruckSocket;
 
 // Fallback polling hook for when WebSocket is not available
-export function useFoodTruckPolling(interval: number = 30000) {
+export function useFoodTruckPolling(
+  interval: number = 30000,
+  location?: { lat: number; lng: number; radiusKm?: number } | null,
+) {
   const [foodTrucks, setFoodTrucks] = useState<FoodTruckLocation[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const fetchFoodTrucks = useCallback(async () => {
+    // /api/trucks/live requires lat/lng (it 400s without them), so polling
+    // without a location can only ever produce an empty list plus an error.
+    // Skip the request until a location is available.
+    if (!location || !Number.isFinite(location.lat) || !Number.isFinite(location.lng)) {
+      setFoodTrucks([]);
+      return;
+    }
     try {
       setIsLoading(true);
-      const response = await fetch(API_BASE_URL ? `${API_BASE_URL}/api/trucks/live` : '/api/trucks/live', {
-        credentials: 'include',
+      const params = new URLSearchParams({
+        lat: String(location.lat),
+        lng: String(location.lng),
+        radiusKm: String(location.radiusKm ?? 50),
       });
+      const response = await fetch(
+        API_BASE_URL
+          ? `${API_BASE_URL}/api/trucks/live?${params}`
+          : `/api/trucks/live?${params}`,
+        {
+          credentials: 'include',
+        },
+      );
       if (!response.ok) {
         throw new Error('Failed to fetch food trucks');
       }
@@ -285,7 +305,7 @@ export function useFoodTruckPolling(interval: number = 30000) {
     } finally {
       setIsLoading(false);
     }
-  }, []);
+  }, [location?.lat, location?.lng, location?.radiusKm]);
 
   useEffect(() => {
     fetchFoodTrucks(); // Initial fetch

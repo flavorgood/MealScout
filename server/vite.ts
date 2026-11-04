@@ -55,6 +55,10 @@ export async function setupVite(app: Express, server: Server, canonicalBaseUrl =
   app.use(vite.middlewares);
   // Defense in depth: never transform marketing index.html for unauth protected paths.
   app.use(guardUnauthenticatedProtectedHtml);
+  // Unmatched API paths are a JSON 404, never the SPA shell (mirrors serveStatic).
+  app.use("/api", (_req, res) => {
+    res.status(404).json({ message: "Not found" });
+  });
   app.use("*", async (req, res, next) => {
     const url = req.originalUrl;
 
@@ -173,6 +177,12 @@ export function serveStatic(app: Express, options: { canonicalBaseUrl?: string; 
 
   // Defense in depth: never send marketing index.html for unauth protected paths.
   app.use(guardUnauthenticatedProtectedHtml);
+
+  // Unmatched API paths are a JSON 404, never the SPA shell: anything asking
+  // for /api/* data must not receive an HTML page when the route is missing.
+  app.use("/api", (_req, res) => {
+    res.status(404).json({ message: "Not found" });
+  });
 
   // Fall through to index.html for SPA routes only.
   app.use("*", (_req, res) => {
