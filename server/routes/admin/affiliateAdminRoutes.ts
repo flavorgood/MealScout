@@ -44,6 +44,82 @@ function appendStripeTransferRef(
   return notes ? `${notes} ${ref}` : ref;
 }
 
+// Payout execution safety (audit fix, 2026-11-04):
+//
+// A withdrawal row is the only authority for its own payment. The affiliate
+// picks a method + details when requesting; at APPROVAL time the admin's
+// action snapshots the executable destination (the affiliate's Stripe
+// Connect account id as it stands at that moment) onto the row itself as
+// methodDetails.approvedExecution. Mark-paid may only execute against that
+// snapshot — never against the affiliate's live payout preferences, which
+// the affiliate can edit after approval (the preferences' stripeConnectedId
+// is free text with no ownership verification anywhere in this codebase, so
+// whatever is snapshotted at approval is the last point where a human
+// reviewed the destination).
+//
+// Before any provider call, mark-paid atomically claims the row
+// approved -> processing (guarded update). While a row is processing, no
+// other action can move it: a second mark-paid reconciles instead of
+// paying again, and reject refuses. The claim records its own snapshot
+// (methodDetails.executionClaim, including the Stripe idempotency key), so
+// a retry after a crash replays the SAME transfer instead of creating a
+// second one, and the recorded transfer id in notes finalizes the row
+// without any new provider call.
+type ApprovedExecution = {
+  rail: "stripe_transfer";
+  destination: string | null;
+  amount: string;
+  currency: "usd";
+  approvedBy: string;
+  approvedAt: string;
+};
+
+type ExecutionClaim = {
+  rail: "stripe_transfer";
+  destination: string;
+  amountCents: number;
+  currency: "usd";
+  idempotencyKey: string;
+  claimedBy: string;
+  claimedAt: string;
+};
+
+function methodDetailsRecord(value: unknown): Record<string, any> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? { ...(value as Record<string, any>) }
+    : {};
+}
+
+function readApprovedExecution(existing: any): ApprovedExecution | null {
+  const exec = methodDetailsRecord(existing?.methodDetails).approvedExecution;
+  if (
+    !exec ||
+    typeof exec !== "object" ||
+    exec.rail !== "stripe_transfer" ||
+    typeof exec.amount !== "string"
+  ) {
+    return null;
+  }
+  return exec as ApprovedExecution;
+}
+
+function readExecutionClaim(existing: any): ExecutionClaim | null {
+  const claim = methodDetailsRecord(existing?.methodDetails).executionClaim;
+  if (
+    !claim ||
+    typeof claim !== "object" ||
+    claim.rail !== "stripe_transfer" ||
+    typeof claim.destination !== "string" ||
+    !claim.destination ||
+    typeof claim.amountCents !== "number" ||
+    typeof claim.idempotencyKey !== "string" ||
+    !claim.idempotencyKey
+  ) {
+    return null;
+  }
+  return claim as ExecutionClaim;
+}
+
 type RequireAdminUser = (req: any, res: any) => boolean;
 
 export function registerAffiliateAdminRoutes(
@@ -381,15 +457,53 @@ export function registerAffiliateAdminRoutes(
           return res.status(409).json({ message: "Payout is not pending" });
         }
 
+        // Snapshot the execution terms onto the request itself at the
+        // moment of approval: the amount as approved and the affiliate's
+        // Stripe destination as it stands NOW. Mark-paid executes only
+        // against this snapshot, so a later edit to the affiliate's payout
+        // preferences cannot redirect an already-approved payout. The
+        // destination may be null (affiliate has no Stripe destination on
+        // file); approval still stands, and mark-paid will refuse with the
+        // reason rather than paying an unverified destination.
+        const [prefs] = await db
+          .select({
+            stripeConnectedId: userPayoutPreferences.stripeConnectedId,
+          })
+          .from(userPayoutPreferences)
+          .where(eq(userPayoutPreferences.userId, existing.userId))
+          .limit(1);
+        const approvedAt = new Date();
+        const execution: ApprovedExecution = {
+          rail: "stripe_transfer",
+          destination: prefs?.stripeConnectedId?.trim() || null,
+          amount: String(existing.amount),
+          currency: "usd",
+          approvedBy: String(req.user.id),
+          approvedAt: approvedAt.toISOString(),
+        };
+
         const [updated] = await db
           .update(affiliateWithdrawals)
           .set({
             status: "approved",
-            approvedAt: new Date(),
+            approvedAt,
             approvedBy: req.user.id,
+            methodDetails: {
+              ...methodDetailsRecord(existing.methodDetails),
+              approvedExecution: execution,
+            },
           })
-          .where(eq(affiliateWithdrawals.id, payoutId))
+          .where(
+            and(
+              eq(affiliateWithdrawals.id, payoutId),
+              eq(affiliateWithdrawals.status, "pending"),
+            ),
+          )
           .returning();
+
+        if (!updated) {
+          return res.status(409).json({ message: "Payout is not pending" });
+        }
 
         res.json(updated);
       } catch (error: any) {
@@ -424,83 +538,151 @@ export function registerAffiliateAdminRoutes(
         if (existing.status === "rejected") {
           return res.status(409).json({ message: "Payout was rejected" });
         }
-        if (existing.status !== "approved") {
+
+        // Resolve the claim this call executes against. Two entry states:
+        //  - "approved": first attempt. Execution terms come from the
+        //    approval snapshot on the row itself. Without one there is no
+        //    verified destination on the request, and this action refuses
+        //    rather than falling back to the affiliate's live (mutable,
+        //    unverified) payout preferences — legacy approvals predate the
+        //    snapshot; reject them to restore the affiliate's credit, or
+        //    settle them outside this action.
+        //  - "processing": a previous attempt claimed the row and its
+        //    outcome is unknown (crash, timeout, provider error). The
+        //    claim recorded on the row governs the retry.
+        let claim = readExecutionClaim(existing);
+        let working = existing;
+
+        if (existing.status === "approved") {
+          const execution = readApprovedExecution(existing);
+          if (!execution) {
+            return res.status(409).json({
+              message:
+                "Cannot pay: no execution snapshot was recorded at approval for this payout, so there is no verified destination on the request itself",
+            });
+          }
+          if (!execution.destination) {
+            return res.status(409).json({
+              message:
+                "Cannot pay: no Stripe payout destination was recorded at approval for this affiliate",
+            });
+          }
+          if (String(existing.amount) !== execution.amount) {
+            return res.status(409).json({
+              message:
+                "Cannot pay: the payout amount no longer matches the amount recorded at approval",
+            });
+          }
+          const amountCents = Math.round(
+            parseFloat(execution.amount || "0") * 100,
+          );
+          if (!Number.isFinite(amountCents) || amountCents <= 0) {
+            return res
+              .status(400)
+              .json({ message: "Payout amount is invalid" });
+          }
+          claim = {
+            rail: "stripe_transfer",
+            destination: execution.destination,
+            amountCents,
+            currency: execution.currency,
+            idempotencyKey: `affiliate_withdrawal_${existing.id}`,
+            claimedBy: String(req.user?.id || ""),
+            claimedAt: new Date().toISOString(),
+          };
+          // Atomically claim the row BEFORE any provider call. If another
+          // action already moved it (a second mark-paid claimed it, or a
+          // reject landed), this update matches nothing and the call stops
+          // here — money can never be sent twice, and credit can never be
+          // restored for a payout that is being sent.
+          const [claimed] = await db
+            .update(affiliateWithdrawals)
+            .set({
+              status: "processing",
+              methodDetails: {
+                ...methodDetailsRecord(existing.methodDetails),
+                executionClaim: claim,
+              },
+            })
+            .where(
+              and(
+                eq(affiliateWithdrawals.id, payoutId),
+                eq(affiliateWithdrawals.status, "approved"),
+              ),
+            )
+            .returning();
+          if (!claimed) {
+            return res.status(409).json({
+              message:
+                "Payout state changed before payment could start — reload and retry",
+            });
+          }
+          working = claimed;
+        } else if (existing.status === "processing") {
+          if (!claim) {
+            return res.status(409).json({
+              message:
+                "Cannot pay: this payout is marked processing but carries no execution claim — reconcile it manually before retrying",
+            });
+          }
+        } else {
           return res.status(409).json({ message: "Payout is not approved" });
         }
 
-        // A withdrawal that already carries a Stripe transfer reference was
-        // already sent money — never send it twice. Fail closed and name the
-        // recorded reference so the admin can verify it in Stripe.
-        const recordedTransferId = extractStripeTransferId(existing.notes);
-        if (recordedTransferId) {
+        if (!claim) {
+          // Unreachable by construction (both entry branches above either
+          // set the claim or return); kept as a fail-closed guard.
           return res.status(409).json({
-            message: `A Stripe transfer (${recordedTransferId}) is already recorded for this payout`,
+            message: "Cannot pay: payout carries no execution claim",
           });
         }
 
-        // Resolve the affiliate's Stripe payout destination from their
-        // payout preferences. There is no PayPal rail in this codebase, so
-        // without a Stripe Connect destination there is nothing this action
-        // can actually send — say so plainly instead of relabelling the row
-        // as paid when no money moved.
-        const [prefs] = await db
-          .select({
-            stripeConnectedId: userPayoutPreferences.stripeConnectedId,
-          })
-          .from(userPayoutPreferences)
-          .where(eq(userPayoutPreferences.userId, existing.userId))
-          .limit(1);
-
-        const destination = prefs?.stripeConnectedId?.trim();
-        if (!destination) {
-          return res.status(409).json({
-            message:
-              "Cannot pay: no Stripe payout destination on file for this affiliate",
-          });
-        }
-        if (!stripe) {
-          return res.status(503).json({
-            message: "Stripe is not configured on this server",
-          });
-        }
-
-        const amountCents = Math.round(
-          parseFloat(existing.amount?.toString() || "0") * 100,
-        );
-        if (!Number.isFinite(amountCents) || amountCents <= 0) {
-          return res.status(400).json({ message: "Payout amount is invalid" });
-        }
-
-        // Send the money FIRST. Only a confirmed transfer may mark the row
-        // paid; a provider failure leaves the row approved and unpaid, with
-        // the provider's error surfaced to the admin. The idempotency key is
-        // the withdrawal id, so retrying after a crash between the transfer
-        // and the row update replays the same transfer instead of paying
-        // twice.
-        let transfer: Stripe.Transfers.Transfer;
-        try {
-          transfer = await stripe.transfers.create(
-            {
-              amount: amountCents,
-              currency: "usd",
-              destination,
-              description: `MealScout affiliate payout — withdrawal ${existing.id}`,
-              metadata: {
-                affiliateWithdrawalId: existing.id,
-                affiliateUserId: existing.userId,
-                adminUserId: String(req.user?.id || ""),
+        // Reconcile before sending: a transfer reference already recorded
+        // on the row means the money was already sent (a previous attempt
+        // crashed between the provider call and finalizing). Finalize from
+        // the record — never send again.
+        let transferId = extractStripeTransferId(working.notes);
+        if (!transferId) {
+          if (!stripe) {
+            return res.status(503).json({
+              message: "Stripe is not configured on this server",
+            });
+          }
+          // Send against the CLAIM snapshot only: destination, amount,
+          // currency and idempotency key all come from the row, never from
+          // live preferences. The idempotency key is the withdrawal id, so
+          // if a previous attempt created the transfer but crashed before
+          // recording it, Stripe replays that same transfer here instead
+          // of paying twice. A provider failure leaves the row processing
+          // (outcome uncertain): reject stays refused and a mark-paid
+          // retry reconciles — the row is never silently returned to
+          // approved.
+          let transfer: Stripe.Transfers.Transfer;
+          try {
+            transfer = await stripe.transfers.create(
+              {
+                amount: claim.amountCents,
+                currency: claim.currency,
+                destination: claim.destination,
+                description: `MealScout affiliate payout — withdrawal ${working.id}`,
+                metadata: {
+                  affiliateWithdrawalId: working.id,
+                  affiliateUserId: working.userId,
+                  adminUserId: String(req.user?.id || ""),
+                },
               },
-            },
-            { idempotencyKey: `affiliate_withdrawal_${existing.id}` },
-          );
-        } catch (transferErr: any) {
-          console.error(
-            `Error creating Stripe transfer for affiliate payout ${existing.id}:`,
-            transferErr,
-          );
-          return res.status(502).json({
-            message: `Stripe transfer failed: ${transferErr?.message || "unknown error"}`,
-          });
+              { idempotencyKey: claim.idempotencyKey },
+            );
+          } catch (transferErr: any) {
+            console.error(
+              `Error creating Stripe transfer for affiliate payout ${working.id}:`,
+              transferErr,
+            );
+            return res.status(502).json({
+              message: `Stripe transfer failed: ${transferErr?.message || "unknown error"} — the payout stays in processing; retry mark-paid to reconcile before taking any other action`,
+            });
+          }
+          transferId = transfer.id;
         }
 
         const paidAt = new Date();
@@ -510,19 +692,35 @@ export function registerAffiliateAdminRoutes(
             status: "paid",
             paidAt,
             processedAt: paidAt,
-            notes: appendStripeTransferRef(existing.notes, transfer.id),
+            notes: extractStripeTransferId(working.notes)
+              ? working.notes
+              : appendStripeTransferRef(working.notes, transferId),
           })
-          .where(eq(affiliateWithdrawals.id, payoutId))
+          .where(
+            and(
+              eq(affiliateWithdrawals.id, payoutId),
+              eq(affiliateWithdrawals.status, "processing"),
+            ),
+          )
           .returning();
 
-        if (existing.creditLedgerId) {
+        if (!updated) {
+          // The money moved but the row is no longer processing. Surface
+          // the transfer id loudly rather than pretending success or
+          // failure — a human reconciles this row against Stripe.
+          return res.status(409).json({
+            message: `Stripe transfer ${transferId} was sent for this payout, but the payout row changed state before it could be marked paid — reconcile it manually in Stripe`,
+          });
+        }
+
+        if (working.creditLedgerId) {
           await db
             .update(creditLedger)
             .set({
               redeemedFor: "cash_payout",
               redeemedAt: new Date(),
             })
-            .where(eq(creditLedger.id, existing.creditLedgerId));
+            .where(eq(creditLedger.id, working.creditLedgerId));
         }
 
         res.json(updated);
@@ -558,18 +756,54 @@ export function registerAffiliateAdminRoutes(
         if (existing.status === "rejected") {
           return res.status(409).json({ message: "Payout already rejected" });
         }
+        // A payout whose payment has started — or whose outcome is still
+        // unknown — must never be rejected: rejection restores the
+        // affiliate's credit, and credit restored on top of a sent (or
+        // possibly sent) transfer pays the affiliate twice.
+        if (existing.status === "processing") {
+          return res.status(409).json({
+            message:
+              "Payout is being processed — it cannot be rejected until the payment outcome is known",
+          });
+        }
+        const recordedTransferId = extractStripeTransferId(existing.notes);
+        if (recordedTransferId) {
+          return res.status(409).json({
+            message: `Cannot reject: a Stripe transfer (${recordedTransferId}) is already recorded for this payout`,
+          });
+        }
 
         const amountNum = parseFloat(existing.amount?.toString() || "0");
 
+        let stateChanged = false;
         await db.transaction(async (tx: any) => {
-          await tx
+          // Guarded claim for rejection, in the same transaction as the
+          // credit reversal below: only a request still pending or
+          // approved can be rejected. If a mark-paid claim (processing) or
+          // a payment landed after the read above, this update matches
+          // nothing, the transaction writes nothing else, and the caller
+          // answers 409 — the reversal can no longer race a payment.
+          const [rejectedRow] = await tx
             .update(affiliateWithdrawals)
             .set({
               status: "rejected",
               rejectedAt: new Date(),
               notes: reason || existing.notes,
             })
-            .where(eq(affiliateWithdrawals.id, payoutId));
+            .where(
+              and(
+                eq(affiliateWithdrawals.id, payoutId),
+                or(
+                  eq(affiliateWithdrawals.status, "pending"),
+                  eq(affiliateWithdrawals.status, "approved"),
+                ),
+              ),
+            )
+            .returning();
+          if (!rejectedRow) {
+            stateChanged = true;
+            return;
+          }
 
           const reversalExists = (
             await tx
@@ -601,6 +835,13 @@ export function registerAffiliateAdminRoutes(
               .where(eq(creditLedger.id, existing.creditLedgerId));
           }
         });
+
+        if (stateChanged) {
+          return res.status(409).json({
+            message:
+              "Payout state changed before it could be rejected — reload and retry",
+          });
+        }
 
         res.json({ success: true });
       } catch (error: any) {
