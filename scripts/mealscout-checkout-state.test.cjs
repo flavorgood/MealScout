@@ -35,6 +35,12 @@ const saved = () => ({
 const paymentResponse = { order: { id: "order-a", status: "pending", subtotalCents: 2000, totalCents: 2100,
   mealscoutFeeCents: 50, processingFeeCents: 50, merchantNameSnapshot: "Verified Truck" },
   clientSecret: "server-verified-secret", customerAccessToken: "same-access" };
+// The fixture cart is 2 x Taco with a 1200-cent line total. The totals
+// preview is the server pricing that exact cart (subtotal + card fees);
+// the component only requires the response shape, and no scenario asserts
+// these specific fee amounts.
+const previewTotals = { subtotalCents: 1200, mealscoutFeeCents: 50,
+  processingFeeCents: 35, platformFeeCents: 0, totalCents: 1285, feePaidByBusiness: false };
 function nodes(tree) {
   if (Array.isArray(tree)) return tree.flatMap(nodes);
   if (!tree || typeof tree !== "object") return [];
@@ -147,6 +153,13 @@ async function run() {
     await h.fill("customer-name", "Fixture"); await h.fill("customer-email", "fixture@example.test");
     h.find((n) => n.type === "RadioGroup" && typeof n.props.onValueChange === "function").props.onValueChange("pickup");
     await h.flush();
+    // Readiness alone no longer enables Continue: the component prices the
+    // cart through POST /api/pickup-orders/totals-preview and keeps Continue
+    // disabled until the preview lands. The component fires that request
+    // itself; completing the flow means answering it, as the real UI does.
+    const preview = h.requests.find((r) => r.options.method === "POST" && r.url === "/api/pickup-orders/totals-preview");
+    assert.ok(preview, "Expected the component to request a totals preview once readiness resolves");
+    await h.respond(preview, previewTotals);
   }
   await test("first render keeps the cart and distinguishes pending availability", async () => {
     const h = harness();
@@ -169,7 +182,9 @@ async function run() {
     assert.ok(h.button("Continue to secure payment").props.disabled);
     await h.respond(h.requests[1], readyMenu());
     assert.equal(h.writes.at(-1).checkoutRequestId, before);
-    assert.equal(h.requests.filter((r) => r.options.method === "POST").length, 0);
+    // The totals preview is a pricing POST fired once readiness resolves,
+    // not an order; only an order-creation POST would fail this scenario.
+    assert.equal(h.requests.filter((r) => r.options.method === "POST" && r.url === "/api/pickup-orders").length, 0);
     assert.equal(JSON.parse(h.store.get("mealscout_cart"))[0].menuItemId, "dish-a");
   });
   await test("known unavailable menu is not conflated with a network error", async () => {
@@ -257,7 +272,7 @@ async function run() {
   await test("same-tick repeated submit creates one request with unchanged payload shape", async () => {
     const h = harness(); await makeReady(h); const onClick = h.button("Continue to secure payment").props.onClick;
     const first = onClick(), second = onClick(); await h.flush();
-    const posts = h.requests.filter((r) => r.options.method === "POST"); assert.equal(posts.length, 1);
+    const posts = h.requests.filter((r) => r.options.method === "POST" && r.url === "/api/pickup-orders"); assert.equal(posts.length, 1);
     const payload = JSON.parse(posts[0].options.body);
     assert.equal(payload.customerName, "Fixture"); assert.equal(payload.menuId, "menu-a");
     assert.equal(payload.paymentMethod, "card"); assert.equal(payload.orderType, "pickup");
