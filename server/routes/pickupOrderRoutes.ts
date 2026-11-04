@@ -257,6 +257,19 @@ const createOrderLimiter = distributedRateLimit({
   },
 });
 
+const totalsPreviewLimiter = distributedRateLimit({
+  scope: "pickup_orders_totals_preview",
+  limit: 60,
+  windowMs: 15 * 60 * 1000,
+  key: (req) => {
+    const principal = String((req as any)?.user?.id || req.ip || "unknown");
+    const restaurantId = String((req as any)?.body?.restaurantId || "unknown")
+      .trim()
+      .slice(0, 100);
+    return `${principal}:${restaurantId}`;
+  },
+});
+
 // ── Error wrapper ─────────────────────────────────────────────────────────────
 function wrap(handler: (req: any, res: any) => Promise<void>) {
   return async (req: any, res: any) => {
@@ -1313,6 +1326,328 @@ export function registerPickupOrderRoutes(app: Express) {
         order: projectOrderForCustomer(updatedOrder, true),
         clientSecret: paymentIntent.client_secret,
         customerAccessToken: body.customerAccessToken ?? null,
+      });
+    }),
+  );
+
+  // ── ─────────────────────────────────────────────────────────────────────────
+  // CUSTOMER: Preview the server-priced final total for a cart
+  // ── ─────────────────────────────────────────────────────────────────────────
+
+  /**
+   * POST /api/pickup-orders/totals-preview
+   * Body:
+   * {
+   *   restaurantId, menuId,
+   *   paymentMethod: 'card',
+   *   items: [{ menuItemId, quantity, selectedVariantId?, selectedModifierIds?: string[] }]
+   * }
+   *
+   * Response:
+   *   { subtotalCents, mealscoutFeeCents, processingFeeCents, platformFeeCents,
+   *     totalCents, feePaidByBusiness }
+   *
+   * Runs the same read-only pricing sequence as POST /api/pickup-orders —
+   * the menu's fee presentation, authoritative item prices, required-choice
+   * validation, computePickupOrderFees — so checkout can show the final
+   * total (card fees included) and keep Continue disabled until that number
+   * exists. Creates nothing: no order row, no PaymentIntent, no inventory
+   * reservation. Order creation remains the authority at charge time and
+   * recomputes the same figures from the same helpers before charging.
+   */
+  app.post(
+    "/api/pickup-orders/totals-preview",
+    totalsPreviewLimiter,
+    wrap(async (req, res) => {
+      const bodySchema = z.object({
+        restaurantId: z.string().min(1),
+        menuId: z.string().min(1),
+        paymentMethod: z.enum(["card", "cash"]).default("card"),
+        items: z
+          .array(
+            z.object({
+              menuItemId: z.string().min(1),
+              quantity: z.number().int().min(1).max(MAX_PICKUP_ORDER_UNITS),
+              selectedVariantId: z.string().optional().nullable(),
+              selectedModifierIds: z
+                .array(z.string().min(1).max(100))
+                .max(20)
+                .optional()
+                .default([]),
+            }),
+          )
+          .min(1)
+          .max(MAX_PICKUP_ORDER_UNITS),
+      });
+
+      const body = bodySchema.parse(req.body);
+      if (body.paymentMethod !== "card") {
+        return res.status(409).json({
+          code: "PAYMENT_METHOD_UNAVAILABLE",
+          message:
+            "Verified online checkout currently requires secure card payment.",
+        });
+      }
+      const requestedUnitCount = body.items.reduce(
+        (total, item) => total + item.quantity,
+        0,
+      );
+      if (requestedUnitCount > MAX_PICKUP_ORDER_UNITS) {
+        return res.status(400).json({
+          code: "ORDER_UNIT_LIMIT_EXCEEDED",
+          message: `Online checkout is limited to ${MAX_PICKUP_ORDER_UNITS} total items per order.`,
+        });
+      }
+
+      // Fetch the exact menu to enforce current fee presentation (same
+      // lookup as order creation).
+      const [menu] = await db
+        .select()
+        .from(menus)
+        .where(
+          and(
+            eq(menus.id, body.menuId),
+            eq(menus.restaurantId, body.restaurantId),
+          ),
+        );
+      if (!menu || !menu.isActive) {
+        return res.status(400).json({ message: "Menu not available" });
+      }
+      if (menu.pricesIncludeTax !== true) {
+        return res.status(409).json({
+          code: "TAX_PRICING_NOT_CONFIRMED",
+          message:
+            "Online pickup is unavailable until the business confirms that menu prices include applicable tax.",
+        });
+      }
+
+      // Resolve all menu items (same authoritative loader as creation).
+      const itemIds = body.items.map((i) => i.menuItemId);
+      const dbItems: MenuItem[] = await loadAuthoritativePickupOrderItems(db, {
+        restaurantId: body.restaurantId,
+        menuId: body.menuId,
+        menuItemIds: itemIds,
+      });
+
+      const itemMap = new Map<string, MenuItem>(dbItems.map((i) => [i.id, i]));
+
+      // Check every requested item exists and is available.
+      for (const reqItem of body.items) {
+        const item = itemMap.get(reqItem.menuItemId);
+        if (!item) {
+          return res.status(400).json({
+            message: `Item ${reqItem.menuItemId} is not available`,
+          });
+        }
+        if (
+          typeof item.priceCents !== "number" ||
+          !Number.isInteger(item.priceCents) ||
+          item.priceCents < 0
+        ) {
+          return res.status(400).json({
+            message: `"${item.name}" cannot be ordered until the business adds a price`,
+          });
+        }
+      }
+
+      // Check inventory for tracked items (read-only here; creation
+      // re-checks under its transaction before reserving).
+      for (const reqItem of body.items) {
+        const dbItem = itemMap.get(reqItem.menuItemId)!;
+        if (dbItem.trackInventory && dbItem.inventoryQty !== null) {
+          if (dbItem.inventoryQty < reqItem.quantity) {
+            return res.status(400).json({
+              message: `"${dbItem.name}" only has ${dbItem.inventoryQty} left in stock`,
+            });
+          }
+        }
+      }
+
+      // Fetch all variants + modifiers for requested items.
+      const [allVariants, allModifiers]: [
+        MenuItemVariant[],
+        MenuItemModifier[],
+      ] = await Promise.all([
+        db
+          .select()
+          .from(menuItemVariants)
+          .where(inArray(menuItemVariants.menuItemId, itemIds)),
+        db
+          .select()
+          .from(menuItemModifiers)
+          .where(inArray(menuItemModifiers.menuItemId, itemIds)),
+      ]);
+
+      const variantMap = new Map<string, MenuItemVariant>(
+        allVariants.map((v) => [v.id, v]),
+      );
+      const modifierMap = new Map<string, MenuItemModifier>(
+        allModifiers.map((m) => [m.id, m]),
+      );
+      const variantsByItem = new Map<string, MenuItemVariant[]>();
+      for (const variant of allVariants) {
+        const current = variantsByItem.get(variant.menuItemId) || [];
+        current.push(variant);
+        variantsByItem.set(variant.menuItemId, current);
+      }
+      const modifiersByItem = new Map<string, MenuItemModifier[]>();
+      for (const modifier of allModifiers) {
+        const current = modifiersByItem.get(modifier.menuItemId) || [];
+        current.push(modifier);
+        modifiersByItem.set(modifier.menuItemId, current);
+      }
+
+      // Validate required choices before pricing (same rules as creation).
+      for (const reqItem of body.items) {
+        const item = itemMap.get(reqItem.menuItemId)!;
+        const itemVariants = variantsByItem.get(item.id) || [];
+        if (itemVariants.length > 0) {
+          const selectedVariant = reqItem.selectedVariantId
+            ? variantMap.get(reqItem.selectedVariantId)
+            : null;
+          if (!selectedVariant || selectedVariant.menuItemId !== item.id) {
+            return res.status(400).json({
+              code: "ITEM_OPTION_REQUIRED",
+              message: `Choose an option for "${item.name}".`,
+            });
+          }
+        } else if (reqItem.selectedVariantId) {
+          return res.status(400).json({
+            code: "INVALID_ITEM_OPTION",
+            message: `The selected option is not available for "${item.name}".`,
+          });
+        }
+
+        const requestedModifierIds = reqItem.selectedModifierIds || [];
+        if (
+          new Set(requestedModifierIds).size !== requestedModifierIds.length
+        ) {
+          return res.status(400).json({
+            code: "INVALID_ITEM_MODIFIER",
+            message: `A choice was duplicated for "${item.name}".`,
+          });
+        }
+        for (const modifierId of requestedModifierIds) {
+          const modifier = modifierMap.get(modifierId);
+          if (!modifier || modifier.menuItemId !== item.id) {
+            return res.status(400).json({
+              code: "INVALID_ITEM_MODIFIER",
+              message: `A selected choice is not available for "${item.name}".`,
+            });
+          }
+        }
+
+        const groups = new Map<string, MenuItemModifier[]>();
+        for (const modifier of modifiersByItem.get(item.id) || []) {
+          const current = groups.get(modifier.groupName) || [];
+          current.push(modifier);
+          groups.set(modifier.groupName, current);
+        }
+        for (const [groupName, groupModifiers] of groups) {
+          const groupIds = new Set(
+            groupModifiers.map((modifier) => modifier.id),
+          );
+          const selectedCount = requestedModifierIds.filter((id) =>
+            groupIds.has(id),
+          ).length;
+          const required = groupModifiers.some(
+            (modifier) => modifier.isRequired === true,
+          );
+          const maxSelections = Math.min(
+            ...groupModifiers.map((modifier) =>
+              Math.max(1, Number(modifier.maxSelections || 1)),
+            ),
+          );
+          if (required && selectedCount === 0) {
+            return res.status(400).json({
+              code: "ITEM_MODIFIER_REQUIRED",
+              message: `Choose ${groupName} for "${item.name}".`,
+            });
+          }
+          if (selectedCount > maxSelections) {
+            return res.status(400).json({
+              code: "TOO_MANY_ITEM_MODIFIERS",
+              message: `Choose no more than ${maxSelections} from ${groupName} for "${item.name}".`,
+            });
+          }
+        }
+      }
+
+      // Price the cart with the same line math as order creation.
+      let subtotalCents = 0;
+      for (const reqItem of body.items) {
+        const item = itemMap.get(reqItem.menuItemId)!;
+        let variantAddCents = 0;
+        if (reqItem.selectedVariantId) {
+          const variant = variantMap.get(reqItem.selectedVariantId);
+          if (variant && variant.menuItemId === item.id) {
+            variantAddCents = variant.additionalCents;
+          }
+        }
+
+        let modifierAddCents = 0;
+        for (const modId of reqItem.selectedModifierIds ?? []) {
+          const mod = modifierMap.get(modId);
+          if (mod && mod.menuItemId === item.id) {
+            modifierAddCents += mod.additionalCents;
+          }
+        }
+
+        const lineTotalCents = calcLineTotal(
+          item.priceCents,
+          variantAddCents,
+          modifierAddCents,
+          reqItem.quantity,
+        );
+
+        if (
+          !Number.isSafeInteger(lineTotalCents) ||
+          lineTotalCents < 0 ||
+          lineTotalCents > MAX_PICKUP_ORDER_TOTAL_CENTS
+        ) {
+          return res.status(409).json({
+            code: "INVALID_ORDER_PRICE",
+            message: `The current price for "${item.name}" cannot be ordered safely.`,
+          });
+        }
+
+        subtotalCents += lineTotalCents;
+        if (subtotalCents > MAX_PICKUP_ORDER_TOTAL_CENTS) {
+          return res.status(409).json({
+            code: "ORDER_TOTAL_TOO_LARGE",
+            message: "This order total is too large for online checkout.",
+          });
+        }
+      }
+
+      const feePaidByBusiness = menu.hidePlatformFee;
+      const { mealscoutFeeCents, processingFeeCents, platformFeeCents } =
+        computePickupOrderFees(
+          subtotalCents,
+          body.paymentMethod,
+          feePaidByBusiness,
+        );
+      const customerPlatformFeeCents = feePaidByBusiness ? 0 : platformFeeCents;
+      const totals = calculateAuthoritativeMerchantDeliveryTotals({
+        subtotalCents,
+        platformFeeCents: customerPlatformFeeCents,
+        deliveryFeeCents: 0,
+      });
+      if (totals.totalCents < MIN_CARD_CHARGE_CENTS) {
+        return res.status(409).json({
+          code: "CARD_TOTAL_BELOW_MINIMUM",
+          message:
+            "This card order is below the minimum amount supported by online payment. Add another item before continuing.",
+        });
+      }
+
+      return res.status(200).json({
+        subtotalCents,
+        mealscoutFeeCents,
+        processingFeeCents,
+        platformFeeCents,
+        totalCents: totals.totalCents,
+        feePaidByBusiness,
       });
     }),
   );

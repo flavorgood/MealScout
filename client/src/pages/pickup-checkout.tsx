@@ -181,6 +181,17 @@ function CheckoutSession() {
     useState<PickupCheckoutServerTotals | null>(
       restoredCheckout?.serverTotals ?? null,
     );
+  // Server-priced final total for the cart on this step (card fees
+  // included), fetched from the totals preview before Continue unlocks.
+  // Null until the server has priced the exact current cart — the client
+  // never estimates fees, because the fee amounts live in server
+  // configuration and only the server can state the real number.
+  const [finalTotals, setFinalTotals] =
+    useState<PickupCheckoutServerTotals | null>(null);
+  const [finalTotalsError, setFinalTotalsError] = useState<string | null>(
+    null,
+  );
+  const finalTotalsRequestRef = useRef(0);
   const hostileBrowser = isPaymentHostileBrowser();
 
   const resetCheckoutRecovery = () => {
@@ -390,6 +401,71 @@ function CheckoutSession() {
   const cartMenuIds = new Set(cart.map((item) => item.menuId));
   const cartHasMixedMenus = cartMenuIds.size > 1;
 
+  // Price the exact current cart on the server whenever it changes, so the
+  // summary can show the final total (card fees included) and Continue can
+  // stay disabled until that number exists. Any cart edit nulls the totals
+  // and re-prices; a failed preview keeps Continue disabled with the
+  // server's reason. Once an order exists (clientSecret set), the created
+  // order's own totals are authoritative and no preview runs.
+  const finalTotalsSignature =
+    !clientSecret && menuInfo?.cardPaymentsEnabled && cart.length > 0
+      ? JSON.stringify({
+          restaurantId: restaurantId ?? "",
+          menuId: cart[0]?.menuId ?? "",
+          paymentMethod,
+          items: cart.map((i) => ({
+            menuItemId: i.menuItemId,
+            quantity: i.quantity,
+            selectedVariantId: i.selectedVariantId ?? null,
+            selectedModifierIds: i.selectedModifierIds ?? [],
+          })),
+        })
+      : null;
+
+  useEffect(() => {
+    if (!finalTotalsSignature || cartHasMixedMenus) {
+      setFinalTotals(null);
+      setFinalTotalsError(null);
+      return;
+    }
+    const requestId = ++finalTotalsRequestRef.current;
+    setFinalTotals(null);
+    setFinalTotalsError(null);
+    let cancelled = false;
+    (async () => {
+      try {
+        const response = await fetch("/api/pickup-orders/totals-preview", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "include",
+          body: finalTotalsSignature,
+        });
+        const data = await response.json().catch(() => null);
+        if (cancelled || finalTotalsRequestRef.current !== requestId) return;
+        if (!response.ok) {
+          setFinalTotalsError(
+            String(data?.message || "The final total could not be calculated."),
+          );
+          return;
+        }
+        setFinalTotals({
+          subtotalCents: Number(data.subtotalCents || 0),
+          mealscoutFeeCents: Number(data.mealscoutFeeCents ?? 0),
+          processingFeeCents: Number(data.processingFeeCents ?? 0),
+          platformFeeCents: Number(data.platformFeeCents ?? 0),
+          totalCents: Number(data.totalCents || 0),
+          feePaidByBusiness: Boolean(data.feePaidByBusiness),
+        });
+      } catch {
+        if (cancelled || finalTotalsRequestRef.current !== requestId) return;
+        setFinalTotalsError("The final total could not be calculated.");
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [finalTotalsSignature, cartHasMixedMenus]);
+
   // Saved checkout reconciliation takes priority over the current cart.
   // Another tab may have cleared/changed the cart after the order was created.
   // Never replace the durable replay payload with those current cart contents.
@@ -525,9 +601,21 @@ function CheckoutSession() {
 
   const subtotal = cart.reduce((sum, i) => sum + i.lineTotalCents, 0);
   const knownTotalBeforeCardFees = subtotal;
+  // "Pending" means the server has not yet priced the final total for this
+  // exact cart. While pending, the summary shows the pre-fee subtotal and
+  // Continue stays disabled; once the preview lands, the summary shows the
+  // itemized card fees and the final total.
   const customerCardFeesPending = Boolean(
-    paymentMethod === "card" && menuInfo && !menuInfo.hidePlatformFee,
+    paymentMethod === "card" && menuInfo?.cardPaymentsEnabled && !finalTotals,
   );
+  const finalSubtotal = finalTotals?.subtotalCents ?? subtotal;
+  const finalMealscoutFee = finalTotals?.feePaidByBusiness
+    ? 0
+    : (finalTotals?.mealscoutFeeCents ?? 0);
+  const finalProcessingFee = finalTotals?.feePaidByBusiness
+    ? 0
+    : (finalTotals?.processingFeeCents ?? 0);
+  const finalTotal = finalTotals?.totalCents ?? knownTotalBeforeCardFees;
   const displayedSubtotal = serverTotals?.subtotalCents ?? subtotal;
   const displayedMealscoutFee = serverTotals?.feePaidByBusiness
     ? 0
@@ -550,6 +638,12 @@ function CheckoutSession() {
     if (createOrderPendingRef.current || isCreating) return;
     if (menuInfoLoading || menuInfoError || !orderingEnabled || !menuInfo?.cardPaymentsEnabled) {
       setOrderError("Wait for payment availability to be verified before continuing.");
+      return;
+    }
+    if (!finalTotals) {
+      setOrderError(
+        finalTotalsError || "Wait for the final total before continuing.",
+      );
       return;
     }
     if (new Set(cart.map((item) => item.menuId)).size !== 1) {
@@ -884,19 +978,34 @@ function CheckoutSession() {
             <div className="mt-2 space-y-1 border-t border-[color:var(--profile-border)] pt-2">
               <div className="flex justify-between text-sm text-muted-foreground">
                 <span>Subtotal</span>
-                <span>{formatMoney(subtotal)}</span>
+                <span>{formatMoney(finalSubtotal)}</span>
               </div>
-              {customerCardFeesPending && (
+              {customerCardFeesPending ? (
                 <div className="flex justify-between text-sm text-muted-foreground">
                   <span>Card fees</span>
                   <span>Calculated before payment</span>
                 </div>
+              ) : (
+                <>
+                  {finalMealscoutFee > 0 && (
+                    <div className="flex justify-between text-sm text-muted-foreground">
+                      <span>MealScout fee</span>
+                      <span>{formatMoney(finalMealscoutFee)}</span>
+                    </div>
+                  )}
+                  {finalProcessingFee > 0 && (
+                    <div className="flex justify-between text-sm text-muted-foreground">
+                      <span>Card processing</span>
+                      <span>{formatMoney(finalProcessingFee)}</span>
+                    </div>
+                  )}
+                </>
               )}
               <div className="flex justify-between pt-1 text-base font-black">
                 <span>
                   {customerCardFeesPending ? "Before card fees" : "Total"}
                 </span>
-                <span>{formatMoney(knownTotalBeforeCardFees)}</span>
+                <span>{formatMoney(finalTotal)}</span>
               </div>
             </div>
           </CardContent>
@@ -1087,11 +1196,12 @@ function CheckoutSession() {
             : menuInfoLoading ? "Checking availability before payment."
             : menuInfoError ? "Retry the availability check to continue."
             : !orderingEnabled ? "Online ordering is currently unavailable."
+            : customerCardFeesPending ? (finalTotalsError ?? "Waiting for the final total…")
             : !contact.name.trim() ? "Add your name to continue."
             : !contact.email.trim() && !contact.phone.trim() ? "Add an email address or phone number to continue."
             : Boolean(contact.phone.trim()) && !normalizedContactPhone ? "Check your phone number to continue."
             : !orderType ? "Choose pickup to continue."
-            : "Review your total on the next step before confirming payment."}
+            : "Review your final total above before continuing to payment."}
         </p>
         <Button
           aria-describedby="checkout-next-step"
@@ -1102,6 +1212,7 @@ function CheckoutSession() {
             isCreating ||
             menuInfoLoading ||
             menuInfoError ||
+            customerCardFeesPending ||
             !contact.name.trim() ||
             (!contact.email.trim() && !contact.phone.trim()) ||
             (Boolean(contact.phone.trim()) && !normalizedContactPhone) ||

@@ -165,6 +165,21 @@ test("card checkout discloses server-priced fees and sends retry protection", as
       json: { message: "Fixture stopped before creating an order" },
     });
   });
+  // The final total is priced by the server totals preview before Continue
+  // unlocks: subtotal $12.99 + $1.00 MealScout fee + $0.73 card processing.
+  await page.route("**/api/pickup-orders/totals-preview", async (route) => {
+    await route.fulfill({
+      status: 200,
+      json: {
+        subtotalCents: 1299,
+        mealscoutFeeCents: 100,
+        processingFeeCents: 73,
+        platformFeeCents: 173,
+        totalCents: 1472,
+        feePaidByBusiness: false,
+      },
+    });
+  });
   await page.addInitScript(
     ({ cart }) => localStorage.setItem("mealscout_cart", JSON.stringify(cart)),
     { cart: [cartItem("card-menu", "card-item")] },
@@ -173,11 +188,19 @@ test("card checkout discloses server-priced fees and sends retry protection", as
   await page.goto(`/checkout/${restaurantId}`);
 
   await expect(page.getByLabel("Card", { exact: true })).toBeChecked();
-  await expect(page.getByText("Card fees", { exact: true })).toBeVisible();
+  await expect(page.getByText("MealScout fee", { exact: true })).toBeVisible();
+  await expect(page.getByText("$1.00", { exact: true })).toBeVisible();
   await expect(
-    page.getByText("Calculated before payment", { exact: true }),
+    page.getByText("Card processing", { exact: true }),
   ).toBeVisible();
-  await expect(page.getByText("$1.00", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("$0.73", { exact: true })).toBeVisible();
+  await expect(
+    page.getByText("Before card fees", { exact: true }),
+  ).toHaveCount(0);
+  const cardTotalRow = page.getByText("Total", { exact: true }).locator("..");
+  await expect(
+    cardTotalRow.getByText("$14.72", { exact: true }),
+  ).toBeVisible();
   await page.getByLabel("Name *").fill("Fixture Customer");
   await page.getByLabel(/Email/).fill("fixture@example.com");
   await page.getByLabel("Pickup", { exact: true }).click();
