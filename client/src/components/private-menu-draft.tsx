@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link } from "wouter";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -9,7 +9,7 @@ import { buildProgressiveAccountPath, getProgressiveAccountGate, preserveProgres
 import { getGuestMenuJourneyStage } from "@/lib/menu-builder-navigation";
 import {
   emptyGuestMenuDraft, emptyGuestMenuItem, GUEST_MENU_MAX_ITEMS, GUEST_MENU_CATEGORY_NOTICE,
-  persistGuestMenuDraft, readGuestMenuDraft,
+  persistGuestMenuDraft, readGuestMenuDraft, readGuestMenuDraftSavedAt,
   type GuestMenuDraft, type GuestMenuItemDraft,
 } from "@shared/guestMenuDraft";
 
@@ -80,7 +80,68 @@ export function PrivateMenuDraftPage({ user }: { user: { emailVerified?: unknown
   const { toast } = useToast();
   const [draft, setDraft] = useState(() => readGuestMenuDraft(() => window.localStorage) || emptyGuestMenuDraft());
   const [kept, setKept] = useState(false);
-  useEffect(() => { persistGuestMenuDraft(() => window.localStorage, draft); }, [draft]);
+  // Signed-in owners also keep this draft on their account, so it survives a
+  // new phone or cleared browser data. The local copy stays as the on-device
+  // cache; true guests (no account yet) keep the local-only behaviour.
+  const canSyncToAccount = Boolean(user);
+  const hydratedRef = useRef(!canSyncToAccount);
+  const suppressNextSyncRef = useRef(false);
+
+  // On open, reconcile with the account copy: adopt it when it is newer
+  // than this device's copy; otherwise seed/refresh the account with this
+  // device's newer copy.
+  useEffect(() => {
+    if (!canSyncToAccount) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await fetch("/api/settings/me/menu-draft", { credentials: "include" });
+        if (!res.ok) return;
+        const payload = await res.json().catch(() => null);
+        const serverDraft = (payload?.draft ?? null) as GuestMenuDraft | null;
+        const serverSavedAt = typeof payload?.savedAt === "number" ? payload.savedAt : null;
+        if (cancelled) return;
+        const localDraft = readGuestMenuDraft(() => window.localStorage);
+        const localSavedAt = readGuestMenuDraftSavedAt(() => window.localStorage);
+        if (serverDraft && serverSavedAt && (localSavedAt === null || serverSavedAt > localSavedAt)) {
+          suppressNextSyncRef.current = true;
+          persistGuestMenuDraft(() => window.localStorage, serverDraft, serverSavedAt);
+          setDraft(serverDraft);
+        } else if (localDraft && localSavedAt) {
+          await fetch("/api/settings/me/menu-draft", {
+            method: "PUT",
+            credentials: "include",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ draft: localDraft, savedAt: localSavedAt }),
+          }).catch(() => { /* the local copy remains the fallback */ });
+        }
+      } catch {
+        // Offline or signed out mid-flight: the local copy remains the fallback.
+      } finally {
+        if (!cancelled) hydratedRef.current = true;
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [canSyncToAccount]);
+
+  useEffect(() => {
+    const savedAt = Date.now();
+    persistGuestMenuDraft(() => window.localStorage, draft, savedAt);
+    if (!canSyncToAccount || !hydratedRef.current) return;
+    if (suppressNextSyncRef.current) {
+      suppressNextSyncRef.current = false;
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      void fetch("/api/settings/me/menu-draft", {
+        method: "PUT",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ draft, savedAt }),
+      }).catch(() => { /* the local copy remains the fallback */ });
+    }, 900);
+    return () => window.clearTimeout(timer);
+  }, [draft, canSyncToAccount]);
   const keep = () => {
     if (!persistGuestMenuDraft(() => window.localStorage, draft)) {
       toast({ title: "Draft stays here", description: "This browser could not save your draft. Keep this page open and enable browser storage before continuing.", variant: "destructive" });
