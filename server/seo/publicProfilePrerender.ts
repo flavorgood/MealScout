@@ -635,7 +635,7 @@ async function restaurantPage(
     "@context": "https://schema.org",
     "@id": profileEntityId,
     "@type": isTruck
-      ? "FoodTruck"
+      ? "FoodEstablishment"
       : isBar
         ? "BarOrPub"
         : isServiceProfile
@@ -1188,7 +1188,7 @@ async function eventPage(baseUrl: string, eventId: string) {
         performer:
           confirmedTrucks.length > 0
             ? confirmedTrucks.map((truck) => ({
-                "@type": "FoodTruck",
+                "@type": "FoodEstablishment",
                 name: truck.name,
               }))
             : undefined,
@@ -1498,7 +1498,7 @@ async function seoLandingPage(
           description: item.summary || undefined,
           item: {
             "@type": item.profileType === "truck"
-              ? "FoodTruck"
+              ? "FoodEstablishment"
               : item.profileType === "bar"
                 ? "BarOrPub"
                 : "LocalBusiness",
