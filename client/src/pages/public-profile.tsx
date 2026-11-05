@@ -3138,7 +3138,7 @@ export default function PublicProfilePage() {
           url: canonicalUrl,
           mainEntity: {
             "@type": data.profileType === "restaurant" ? "Restaurant"
-              : data.profileType === "truck" ? "FoodTruck"
+              : data.profileType === "truck" ? "FoodEstablishment"
               : data.profileType === "bar" ? "BarOrPub"
               : data.profileType === "caterer" || data.profileType === "private_chef" ? "FoodEstablishment"
               : "LocalBusiness",
