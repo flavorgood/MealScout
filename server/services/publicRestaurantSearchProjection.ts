@@ -1,5 +1,6 @@
 import {
   expandScoutSearchTerms,
+  foldScoutSearchText,
   scoutSearchRelevanceScore,
 } from "@shared/scoutSearchIntent";
 import { AGGREGATE_SEARCH_RESTAURANT_LIMIT } from "@shared/searchResponseBounds";
@@ -106,7 +107,7 @@ export function filterProjectedRestaurantSearchRows(
     radiusKm?: number;
   },
 ) {
-  const searchTerm = input.query.trim().toLowerCase();
+  const searchTerm = foldScoutSearchText(input.query.trim());
   const hasLocation =
     Number.isFinite(input.userLat) && Number.isFinite(input.userLng);
   const radiusKm = Math.max(1, Math.min(50, Number(input.radiusKm || 10)));
@@ -114,7 +115,7 @@ export function filterProjectedRestaurantSearchRows(
     if (
       restaurant?.isActive !== true ||
       ![restaurant.name, restaurant.cuisineType, restaurant.address]
-        .map((value) => String(value || "").toLowerCase())
+        .map((value) => foldScoutSearchText(value))
         .some((value) => value.includes(searchTerm))
     ) {
       return false;
@@ -134,7 +135,7 @@ export function rankPublicRestaurantSearchRows(
   query: string,
   visibilityByOwnerId: ReadonlyMap<string, PublicRestaurantListingVisibility>,
 ) {
-  const searchTerm = query.trim().toLowerCase();
+  const searchTerm = foldScoutSearchText(query.trim());
   const searchTerms = expandScoutSearchTerms(searchTerm);
   return toPublicRestaurantListingArray(restaurantRows, visibilityByOwnerId)
     .filter((restaurant: any) => {
@@ -147,7 +148,7 @@ export function rankPublicRestaurantSearchRows(
         restaurant.state,
         restaurant.description,
       ]
-        .map((value) => String(value || "").toLowerCase())
+        .map((value) => foldScoutSearchText(value))
         .join(" ");
       return searchTerms.some((term) => haystack.includes(term));
     })
@@ -197,7 +198,7 @@ export function buildPublicRestaurantSearchSuggestions(
   query: string,
   visibilityByOwnerId: ReadonlyMap<string, PublicRestaurantListingVisibility>,
 ) {
-  const searchTerm = query.trim().toLowerCase();
+  const searchTerm = foldScoutSearchText(query.trim());
   const cuisineSuggestions = new Map<string, any>();
   const suggestions: any[] = [];
   const publicRows = toPublicRestaurantListingArray(
@@ -206,7 +207,7 @@ export function buildPublicRestaurantSearchSuggestions(
   ).filter((row: any) => {
     if (!isPublicBusinessVisible(row)) return false;
     return [row.name, row.cuisineType, row.address, row.city, row.state]
-      .map((value) => String(value || "").toLowerCase())
+      .map((value) => foldScoutSearchText(value))
       .join(" ")
       .includes(searchTerm);
   });
@@ -221,7 +222,7 @@ export function buildPublicRestaurantSearchSuggestions(
         .join(" - "),
     });
     const cuisine = String(row.cuisineType || "").trim();
-    if (cuisine && cuisine.toLowerCase().includes(searchTerm)) {
+    if (cuisine && foldScoutSearchText(cuisine).includes(searchTerm)) {
       const key = cuisine.toLowerCase();
       if (!cuisineSuggestions.has(key)) {
         cuisineSuggestions.set(key, {

@@ -53,6 +53,7 @@ import {
 import {
   buildPublicProfilePath,
   resolvePublicProfileVisibility,
+  resolvePublicShareImageUrl,
 } from "../publicProfiles/publicProfileUtils";
 import { isPublicBusinessVisible } from "../utils/publicBusinessVisibility";
 import { PUBLIC_PROFILE_STYLES, PUBLIC_PROFILE_STYLES_PATH } from "./publicProfileStyles";
@@ -1288,16 +1289,25 @@ async function dealPage(baseUrl: string, dealId: string) {
     .map((value) => cleanText(value))
     .filter(Boolean)
     .join(", ");
-  const description = cleanText(
-    row.description,
-    `${title} from ${row.restaurantName || "a local MealScout restaurant"}${cityState ? ` in ${cityState}` : ""}.`,
+  // Clean first, then fall back: a whitespace-only stored description is
+  // truthy, so passing the fallback into cleanText still yields "" and an
+  // empty og:description.
+  const description =
+    cleanText(row.description) ||
+    `${title} from ${row.restaurantName || "a local MealScout restaurant"}${cityState ? ` in ${cityState}` : ""}.`;
+  // A stored image can be an inline data URI rather than a URL; og:image
+  // must be a fetchable URL, so anything that is not one falls back to the
+  // default share image (see resolvePublicShareImageUrl).
+  const shareImageUrl = resolvePublicShareImageUrl(
+    row.imageUrl,
+    defaultSocialImagePath,
   );
 
   return {
     title: `${title} - ${row.restaurantName || "MealScout"} | MealScout`,
     description,
     canonicalPath,
-    imageUrl: row.imageUrl || defaultSocialImagePath,
+    imageUrl: shareImageUrl,
     robots: active && parentIndexable && titleEligible
       ? "index,follow,max-snippet:-1,max-image-preview:large,max-video-preview:-1"
       : "noindex,follow",
@@ -1307,7 +1317,7 @@ async function dealPage(baseUrl: string, dealId: string) {
       name: title,
       description,
       url: absoluteUrl(baseUrl, canonicalPath),
-      image: absoluteUrl(baseUrl, row.imageUrl || defaultSocialImagePath),
+      image: absoluteUrl(baseUrl, shareImageUrl),
       validFrom: row.startDate
         ? new Date(row.startDate as any).toISOString()
         : undefined,

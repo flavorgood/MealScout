@@ -15,6 +15,22 @@ export function isSyntheticPublicEntityName(value: unknown): boolean {
   const normalized = normalizeDiscoveryLabel(value);
   if (!normalized) return false;
 
+  // Untouched auto-created profile shells: the platform creates a supplier
+  // row with the literal business name "New Supplier" (and isActive: true)
+  // the first time a signed-in user reaches the supplier area, before they
+  // have named or described anything. Such a record has no city, products,
+  // or real name, so it must never be advertised as a public entity. The
+  // rule covers the platform's "New <entity type>" creation defaults as a
+  // class, not one record: any entity still carrying its creation-default
+  // name is by definition unfinished.
+  if (
+    /^new (?:supplier|restaurant|food truck|truck|business|vendor|host|location|caterer|store|shop|company)$/.test(
+      normalized,
+    )
+  ) {
+    return true;
+  }
+
   const compact = normalized.replace(/\s+/g, "");
   if (/^(?:asdf)+$/.test(compact)) return true;
   if (/^discoverability flow(?: \d{10,}(?: \d+)*)?$/.test(normalized)) {

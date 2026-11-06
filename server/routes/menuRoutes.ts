@@ -61,6 +61,7 @@ import {
 } from "drizzle-orm";
 import { isAuthenticated, isStaffOrAdmin } from "../unifiedAuth";
 import { isStaffOrAdminUserType } from "@shared/profileAccessPolicy";
+import { foldScoutSearchText } from "@shared/scoutSearchIntent";
 import { distributedRateLimit } from "../middleware/distributedRateLimit";
 import { storage } from "../storage";
 import {
@@ -1329,11 +1330,12 @@ export function registerMenuRoutes(app: Express) {
         ),
       );
       const hasLocation = Number.isFinite(lat) && Number.isFinite(lng);
-      const q = String(req.query.q || req.query.category || "")
-        .trim()
-        .toLowerCase()
+      const q = foldScoutSearchText(
+        String(req.query.q || req.query.category || "").trim(),
+      )
         .replace(/[^a-z0-9\s]/g, " ")
-        .replace(/\s+/g, " ");
+        .replace(/\s+/g, " ")
+        .trim();
       const queryTerms = q
         ? Array.from(
             new Set(
@@ -1361,11 +1363,12 @@ export function registerMenuRoutes(app: Express) {
       const businessTypeFilter = String(req.query.businessType || "")
         .trim()
         .toLowerCase();
-      const itemTypeFilter = String(req.query.itemType || "")
-        .trim()
-        .toLowerCase();
-      const preferenceTerms = String(req.query.preferences || "")
-        .toLowerCase()
+      const itemTypeFilter = foldScoutSearchText(
+        String(req.query.itemType || "").trim(),
+      );
+      const preferenceTerms = foldScoutSearchText(
+        String(req.query.preferences || ""),
+      )
         .split(",")
         .map((term) => term.trim())
         .filter(Boolean);
@@ -1531,8 +1534,8 @@ export function registerMenuRoutes(app: Express) {
               row.businessType,
               ...(Array.isArray(row.dietaryTags) ? row.dietaryTags : []),
             ]
-              .join(" ")
-              .toLowerCase();
+              .map((value) => foldScoutSearchText(value))
+              .join(" ");
             return queryTerms.some((term) => haystack.includes(term));
           })
         : discoveryRows;
@@ -1557,8 +1560,8 @@ export function registerMenuRoutes(app: Express) {
             row.businessType,
             ...(Array.isArray(row.dietaryTags) ? row.dietaryTags : []),
           ]
-            .join(" ")
-            .toLowerCase();
+            .map((value) => foldScoutSearchText(value))
+            .join(" ");
 
           if (
             itemTypeFilter &&
@@ -1605,9 +1608,9 @@ export function registerMenuRoutes(app: Express) {
           };
           let score = 0;
           if (queryTerms.length > 0) {
-            const name = String(row.name || "").toLowerCase();
-            const description = String(row.description || "").toLowerCase();
-            const cuisine = String(row.cuisineType || "").toLowerCase();
+            const name = foldScoutSearchText(row.name);
+            const description = foldScoutSearchText(row.description);
+            const cuisine = foldScoutSearchText(row.cuisineType);
             const matchedName = queryTerms.some((term) => name.includes(term));
             const matchedDescription = queryTerms.some((term) =>
               description.includes(term),
@@ -1651,7 +1654,7 @@ export function registerMenuRoutes(app: Express) {
           const tags = Array.isArray(row.dietaryTags) ? row.dietaryTags : [];
           const preferenceMatches = preferenceTerms.filter((term) =>
             tags.some((tag: string) =>
-              String(tag).toLowerCase().includes(term),
+              foldScoutSearchText(tag).includes(term),
             ),
           );
           if (preferenceMatches.length > 0) {

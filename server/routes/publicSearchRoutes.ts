@@ -13,7 +13,10 @@ import {
   users,
   videoStories,
 } from "@shared/schema";
-import { expandScoutSearchTerms } from "@shared/scoutSearchIntent";
+import {
+  expandScoutSearchTerms,
+  foldScoutSearchText,
+} from "@shared/scoutSearchIntent";
 import { recordInternalSearchOutcome } from "../services/discoveryObservatory";
 import {
   AGGREGATE_SEARCH_DEAL_LIMIT,
@@ -41,17 +44,36 @@ import {
 } from "../services/publicStoryProjection";
 import { canExposeAnonymousEventListItem } from "../publicProfiles/publicEventDetailAccess";
 
+/**
+ * SQL projection of foldScoutSearchText (@shared/scoutSearchIntent) for the
+ * columns this route matches with LIKE. Postgres cannot run the JS NFD
+ * fold, so the stored side is folded with translate() over the Latin
+ * letters that carry a single diacritical mark (Latin-1 Supplement +
+ * Latin Extended-A): SEARCH_SQL_FOLD_FROM[i] folds to
+ * SEARCH_SQL_FOLD_TO[i]. Letters with no decomposition (ø, æ, ß) stay
+ * unfolded on both sides, exactly as the JS fold leaves them. The pairing
+ * and lengths are pinned by
+ * scripts/mealscout-search-accent-folding.contract.test.ts.
+ */
+export const SEARCH_SQL_FOLD_FROM =
+  "àáâãäåāăąçćĉċčďèéêëēĕėęěĝğġģĥìíîïĩīĭįĵķĺļľñńņňòóôõöōŏőŕŗřśŝşšţťùúûüũūŭůűųŵýÿŷźżž";
+export const SEARCH_SQL_FOLD_TO =
+  "aaaaaaaaacccccdeeeeeeeeegggghiiiiiiiijklllnnnnoooooooorrrssssttuuuuuuuuuuwyyyzzz";
+
+const foldedSearchColumn = (column: any) =>
+  sql`translate(lower(coalesce(${column}, '')), ${SEARCH_SQL_FOLD_FROM}, ${SEARCH_SQL_FOLD_TO})`;
+
 function restaurantSearchMatchSql(searchTerms: string[]) {
   const terms = searchTerms.length > 0 ? searchTerms : [""];
   return or(
     ...terms.map((term) => {
       const like = `%${term}%`;
       return or(
-        sql`lower(${restaurants.name}) like ${like}`,
-        sql`lower(coalesce(${restaurants.cuisineType}, '')) like ${like}`,
-        sql`lower(coalesce(${restaurants.city}, '')) like ${like}`,
-        sql`lower(coalesce(${restaurants.state}, '')) like ${like}`,
-        sql`lower(coalesce(${restaurants.description}, '')) like ${like}`,
+        sql`${foldedSearchColumn(restaurants.name)} like ${like}`,
+        sql`${foldedSearchColumn(restaurants.cuisineType)} like ${like}`,
+        sql`${foldedSearchColumn(restaurants.city)} like ${like}`,
+        sql`${foldedSearchColumn(restaurants.state)} like ${like}`,
+        sql`${foldedSearchColumn(restaurants.description)} like ${like}`,
       );
     }),
   );
@@ -61,7 +83,7 @@ export async function searchPublicRestaurantResults(
   database: any,
   query: string,
 ) {
-  const searchTerm = query.trim().toLowerCase();
+  const searchTerm = foldScoutSearchText(query.trim());
   const searchTerms = expandScoutSearchTerms(searchTerm);
   const searchValue = `%${searchTerm}%`;
   const searchPrefixValue = `${searchTerm}%`;
@@ -417,7 +439,7 @@ export function registerPublicSearchRoutes(app: Express) {
 
       const payload = await withDeadline(
         (async () => {
-          const searchTerm = query.toLowerCase();
+          const searchTerm = foldScoutSearchText(query);
           const searchValue = `%${searchTerm}%`;
           const restaurantsOut = await searchPublicRestaurantResults(db, query);
 
@@ -433,7 +455,7 @@ export function registerPublicSearchRoutes(app: Express) {
                 deal.restaurant?.name,
                 deal.restaurant?.cuisineType,
               ]
-                .map((value) => String(value || "").toLowerCase())
+                .map((value) => foldScoutSearchText(value))
                 .join(" ");
               return searchable.includes(searchTerm);
             })
