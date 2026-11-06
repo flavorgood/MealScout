@@ -363,6 +363,37 @@ const loadServicesSitemapEntries = async (baseUrl: string) => {
     });
 };
 
+// The suppliers urlset is built by the /sitemap-suppliers.xml route.
+// robots.txt asks this loader — the route's own query and eligibility
+// filter, unchanged — whether the feed currently has anything in it,
+// so an empty feed is not advertised.
+const loadSuppliersSitemapEntries = async (baseUrl: string) => {
+  const rows = await db
+    .select({
+      id: suppliers.id,
+      name: suppliers.businessName,
+      updatedAt: suppliers.updatedAt,
+      ownerDisabled: users.isDisabled,
+    })
+    .from(suppliers)
+    .innerJoin(users, eq(suppliers.userId, users.id))
+    .where(and(eq(suppliers.isActive, true), eq(users.isDisabled, false)))
+    .orderBy(desc(suppliers.updatedAt))
+    .limit(50000);
+
+  return rows
+    .filter((row: any) =>
+      row.ownerDisabled === false && isPublicDiscoveryEligibleEntity({
+        name: row.name,
+        isActive: true,
+      }),
+    )
+    .map((row: any) => ({
+      loc: `${baseUrl}/supplier/${encodeURIComponent(`${toSlug(row.name) || row.id}--${row.id}`)}`,
+      lastmod: row.updatedAt,
+    }));
+};
+
 export function registerSeoRoutes(
   app: Express,
   dependencies: SeoRouteDependencies = {},
@@ -1599,6 +1630,16 @@ export function registerSeoRoutes(
       );
       const advertiseServices =
         serviceEntries === null || serviceEntries.length > 0;
+      // The same rule for the suppliers feed: it is advertised only
+      // while it lists at least one eligible supplier, and a failed
+      // count keeps the line rather than dropping a feed that may
+      // have suppliers. The line returns on its own as soon as a
+      // supplier qualifies.
+      const supplierEntries = await loadSuppliersSitemapEntries(baseUrl).catch(
+        () => null,
+      );
+      const advertiseSuppliers =
+        supplierEntries === null || supplierEntries.length > 0;
       const robots = [
         "User-agent: *",
         "Allow: /robots.txt",
@@ -1640,7 +1681,9 @@ export function registerSeoRoutes(
         `Sitemap: ${baseUrl}/sitemap-cuisines.xml`,
         `Sitemap: ${baseUrl}/sitemap-events.xml`,
         `Sitemap: ${baseUrl}/sitemap-deals.xml`,
-        `Sitemap: ${baseUrl}/sitemap-suppliers.xml`,
+        ...(advertiseSuppliers
+          ? [`Sitemap: ${baseUrl}/sitemap-suppliers.xml`]
+          : []),
         `Sitemap: ${baseUrl}/sitemap-videos.xml`,
         "",
         `AI: ${baseUrl}/llms.txt`,
