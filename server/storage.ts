@@ -1302,6 +1302,14 @@ export class DatabaseStorage implements IStorage {
     } catch (e) {
       console.warn("ensureDraftParkingPassForHost failed for host", e);
     }
+    try {
+      const { rememberProfileSalesAssistant } = await import(
+        "./services/profileSalesAssistantStore"
+      );
+      rememberProfileSalesAssistant("host", newHost.id);
+    } catch (e) {
+      console.warn("profile sales assistant ensure failed for host", e);
+    }
     return newHost;
   }
 
@@ -2472,6 +2480,14 @@ export class DatabaseStorage implements IStorage {
       .update(restaurants)
       .set({ isActive: true })
       .where(eq(restaurants.id, restaurantId));
+    try {
+      const { rememberProfileSalesAssistant } = await import(
+        "./services/profileSalesAssistantStore"
+      );
+      rememberProfileSalesAssistant("truck", restaurantId, "public");
+    } catch (e) {
+      console.warn("profile sales assistant ensure failed for publish", e);
+    }
   }
 
   async deleteRestaurant(restaurantId: string): Promise<void> {
