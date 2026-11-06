@@ -335,6 +335,34 @@ type SeoRouteDependencies = {
   loadRootEventCityRows?: (now: Date) => Promise<any[]>;
 };
 
+// The services urlset holds caterer and private-chef profiles. One
+// builder feeds both the sitemap route and robots.txt, so the two can
+// never disagree about whether the feed has anything in it.
+const loadServicesSitemapEntries = async (baseUrl: string) => {
+  const rows = await db
+    .select(restaurantSitemapSelect)
+    .from(restaurants)
+    .innerJoin(users, eq(restaurants.ownerId, users.id))
+    .where(eq(restaurants.isActive, true))
+    .orderBy(desc(restaurants.updatedAt))
+    .limit(50000);
+
+  return rows
+    .filter((row: any) => isIndexableServiceProfileRow(row))
+    .flatMap((row: any) => {
+      const profileType = publicServiceProfileType(row);
+      if (!profileType) return [];
+      return [{
+        loc: `${baseUrl}${buildPublicProfilePath({
+          profileType,
+          id: String(row.id),
+          name: String(row.name || ""),
+        })}`,
+        lastmod: row.updatedAt,
+      }];
+    });
+};
+
 export function registerSeoRoutes(
   app: Express,
   dependencies: SeoRouteDependencies = {},
@@ -930,28 +958,7 @@ export function registerSeoRoutes(
   app.get("/sitemap-services.xml", async (_req, res) => {
     try {
       const baseUrl = resolveSitemapSiteUrl();
-      const rows = await db
-        .select(restaurantSitemapSelect)
-        .from(restaurants)
-        .innerJoin(users, eq(restaurants.ownerId, users.id))
-        .where(eq(restaurants.isActive, true))
-        .orderBy(desc(restaurants.updatedAt))
-        .limit(50000);
-
-      const entries = rows
-        .filter((row: any) => isIndexableServiceProfileRow(row))
-        .flatMap((row: any) => {
-          const profileType = publicServiceProfileType(row);
-          if (!profileType) return [];
-          return [{
-            loc: `${baseUrl}${buildPublicProfilePath({
-              profileType,
-              id: String(row.id),
-              name: String(row.name || ""),
-            })}`,
-            lastmod: row.updatedAt,
-          }];
-        });
+      const entries = await loadServicesSitemapEntries(baseUrl);
 
       sendUrlsetXml(res, { entries });
     } catch (e) {
@@ -1581,6 +1588,17 @@ export function registerSeoRoutes(
       }
 
       const baseUrl = resolveSitemapSiteUrl();
+      // The services feed is advertised only while it lists at least
+      // one profile; an advertised-but-empty sitemap is a standing
+      // error report in Search Console. A failed count keeps the line
+      // (today's behavior) rather than dropping a feed that may have
+      // profiles. The feed returns to robots on its own as soon as a
+      // caterer or private-chef profile qualifies.
+      const serviceEntries = await loadServicesSitemapEntries(baseUrl).catch(
+        () => null,
+      );
+      const advertiseServices =
+        serviceEntries === null || serviceEntries.length > 0;
       const robots = [
         "User-agent: *",
         "Allow: /robots.txt",
@@ -1614,7 +1632,9 @@ export function registerSeoRoutes(
         `Sitemap: ${baseUrl}/sitemap.xml`,
         `Sitemap: ${baseUrl}/sitemap-trucks.xml`,
         `Sitemap: ${baseUrl}/sitemap-bars.xml`,
-        `Sitemap: ${baseUrl}/sitemap-services.xml`,
+        ...(advertiseServices
+          ? [`Sitemap: ${baseUrl}/sitemap-services.xml`]
+          : []),
         `Sitemap: ${baseUrl}/sitemap-locations.xml`,
         `Sitemap: ${baseUrl}/sitemap-cities.xml`,
         `Sitemap: ${baseUrl}/sitemap-cuisines.xml`,
