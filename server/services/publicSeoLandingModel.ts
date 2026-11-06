@@ -367,7 +367,7 @@ const buildPayload = (input: {
       }),
       title: normalizeLandingCopy(input.title),
       description: normalizeLandingCopy(input.description),
-      ogImage: "/og-default.jpg?v=20260506",
+      ogImage: "/brand/logo.png",
       emptyMessage: normalizeLandingCopy(input.emptyMessage),
     },
     items: input.items,

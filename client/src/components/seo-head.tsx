@@ -50,7 +50,7 @@ export function SEOHead({
   description,
   keywords,
   canonicalUrl,
-  ogImage = "/og-default.jpg",
+  ogImage = "/brand/logo.png",
   ogType = "website",
   schemaData,
   noIndex = false

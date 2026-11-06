@@ -119,7 +119,7 @@ type PublicProfilePayload =
       };
     });
 
-const DEFAULT_IMAGE = "/og-default.jpg";
+const DEFAULT_IMAGE = "/brand/logo.png";
 const UUID_LIKE_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 

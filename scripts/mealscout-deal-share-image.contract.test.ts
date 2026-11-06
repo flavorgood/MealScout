@@ -16,7 +16,7 @@ import { resolvePublicShareImageUrl } from "../server/publicProfiles/publicProfi
  * well-formed while the deal page was not.
  */
 
-const FALLBACK = "/og-default.jpg?v=20260506";
+const FALLBACK = "/brand/logo.png";
 const LONG_DATA_URI = `data:image/jpeg;base64,${"QUJD".repeat(60000)}`;
 
 test("a stored data URI falls back to the default share image", () => {

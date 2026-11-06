@@ -96,7 +96,7 @@ const escapeHtml = (value: string | null | undefined) =>
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#39;");
 
-const defaultSocialImagePath = "/og-default.jpg?v=20260506";
+const defaultSocialImagePath = "/brand/logo.png";
 
 // Who receives the static profile document instead of the profile app?
 // Crawlers and link-preview fetchers always get the static document, so
