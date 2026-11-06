@@ -80,6 +80,21 @@ export const normalizePublicUrl = (
   }
 };
 
+/**
+ * Resolve a stored image value into a share-image URL a crawler can fetch.
+ * Stored image fields can hold values that are not URLs at all — most
+ * importantly inline `data:` URIs pasted or uploaded as image data. A data
+ * URI is not fetchable, and prefixing it with the site origin produces a
+ * malformed og:image hundreds of thousands of characters long. Anything
+ * normalizePublicUrl rejects (non-http(s) schemes such as data:/blob:,
+ * protocol-relative values, control characters) falls back to the given
+ * default share image path.
+ */
+export const resolvePublicShareImageUrl = (
+  value: unknown,
+  fallbackPath: string,
+): string => normalizePublicUrl(value, { allowInternalPath: true }) ?? fallbackPath;
+
 const isSafeExternal = (value: string) => /^https?:\/\//i.test(value);
 
 const isSafePhone = (value: string) => /^tel:[+\d][\d\s\-().]+$/i.test(value);

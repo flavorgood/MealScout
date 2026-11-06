@@ -30,10 +30,27 @@ const SCOUT_SEARCH_STOP_WORDS = new Set([
   "want",
 ]);
 
-export function tokenizeScoutSearchIntent(query: string): string[] {
-  return String(query || "")
-    .trim()
+/**
+ * Accent-fold a search string: lowercase it and strip diacritical marks so
+ * accented and unaccented spellings compare equal ("açaí" -> "acai",
+ * "Crème Brûlée" -> "creme brulee"). This is the one shared normalization
+ * for search matching: apply it to the query AND to the stored text being
+ * matched, on every search endpoint. It mirrors the client search page's
+ * normalizeSearchText (client/src/pages/search.tsx). SQL callers that
+ * cannot run this function fold the stored side with the translate() map
+ * in server/routes/publicSearchRoutes.ts, which is the same rule projected
+ * onto the Latin letter ranges.
+ */
+export function foldScoutSearchText(value: unknown): string {
+  return String(value ?? "")
     .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
+}
+
+export function tokenizeScoutSearchIntent(query: string): string[] {
+  return foldScoutSearchText(query)
+    .trim()
     .split(/[^a-z0-9]+/i)
     .map((token) => token.trim())
     .filter(
@@ -62,9 +79,8 @@ export type ScoutSearchCandidate = {
 };
 
 const normalizeSearchText = (value: unknown): string =>
-  String(value ?? "")
+  foldScoutSearchText(value)
     .trim()
-    .toLowerCase()
     .replace(/\s+/g, " ");
 
 /**
