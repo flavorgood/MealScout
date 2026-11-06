@@ -76,7 +76,17 @@ const cityIdentityWhere = (
   stateColumn: any,
 ) =>
   and(
-    normalizedTextEquals(cityColumn, city.name),
+    // Match the canonical name or the stored spelling: a business whose
+    // record carries the registry's original (misspelled) city name is
+    // still a business of this city. Without the stored spelling, the
+    // SQL prefilter drops those rows before the in-memory canonical
+    // re-check can see them, and the landing page renders empty.
+    city.storedName && city.storedName !== city.name
+      ? or(
+          normalizedTextEquals(cityColumn, city.name),
+          normalizedTextEquals(cityColumn, city.storedName),
+        )
+      : normalizedTextEquals(cityColumn, city.name),
     normalizedTextEquals(stateColumn, city.state),
   );
 
@@ -192,14 +202,21 @@ const loadFoodTrucks = async (
   return rows.map(buildCard);
 };
 
-const toLandingCity = (city: any): PublicSeoLandingCity => ({
-  id: String(city.id),
-  // The public name/slug are the canonical (correctly spelled) ones —
-  // see canonicalPublicSeoCityName in publicSeoLandingModel.
-  name: canonicalPublicSeoCityName(city.name),
-  slug: canonicalPublicSeoCitySlug(city.name),
-  state: canonicalPublicSeoStateLabel(city.state) || null,
-});
+const toLandingCity = (city: any): PublicSeoLandingCity => {
+  const storedName = String(city.name || "").trim();
+  const canonicalName = canonicalPublicSeoCityName(city.name);
+  return {
+    id: String(city.id),
+    // The public name/slug are the canonical (correctly spelled) ones —
+    // see canonicalPublicSeoCityName in publicSeoLandingModel. The
+    // stored spelling rides along so row matching can still find
+    // businesses whose records carry it.
+    name: canonicalName,
+    slug: canonicalPublicSeoCitySlug(city.name),
+    state: canonicalPublicSeoStateLabel(city.state) || null,
+    storedName: storedName && storedName !== canonicalName ? storedName : null,
+  };
+};
 
 const repository: PublicSeoLandingRepository = {
   async resolveCityBySlug(citySlug: string): Promise<PublicSeoLandingCity | null> {

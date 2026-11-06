@@ -30,6 +30,12 @@ export type PublicSeoLandingCity = {
   name: string;
   slug: string;
   state: string | null;
+  // The city name exactly as stored in the registry, when it differs
+  // from the canonical name above (e.g. a misspelling the canonical
+  // name corrects). Business records may carry the stored spelling, so
+  // row matching has to accept both — the same pairing the sitemap
+  // routes already use.
+  storedName?: string | null;
 };
 
 export type PublicSeoLandingProfileType =
