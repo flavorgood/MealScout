@@ -1,6 +1,10 @@
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { and, eq, inArray, isNotNull, sql } from "drizzle-orm";
 import { db } from "./db";
-import { hostEarningsLedger, hostPayoutRequests } from "@shared/schema";
+import {
+  eventBookings,
+  hostEarningsLedger,
+  hostPayoutRequests,
+} from "@shared/schema";
 
 // Available-balance formula. Payouts are carried by the LEDGER: a paid
 // payout writes exactly one negative `payout` row into hostEarningsLedger
@@ -16,6 +20,19 @@ import { hostEarningsLedger, hostPayoutRequests } from "@shared/schema";
 // paid payout already has its negative ledger row (the old mark-paid path
 // always inserted one), so counting the ledger alone counts each of them
 // exactly once.
+//
+// Destination-charge guard (gaps map entry 9): when a host was Connect-ready
+// at booking time, Stripe already moved the host's share into the host's own
+// Stripe balance at charge time (transfer_data.destination on the booking).
+// Settlement still writes the `booking_earned` ledger row for those bookings
+// — it is the earnings RECORD — but that money is not payable a second time
+// through a payout request. getHostEarningsSummary therefore computes
+// destinationSettledCents (booking_earned rows whose booking carries a
+// transfer destination) and excludes it from the amount a new payout request
+// may draw on. accruedCents stays the gross record; only availability is
+// guarded. Because the exclusion is computed from the ledger + bookings at
+// read time, it applies to every historical row and every settlement writer
+// with no migration and no write-path change.
 export function computeHostAvailableCents(
   accruedCents: number,
   pendingPayoutCents: number,
@@ -35,6 +52,26 @@ export async function getHostEarningsSummary(hostId: string, dbClient: any = db)
     })
     .from(hostEarningsLedger)
     .where(eq(hostEarningsLedger.hostId, hostId));
+
+  // Earnings Stripe already paid the host directly at charge time, via the
+  // booking's destination charge. These booking_earned rows are the record
+  // of that money, never a second payable balance (see header note).
+  const [destinationRow] = await dbClient
+    .select({
+      total: sql<number>`coalesce(sum(${hostEarningsLedger.amountCents}), 0)`,
+    })
+    .from(hostEarningsLedger)
+    .innerJoin(
+      eventBookings,
+      eq(hostEarningsLedger.bookingId, eventBookings.id),
+    )
+    .where(
+      and(
+        eq(hostEarningsLedger.hostId, hostId),
+        eq(hostEarningsLedger.entryType, "booking_earned"),
+        isNotNull(eventBookings.stripeTransferDestination),
+      ),
+    );
 
   const [pendingRow] = await dbClient
     .select({
@@ -74,17 +111,21 @@ export async function getHostEarningsSummary(hostId: string, dbClient: any = db)
     .limit(1);
 
   const accruedCents = Number(earnedRow?.total || 0);
+  const destinationSettledCents = Number(destinationRow?.total || 0);
   const pendingPayoutCents = Number(pendingRow?.total || 0);
   // Display figure only — payouts are already subtracted inside
   // accruedCents via their ledger rows. See computeHostAvailableCents.
   const paidOutCents = Number(paidRow?.total || 0);
+  // Availability is checked against earnings the platform still holds:
+  // gross accrual minus what Stripe already settled to the host directly.
   const availableCents = computeHostAvailableCents(
-    accruedCents,
+    accruedCents - destinationSettledCents,
     pendingPayoutCents,
   );
 
   return {
     accruedCents,
+    destinationSettledCents,
     pendingPayoutCents,
     paidOutCents,
     availableCents,
