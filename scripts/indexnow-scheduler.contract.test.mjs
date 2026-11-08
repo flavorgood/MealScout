@@ -139,7 +139,7 @@ test("network failure is surfaced with one attempt and no unrelated scheduler ex
 
 // Essential-only switch: the weekly host digest and the event outreach send
 // with no mail-layer category, so the scheduler gate is the only place the
-// master switch (AUTOMATED_MARKETING_EMAILS_ENABLED=false) can stop them.
+// master switch (AUTOMATED_MARKETING_EMAILS_ENABLED not set to "true") can stop them.
 // With the switch off the callbacks must return before the window check and
 // before either sender runs; the fixture's window mock throws if reached.
 function jobByExpression(f, expression) {

@@ -1,10 +1,11 @@
 import type { Express } from "express";
-import { and, desc, eq, gte, like, lt, or, sql } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, like, lt, or, sql } from "drizzle-orm";
 import Stripe from "stripe";
 
 import { db } from "../db";
 import {
   executeHostPayout,
+  extractHostPayoutTransferId,
   type HostPayoutStore,
 } from "../hostPayoutExecutionService";
 import { isAdmin, isAuthenticated } from "../unifiedAuth";
@@ -291,6 +292,22 @@ export function registerHostPayoutAdminRoutes(app: Express) {
           });
         }
 
+        // A recorded Stripe transfer means the money was already sent
+        // for this request. Rejecting or cancelling it would put the
+        // amount back into the host's requestable balance on top of a
+        // sent transfer — the host would be paid twice. (Mirrors the
+        // affiliate payout rejection rule in affiliateAdminRoutes.ts.)
+        if (nextStatus === "rejected" || nextStatus === "cancelled") {
+          const recordedTransferId = extractHostPayoutTransferId(
+            existing.notes,
+          );
+          if (recordedTransferId) {
+            return res.status(409).json({
+              message: `Cannot ${nextStatus === "rejected" ? "reject" : "cancel"}: a Stripe transfer (${recordedTransferId}) is already recorded for this payout`,
+            });
+          }
+        }
+
         if (nextStatus === "paid") {
           // Money movement goes through the hardened execution path
           // (hostPayoutExecutionService): atomic claim into "processing",
@@ -455,6 +472,23 @@ export function registerHostPayoutAdminRoutes(app: Express) {
           });
         }
 
+        // Guarded write: the status checks above ran against a row read
+        // before a concurrent mark-paid could claim it (approved ->
+        // processing), send the transfer, and finalize it as paid. This
+        // update must therefore re-check the source state atomically —
+        // it may only land while the row is still in a state this action
+        // is allowed to leave:
+        //   approved  <- pending only
+        //   rejected  <- pending | approved only
+        //   cancelled <- pending | approved only
+        // Once the row is processing or paid, this update matches 0
+        // rows, nothing is overwritten (status and paidAt stay exactly
+        // as the payment path left them), and the caller answers 409.
+        // (Mirrors the affiliate payout rejection's guarded conditional
+        // update in affiliateAdminRoutes.ts.)
+        const allowedSourceStatuses =
+          nextStatus === "approved" ? ["pending"] : ["pending", "approved"];
+
         const now = new Date();
         const [updated] = await db
           .update(hostPayoutRequests)
@@ -466,8 +500,30 @@ export function registerHostPayoutAdminRoutes(app: Express) {
             paidAt: existing.paidAt,
             updatedAt: now,
           })
-          .where(eq(hostPayoutRequests.id, requestId))
+          .where(
+            and(
+              eq(hostPayoutRequests.id, requestId),
+              inArray(hostPayoutRequests.status, allowedSourceStatuses),
+            ),
+          )
           .returning();
+
+        if (!updated) {
+          // The row changed state after the read above (a mark-paid
+          // claimed or finalized it). Re-read so the response carries
+          // the state that won the race, and refuse this action.
+          const [current] = await db
+            .select()
+            .from(hostPayoutRequests)
+            .where(eq(hostPayoutRequests.id, requestId))
+            .limit(1);
+          return res.status(409).json({
+            ok: false,
+            message:
+              "Payout state changed before this update could be applied — reload and retry",
+            request: current ?? null,
+          });
+        }
 
         const { getHostEarningsSummary } =
           await import("../hostEarningsService");

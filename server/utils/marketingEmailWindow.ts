@@ -69,17 +69,18 @@ export function describeMarketingEmailWindow(): string {
 export const AUTOMATED_MARKETING_EMAILS_FLAG =
   "AUTOMATED_MARKETING_EMAILS_ENABLED";
 
-// On by default (owner direction 2026-11-04, set-it-and-forget-it): the
-// drip/automated marketing system runs unless the flag is explicitly set
-// to "false". The explicit "false" remains the kill-switch.
+// Off by default (owner ruling: marketing OFF): the drip/automated
+// marketing system runs only when the flag is explicitly set to "true".
+// Unset — and any other value, including "false" — keeps automated
+// marketing disabled; setting the flag is a deliberate opt-in.
 export function areAutomatedMarketingEmailsEnabled(): boolean {
   return (
     String(process.env[AUTOMATED_MARKETING_EMAILS_FLAG] || "")
       .trim()
-      .toLowerCase() !== "false"
+      .toLowerCase() === "true"
   );
 }
 
 export function describeAutomatedMarketingEmailFlag(): string {
-  return `${AUTOMATED_MARKETING_EMAILS_FLAG}=false`;
+  return `${AUTOMATED_MARKETING_EMAILS_FLAG}=true not`;
 }
