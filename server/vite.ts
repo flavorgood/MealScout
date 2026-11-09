@@ -7,6 +7,7 @@ import { nanoid } from "nanoid";
 import { guardUnauthenticatedProtectedHtml } from "./seo/protectedHtmlRoutes";
 import { appPageTitleForPath, renderAppPageTitleDocument } from "./seo/appPageTitles";
 import { renderHomepageHtml } from "./seo/homepageHtml";
+import { normalizePublicProfileAssetPaths } from "./seo/appDocumentHtml";
 import { isHomepageDocumentRequest } from "./seo/rootEntry";
 import { publicMenuDocumentId } from "./seo/menuHtml";
 import { renderPublicMenuDocument, type PublicMenuLoader } from "./seo/publicMenuDocument";
@@ -199,7 +200,25 @@ export function serveStatic(app: Express, options: { canonicalBaseUrl?: string; 
   app.use("*", async (req, res, next) => {
     const page = appPageTitleForPath(req.originalUrl || req.url || req.path || "/");
     if (!page) {
-      return res.sendFile(path.resolve(distPath, "index.html"));
+      // The plain shell still goes through the asset-path normalization the
+      // rendered documents use: the compiled template points its icons,
+      // favicon, and brand image at the API asset bridge, where they 404 —
+      // only the compiled assets/ graph is served there. Serving the raw
+      // file would hand every app route those dead references.
+      try {
+        const template = await fs.promises.readFile(path.join(distPath, "index.html"), "utf8");
+        return res
+          .status(200)
+          .set({
+            "Content-Type": "text/html; charset=utf-8",
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            Pragma: "no-cache",
+            Expires: "0",
+          })
+          .send(normalizePublicProfileAssetPaths(template));
+      } catch {
+        return res.sendFile(path.resolve(distPath, "index.html"));
+      }
     }
     try {
       const template = await fs.promises.readFile(path.join(distPath, "index.html"), "utf8");
