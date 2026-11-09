@@ -351,6 +351,17 @@ export function createUsersRepository() {
       return updatedUser;
     },
 
+    // One shared identity (entry 30): stamp the resolved TradeScout id
+    // onto a MealScout user row — the same column and semantics the SSO
+    // upsert writes. Called by server/hubIdentityClient.ts after a
+    // native signup resolves the shared profile.
+    async setUserTradescoutId(id: string, tradescoutId: string): Promise<void> {
+      await db
+        .update(users)
+        .set({ tradescoutId, updatedAt: new Date() })
+        .where(eq(users.id, id));
+    },
+
     async upsertUserByAuth(
       authType: "google" | "email" | "facebook" | "tradescout",
       userData:
@@ -385,7 +396,13 @@ export function createUsersRepository() {
               .update(users)
               .set({
                 email: normalizedEmail ?? current.email,
-                ...(normalizedEmail ? { emailVerified: true } : {}),
+                // Verify-once (entry 31): stamp the email standing ONLY
+                // when the SSO token's email_verified claim is exactly
+                // true. An email on the token is not verification, and
+                // a silent claim never lowers a standing already held.
+                ...(tsData.emailVerified === true
+                  ? { emailVerified: true }
+                  : {}),
                 firstName: tsData.firstName ?? current.firstName,
                 lastName: tsData.lastName ?? current.lastName,
                 appContext: newAppContext,
@@ -413,7 +430,12 @@ export function createUsersRepository() {
                 .update(users)
                 .set({
                   tradescoutId: tsData.tradescoutId,
-                  emailVerified: true,
+                  // Verify-once (entry 31): driven by the token's
+                  // email_verified claim, exactly as on the linked-row
+                  // update above — never assumed from the email itself.
+                  ...(tsData.emailVerified === true
+                    ? { emailVerified: true }
+                    : {}),
                   firstName: tsData.firstName ?? current.firstName,
                   lastName: tsData.lastName ?? current.lastName,
                   appContext: newAppContext,
@@ -438,7 +460,11 @@ export function createUsersRepository() {
               userType: insertUserType,
               tradescoutId: tsData.tradescoutId,
               email: normalizedEmail ?? undefined,
-              emailVerified: Boolean(normalizedEmail),
+              // Verify-once (entry 31): a first insert records the
+              // token's email_verified claim exactly — false when the
+              // claim is absent or false, never inferred from the
+              // presence of an email address.
+              emailVerified: tsData.emailVerified === true,
               firstName: tsData.firstName ?? undefined,
               lastName: tsData.lastName ?? undefined,
               appContext,
@@ -666,7 +692,12 @@ export function createUsersRepository() {
                 .set({
                   tradescoutId: tsData.tradescoutId,
                   email: normalizedEmail ?? current.email,
-                  ...(normalizedEmail ? { emailVerified: true } : {}),
+                  // Verify-once (entry 31): same claim-driven rule as
+                  // the primary update paths — the unique-violation
+                  // recovery must not stamp what the claim never said.
+                  ...(tsData.emailVerified === true
+                    ? { emailVerified: true }
+                    : {}),
                   firstName: tsData.firstName ?? current.firstName,
                   lastName: tsData.lastName ?? current.lastName,
                   updatedAt: new Date(),

@@ -2909,6 +2909,14 @@ export type TradeScoutUserData = {
   firstName?: string | null;
   lastName?: string | null;
   roles?: string[] | null;
+  // The SSO token's verification claims, carried exactly as issued by
+  // TradeScout (populated only by the POST /api/auth/tradescout/sso
+  // handler from the verified token). emailVerified is the token's
+  // email_verified claim: the SSO upsert stamps a MealScout email
+  // standing ONLY when this is exactly true — a token carrying an
+  // email is not, by itself, evidence the address was verified.
+  emailVerified?: boolean;
+  verificationStatus?: string | null;
 };
 
 export type EmailUserData = {
