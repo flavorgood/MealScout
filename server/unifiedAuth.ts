@@ -7,6 +7,7 @@ import session from "express-session";
 import connectPg from "connect-pg-simple";
 import type { Express } from "express";
 import { storage } from "./storage";
+import { linkHubSignupToSharedProfile } from "./hubIdentityClient";
 import { hasBusinessPermissionForRestaurant } from "./services/businessTeamAccess";
 import { getBusinessAccessContext } from "./services/businessTeamAccess";
 import { resolveUserContinuation } from "./services/loginContinuation";
@@ -1596,6 +1597,13 @@ export async function setupUnifiedAuth(
         userData,
         registrationUserType,
       );
+      // One shared identity (entry 30): resolve the ONE shared
+      // TradeScout profile for this signup and stamp its id. Inert
+      // until TRADESCOUT_API_BASE + HUB_IDENTITY_SECRET are configured;
+      // non-fatal — a TradeScout outage must not fail a signup.
+      await linkHubSignupToSharedProfile(user).catch((err) =>
+        console.error("[hub-identity] resolve failed (non-fatal)", err),
+      );
       kickAffiliateTag(user);
       await applyAffiliateReferral(req, user);
 
@@ -1704,6 +1712,13 @@ export async function setupUnifiedAuth(
         userData,
         registrationUserType,
       );
+      // One shared identity (entry 30): resolve the ONE shared
+      // TradeScout profile for this signup and stamp its id. Inert
+      // until TRADESCOUT_API_BASE + HUB_IDENTITY_SECRET are configured;
+      // non-fatal — a TradeScout outage must not fail a signup.
+      await linkHubSignupToSharedProfile(user).catch((err) =>
+        console.error("[hub-identity] resolve failed (non-fatal)", err),
+      );
       kickAffiliateTag(user);
       await applyAffiliateReferral(req, user);
 
@@ -1809,6 +1824,13 @@ export async function setupUnifiedAuth(
         "email",
         userData,
         "supplier",
+      );
+      // One shared identity (entry 30): resolve the ONE shared
+      // TradeScout profile for this signup and stamp its id. Inert
+      // until TRADESCOUT_API_BASE + HUB_IDENTITY_SECRET are configured;
+      // non-fatal — a TradeScout outage must not fail a signup.
+      await linkHubSignupToSharedProfile(user).catch((err) =>
+        console.error("[hub-identity] resolve failed (non-fatal)", err),
       );
       kickAffiliateTag(user);
       await applyAffiliateReferral(req, user);
@@ -2089,6 +2111,11 @@ export async function setupUnifiedAuth(
             ? String(decoded.name).split(" ").slice(1).join(" ") || null
             : null),
         roles: roles ?? null,
+        // Verify-once (entry 31): carry TradeScout's recorded standings
+        // from the token claims exactly — the upsert stamps email
+        // standing only when the email_verified claim is true.
+        emailVerified: decoded.email_verified === true,
+        verificationStatus: decoded.verification_status ?? null,
       };
 
       const user = await storage.upsertUserByAuth(

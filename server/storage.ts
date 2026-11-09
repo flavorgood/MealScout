@@ -255,6 +255,7 @@ export interface IStorage {
   getUserByEmail(email: string): Promise<User | undefined>;
   getUserByPhone(phone: string): Promise<User | undefined>;
   upsertUser(user: UpsertUser): Promise<User>;
+  setUserTradescoutId(id: string, tradescoutId: string): Promise<void>;
   upsertUserByAuth(
     authType: "google" | "email" | "facebook" | "tradescout",
     userData:
@@ -1908,6 +1909,13 @@ export class DatabaseStorage implements IStorage {
       userType,
       appContext,
     );
+  }
+
+  async setUserTradescoutId(
+    id: string,
+    tradescoutId: string,
+  ): Promise<void> {
+    return this.usersRepository.setUserTradescoutId(id, tradescoutId);
   }
 
   async createRestaurant(restaurant: InsertRestaurant): Promise<Restaurant> {
