@@ -394,6 +394,326 @@ const loadSuppliersSitemapEntries = async (baseUrl: string) => {
     }));
 };
 
+// The locations urlset is built by the /sitemap-locations.xml route.
+// robots.txt asks this loader — the route's own query and eligibility
+// filter, unchanged — whether the feed currently has anything in it,
+// so an empty feed is not advertised.
+const loadLocationsSitemapEntries = async (baseUrl: string) => {
+  const lookaheadHoursRaw = Number(
+    process.env.PUBLIC_SLOT_LOOKAHEAD_HOURS ?? 24 * 7,
+  );
+  const lookaheadHours = Number.isFinite(lookaheadHoursRaw)
+    ? Math.max(1, Math.min(lookaheadHoursRaw, 24 * 30))
+    : 24 * 7;
+  const now = new Date();
+  const windowStart = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+  const windowEnd = new Date(
+    now.getTime() + lookaheadHours * 60 * 60 * 1000,
+  );
+
+  const candidateRows = await db
+    .select({
+      ...restaurantSitemapSelect,
+      hostId: events.hostId,
+      hostName: hosts.businessName,
+      eventDate: events.date,
+      eventStartTime: events.startTime,
+      eventEndTime: events.endTime,
+      eventName: events.name,
+      eventType: events.eventType,
+      eventStatus: events.status,
+      eventRequiresPayment: events.requiresPayment,
+      hostCity: hosts.city,
+      hostState: hosts.state,
+      bookingConfirmedAt: eventBookings.bookingConfirmedAt,
+    })
+    .from(eventBookings)
+    .innerJoin(events, eq(eventBookings.eventId, events.id))
+    .innerJoin(hosts, eq(events.hostId, hosts.id))
+    .innerJoin(restaurants, eq(eventBookings.truckId, restaurants.id))
+    .innerJoin(users, eq(restaurants.ownerId, users.id))
+    .where(
+      and(
+        eq(eventBookings.status, "confirmed"),
+        isNotNull(eventBookings.bookingConfirmedAt),
+        inArray(events.status, ["open", "booked", "filled"]),
+        eq(restaurants.isActive, true),
+        eq(users.isDisabled, false),
+        sql`exists (
+          select 1 from users host_owner
+          where host_owner.id = ${hosts.userId}
+            and host_owner.is_disabled = false
+        )`,
+        publicTruckClassificationWhere(
+          restaurants.isFoodTruck,
+          restaurants.businessType,
+        ),
+        gte(events.date, windowStart),
+        lte(events.date, windowEnd),
+      ),
+    )
+    .limit(50000);
+
+  const eligibleHostIds = Array.from(
+    new Set<string>(
+      candidateRows.flatMap((row: (typeof candidateRows)[number]) => {
+        if (
+          !isIndexableRestaurantRow(row) ||
+          !isPublicDiscoveryEligibleEntity({
+            name: row.hostName,
+            isActive: true,
+          }) ||
+          !isPublicDiscoveryEligibleEntity({
+            name: row.eventName,
+            isActive: true,
+          })
+        ) {
+          return [];
+        }
+        const timeZone = resolveCityTimeZoneSync({
+          city: row.hostCity || null,
+          state: row.hostState || null,
+        });
+        const interval = buildSlotDateTimes({
+          timeZone,
+          date: row.eventDate,
+          startTime: String(row.eventStartTime || ""),
+          endTime: String(row.eventEndTime || ""),
+        });
+        if (
+          !interval ||
+          !row.bookingConfirmedAt ||
+          !canExposeAnonymousEventDetail({
+            eventType: row.eventType,
+            requiresPayment: row.eventRequiresPayment,
+            status: row.eventStatus,
+            slotIsPublic: isSlotPublic({
+              slot: {
+                source: "parking_pass_booking",
+                status: "confirmed",
+                startsAtUtc: interval.startUtc,
+                endsAtUtc: interval.endUtc,
+                lastConfirmedAtUtc: row.bookingConfirmedAt,
+              },
+              now,
+              lookaheadHours,
+              ttlHours: 24 * 365 * 100,
+            }),
+          })
+        ) {
+          return [];
+        }
+        return [String(row.hostId)];
+      }),
+    ),
+  );
+
+  const rows =
+    eligibleHostIds.length === 0
+      ? []
+      : await db
+          .select({
+            id: hosts.id,
+            name: hosts.businessName,
+            updatedAt: hosts.updatedAt,
+            ownerDisabled: users.isDisabled,
+          })
+          .from(hosts)
+          .innerJoin(users, eq(hosts.userId, users.id))
+          .where(
+            and(
+              inArray(hosts.id, eligibleHostIds),
+              eq(users.isDisabled, false),
+            ),
+          )
+          .orderBy(desc(hosts.updatedAt))
+          .limit(50000);
+
+  return rows.map((row: any) => ({
+    loc: `${baseUrl}/location/${encodeURIComponent(`${toSlug(row.name) || row.id}--${row.id}`)}`,
+    lastmod: row.updatedAt,
+  }));
+};
+
+// The events urlset is built by the /sitemap-events.xml route.
+// robots.txt asks this loader — the route's own query and eligibility
+// filter, unchanged — whether the feed currently has anything in it,
+// so an empty feed is not advertised.
+const loadEventsSitemapEntries = async (baseUrl: string) => {
+  const lookaheadHoursRaw = Number(
+    process.env.PUBLIC_SLOT_LOOKAHEAD_HOURS ?? 24 * 7,
+  );
+  const lookaheadHours = Number.isFinite(lookaheadHoursRaw)
+    ? Math.max(1, Math.min(lookaheadHoursRaw, 24 * 30))
+    : 24 * 7;
+  const now = new Date();
+  const windowStart = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+  const windowEnd = new Date(
+    now.getTime() + lookaheadHours * 60 * 60 * 1000,
+  );
+
+  const rows = await db
+    .selectDistinct({
+      ...restaurantSitemapSelect,
+      eventId: events.id,
+      eventName: events.name,
+      eventType: events.eventType,
+      eventStatus: events.status,
+      eventRequiresPayment: events.requiresPayment,
+      hostName: hosts.businessName,
+      eventDate: events.date,
+      eventStartTime: events.startTime,
+      eventEndTime: events.endTime,
+      hostCity: hosts.city,
+      hostState: hosts.state,
+      bookingConfirmedAt: eventBookings.bookingConfirmedAt,
+      updatedAt: events.updatedAt,
+    })
+    .from(eventBookings)
+    .innerJoin(events, eq(eventBookings.eventId, events.id))
+    .innerJoin(hosts, eq(events.hostId, hosts.id))
+    .innerJoin(restaurants, eq(eventBookings.truckId, restaurants.id))
+    .innerJoin(users, eq(restaurants.ownerId, users.id))
+    .where(
+      and(
+        eq(eventBookings.status, "confirmed"),
+        isNotNull(eventBookings.bookingConfirmedAt),
+        inArray(events.status, ["open", "booked", "filled"]),
+        or(
+          isNull(events.requiresPayment),
+          eq(events.requiresPayment, false),
+        ),
+        eq(restaurants.isActive, true),
+        eq(users.isDisabled, false),
+        sql`exists (
+          select 1 from users host_owner
+          where host_owner.id = ${hosts.userId}
+            and host_owner.is_disabled = false
+        )`,
+        publicTruckClassificationWhere(
+          restaurants.isFoodTruck,
+          restaurants.businessType,
+        ),
+        gte(events.date, windowStart),
+        lte(events.date, windowEnd),
+      ),
+    )
+    .orderBy(desc(events.updatedAt))
+    .limit(50000);
+
+  const eligibleRows = rows.filter((row: any) => {
+    if (
+      !isIndexableRestaurantRow(row) ||
+      !isPublicDiscoveryEligibleEntity({
+        name: row.hostName,
+        isActive: true,
+      }) ||
+      !isPublicDiscoveryEligibleEntity({
+        name: row.eventName,
+        isActive: true,
+      })
+    ) {
+      return false;
+    }
+    const timeZone = resolveCityTimeZoneSync({
+      city: row.hostCity || null,
+      state: row.hostState || null,
+    });
+    const interval = buildSlotDateTimes({
+      timeZone,
+      date: row.eventDate,
+      startTime: String(row.eventStartTime || ""),
+      endTime: String(row.eventEndTime || ""),
+    });
+    return Boolean(
+      interval &&
+      row.bookingConfirmedAt &&
+      canExposeAnonymousEventDetail({
+        eventType: row.eventType,
+        requiresPayment: row.eventRequiresPayment,
+        status: row.eventStatus,
+        slotIsPublic: isSlotPublic({
+          slot: {
+            source: "parking_pass_booking",
+            status: "confirmed",
+            startsAtUtc: interval.startUtc,
+            endsAtUtc: interval.endUtc,
+            lastConfirmedAtUtc: row.bookingConfirmedAt,
+          },
+          now,
+          lookaheadHours,
+          ttlHours: 24 * 365 * 100,
+        }),
+      }),
+    );
+  });
+  const uniqueEligibleRows = Array.from(
+    new Map(
+      eligibleRows.map((row: any) => [String(row.eventId), row] as const),
+    ).values(),
+  );
+
+  return uniqueEligibleRows.map((row: any) => {
+    const title = row.eventName || row.hostName || row.eventId;
+    return {
+      loc: `${baseUrl}/event/${encodeURIComponent(`${toSlug(title) || row.eventId}--${row.eventId}`)}`,
+      lastmod: row.updatedAt,
+    };
+  });
+};
+
+// The videos urlset is built by the /sitemap-videos.xml route.
+// robots.txt asks this loader — the route's own query and eligibility
+// filter, unchanged — whether the feed currently has anything in it,
+// so an empty feed is not advertised.
+const loadVideosSitemapEntries = async (baseUrl: string) => {
+  const now = new Date();
+  const candidates = await db
+    .select({
+      id: videoStories.id,
+      title: videoStories.title,
+      createdAt: videoStories.createdAt,
+      restaurantId: videoStories.restaurantId,
+      creatorDisabled: users.isDisabled,
+      restaurantActive: restaurants.isActive,
+      restaurantName: restaurants.name,
+      restaurantAddress: restaurants.address,
+      restaurantCity: restaurants.city,
+      restaurantState: restaurants.state,
+      restaurantCuisineType: restaurants.cuisineType,
+      restaurantDescription: restaurants.description,
+      restaurantOwnerDisabled: sql<boolean | null>`(
+        select linked_owner.is_disabled from users linked_owner
+        where linked_owner.id = ${restaurants.ownerId} limit 1
+      )`,
+      restaurantRawData: restaurants.rawData,
+    })
+    .from(videoStories)
+    .innerJoin(users, eq(videoStories.userId, users.id))
+    .leftJoin(restaurants, eq(videoStories.restaurantId, restaurants.id))
+    .where(
+      and(
+        publicStoryPublicationWhere(now),
+        eq(users.isDisabled, false),
+        or(
+          isNull(videoStories.restaurantId),
+          eq(restaurants.isActive, true),
+        ),
+        isNotNull(videoStories.transcriptSource),
+      ),
+    )
+    .orderBy(desc(videoStories.createdAt))
+    .limit(200000);
+  const rows = candidates
+    .filter((row: any) => isPublicStoryAssociationEligible(row))
+    .slice(0, 50000);
+
+  return rows.map((row: any) => ({
+    loc: `${baseUrl}/video/${encodeURIComponent(`${toSlug(row.title) || row.id}--${row.id}`)}`,
+    lastmod: row.createdAt,
+  }));
+};
+
 export function registerSeoRoutes(
   app: Express,
   dependencies: SeoRouteDependencies = {},
@@ -1001,142 +1321,9 @@ export function registerSeoRoutes(
   app.get("/sitemap-locations.xml", async (_req, res) => {
     try {
       const baseUrl = resolveSitemapSiteUrl();
-      const lookaheadHoursRaw = Number(
-        process.env.PUBLIC_SLOT_LOOKAHEAD_HOURS ?? 24 * 7,
-      );
-      const lookaheadHours = Number.isFinite(lookaheadHoursRaw)
-        ? Math.max(1, Math.min(lookaheadHoursRaw, 24 * 30))
-        : 24 * 7;
-      const now = new Date();
-      const windowStart = new Date(now.getTime() - 24 * 60 * 60 * 1000);
-      const windowEnd = new Date(
-        now.getTime() + lookaheadHours * 60 * 60 * 1000,
-      );
+      const entries = await loadLocationsSitemapEntries(baseUrl);
 
-      const candidateRows = await db
-        .select({
-          ...restaurantSitemapSelect,
-          hostId: events.hostId,
-          hostName: hosts.businessName,
-          eventDate: events.date,
-          eventStartTime: events.startTime,
-          eventEndTime: events.endTime,
-          eventName: events.name,
-          eventType: events.eventType,
-          eventStatus: events.status,
-          eventRequiresPayment: events.requiresPayment,
-          hostCity: hosts.city,
-          hostState: hosts.state,
-          bookingConfirmedAt: eventBookings.bookingConfirmedAt,
-        })
-        .from(eventBookings)
-        .innerJoin(events, eq(eventBookings.eventId, events.id))
-        .innerJoin(hosts, eq(events.hostId, hosts.id))
-        .innerJoin(restaurants, eq(eventBookings.truckId, restaurants.id))
-        .innerJoin(users, eq(restaurants.ownerId, users.id))
-        .where(
-          and(
-            eq(eventBookings.status, "confirmed"),
-            isNotNull(eventBookings.bookingConfirmedAt),
-            inArray(events.status, ["open", "booked", "filled"]),
-            eq(restaurants.isActive, true),
-            eq(users.isDisabled, false),
-            sql`exists (
-              select 1 from users host_owner
-              where host_owner.id = ${hosts.userId}
-                and host_owner.is_disabled = false
-            )`,
-            publicTruckClassificationWhere(
-              restaurants.isFoodTruck,
-              restaurants.businessType,
-            ),
-            gte(events.date, windowStart),
-            lte(events.date, windowEnd),
-          ),
-        )
-        .limit(50000);
-
-      const eligibleHostIds = Array.from(
-        new Set<string>(
-          candidateRows.flatMap((row: (typeof candidateRows)[number]) => {
-            if (
-              !isIndexableRestaurantRow(row) ||
-              !isPublicDiscoveryEligibleEntity({
-                name: row.hostName,
-                isActive: true,
-              }) ||
-              !isPublicDiscoveryEligibleEntity({
-                name: row.eventName,
-                isActive: true,
-              })
-            ) {
-              return [];
-            }
-            const timeZone = resolveCityTimeZoneSync({
-              city: row.hostCity || null,
-              state: row.hostState || null,
-            });
-            const interval = buildSlotDateTimes({
-              timeZone,
-              date: row.eventDate,
-              startTime: String(row.eventStartTime || ""),
-              endTime: String(row.eventEndTime || ""),
-            });
-            if (
-              !interval ||
-              !row.bookingConfirmedAt ||
-              !canExposeAnonymousEventDetail({
-                eventType: row.eventType,
-                requiresPayment: row.eventRequiresPayment,
-                status: row.eventStatus,
-                slotIsPublic: isSlotPublic({
-                  slot: {
-                    source: "parking_pass_booking",
-                    status: "confirmed",
-                    startsAtUtc: interval.startUtc,
-                    endsAtUtc: interval.endUtc,
-                    lastConfirmedAtUtc: row.bookingConfirmedAt,
-                  },
-                  now,
-                  lookaheadHours,
-                  ttlHours: 24 * 365 * 100,
-                }),
-              })
-            ) {
-              return [];
-            }
-            return [String(row.hostId)];
-          }),
-        ),
-      );
-
-      const rows =
-        eligibleHostIds.length === 0
-          ? []
-          : await db
-              .select({
-                id: hosts.id,
-                name: hosts.businessName,
-                updatedAt: hosts.updatedAt,
-                ownerDisabled: users.isDisabled,
-              })
-              .from(hosts)
-              .innerJoin(users, eq(hosts.userId, users.id))
-              .where(
-                and(
-                  inArray(hosts.id, eligibleHostIds),
-                  eq(users.isDisabled, false),
-                ),
-              )
-              .orderBy(desc(hosts.updatedAt))
-              .limit(50000);
-
-      sendUrlsetXml(res, {
-        entries: rows.map((row: any) => ({
-          loc: `${baseUrl}/location/${encodeURIComponent(`${toSlug(row.name) || row.id}--${row.id}`)}`,
-          lastmod: row.updatedAt,
-        })),
-      });
+      sendUrlsetXml(res, { entries });
     } catch (e) {
       console.error("sitemap-locations failed", e);
       res.status(500).send("<error>failed</error>");
@@ -1260,128 +1447,9 @@ export function registerSeoRoutes(
   app.get("/sitemap-events.xml", async (_req, res) => {
     try {
       const baseUrl = resolveSitemapSiteUrl();
-      const lookaheadHoursRaw = Number(
-        process.env.PUBLIC_SLOT_LOOKAHEAD_HOURS ?? 24 * 7,
-      );
-      const lookaheadHours = Number.isFinite(lookaheadHoursRaw)
-        ? Math.max(1, Math.min(lookaheadHoursRaw, 24 * 30))
-        : 24 * 7;
-      const now = new Date();
-      const windowStart = new Date(now.getTime() - 24 * 60 * 60 * 1000);
-      const windowEnd = new Date(
-        now.getTime() + lookaheadHours * 60 * 60 * 1000,
-      );
+      const entries = await loadEventsSitemapEntries(baseUrl);
 
-      const rows = await db
-        .selectDistinct({
-          ...restaurantSitemapSelect,
-          eventId: events.id,
-          eventName: events.name,
-          eventType: events.eventType,
-          eventStatus: events.status,
-          eventRequiresPayment: events.requiresPayment,
-          hostName: hosts.businessName,
-          eventDate: events.date,
-          eventStartTime: events.startTime,
-          eventEndTime: events.endTime,
-          hostCity: hosts.city,
-          hostState: hosts.state,
-          bookingConfirmedAt: eventBookings.bookingConfirmedAt,
-          updatedAt: events.updatedAt,
-        })
-        .from(eventBookings)
-        .innerJoin(events, eq(eventBookings.eventId, events.id))
-        .innerJoin(hosts, eq(events.hostId, hosts.id))
-        .innerJoin(restaurants, eq(eventBookings.truckId, restaurants.id))
-        .innerJoin(users, eq(restaurants.ownerId, users.id))
-        .where(
-          and(
-            eq(eventBookings.status, "confirmed"),
-            isNotNull(eventBookings.bookingConfirmedAt),
-            inArray(events.status, ["open", "booked", "filled"]),
-            or(
-              isNull(events.requiresPayment),
-              eq(events.requiresPayment, false),
-            ),
-            eq(restaurants.isActive, true),
-            eq(users.isDisabled, false),
-            sql`exists (
-              select 1 from users host_owner
-              where host_owner.id = ${hosts.userId}
-                and host_owner.is_disabled = false
-            )`,
-            publicTruckClassificationWhere(
-              restaurants.isFoodTruck,
-              restaurants.businessType,
-            ),
-            gte(events.date, windowStart),
-            lte(events.date, windowEnd),
-          ),
-        )
-        .orderBy(desc(events.updatedAt))
-        .limit(50000);
-
-      const eligibleRows = rows.filter((row: any) => {
-        if (
-          !isIndexableRestaurantRow(row) ||
-          !isPublicDiscoveryEligibleEntity({
-            name: row.hostName,
-            isActive: true,
-          }) ||
-          !isPublicDiscoveryEligibleEntity({
-            name: row.eventName,
-            isActive: true,
-          })
-        ) {
-          return false;
-        }
-        const timeZone = resolveCityTimeZoneSync({
-          city: row.hostCity || null,
-          state: row.hostState || null,
-        });
-        const interval = buildSlotDateTimes({
-          timeZone,
-          date: row.eventDate,
-          startTime: String(row.eventStartTime || ""),
-          endTime: String(row.eventEndTime || ""),
-        });
-        return Boolean(
-          interval &&
-          row.bookingConfirmedAt &&
-          canExposeAnonymousEventDetail({
-            eventType: row.eventType,
-            requiresPayment: row.eventRequiresPayment,
-            status: row.eventStatus,
-            slotIsPublic: isSlotPublic({
-              slot: {
-                source: "parking_pass_booking",
-                status: "confirmed",
-                startsAtUtc: interval.startUtc,
-                endsAtUtc: interval.endUtc,
-                lastConfirmedAtUtc: row.bookingConfirmedAt,
-              },
-              now,
-              lookaheadHours,
-              ttlHours: 24 * 365 * 100,
-            }),
-          }),
-        );
-      });
-      const uniqueEligibleRows = Array.from(
-        new Map(
-          eligibleRows.map((row: any) => [String(row.eventId), row] as const),
-        ).values(),
-      );
-
-      sendUrlsetXml(res, {
-        entries: uniqueEligibleRows.map((row: any) => {
-          const title = row.eventName || row.hostName || row.eventId;
-          return {
-            loc: `${baseUrl}/event/${encodeURIComponent(`${toSlug(title) || row.eventId}--${row.eventId}`)}`,
-            lastmod: row.updatedAt,
-          };
-        }),
-      });
+      sendUrlsetXml(res, { entries });
     } catch (e) {
       console.error("sitemap-events failed", e);
       res.status(500).send("<error>failed</error>");
@@ -1472,53 +1540,9 @@ export function registerSeoRoutes(
   app.get("/sitemap-videos.xml", async (_req, res) => {
     try {
       const baseUrl = resolveSitemapSiteUrl();
-      const now = new Date();
-      const candidates = await db
-        .select({
-          id: videoStories.id,
-          title: videoStories.title,
-          createdAt: videoStories.createdAt,
-          restaurantId: videoStories.restaurantId,
-          creatorDisabled: users.isDisabled,
-          restaurantActive: restaurants.isActive,
-          restaurantName: restaurants.name,
-          restaurantAddress: restaurants.address,
-          restaurantCity: restaurants.city,
-          restaurantState: restaurants.state,
-          restaurantCuisineType: restaurants.cuisineType,
-          restaurantDescription: restaurants.description,
-          restaurantOwnerDisabled: sql<boolean | null>`(
-            select linked_owner.is_disabled from users linked_owner
-            where linked_owner.id = ${restaurants.ownerId} limit 1
-          )`,
-          restaurantRawData: restaurants.rawData,
-        })
-        .from(videoStories)
-        .innerJoin(users, eq(videoStories.userId, users.id))
-        .leftJoin(restaurants, eq(videoStories.restaurantId, restaurants.id))
-        .where(
-          and(
-            publicStoryPublicationWhere(now),
-            eq(users.isDisabled, false),
-            or(
-              isNull(videoStories.restaurantId),
-              eq(restaurants.isActive, true),
-            ),
-            isNotNull(videoStories.transcriptSource),
-          ),
-        )
-        .orderBy(desc(videoStories.createdAt))
-        .limit(200000);
-      const rows = candidates
-        .filter((row: any) => isPublicStoryAssociationEligible(row))
-        .slice(0, 50000);
+      const entries = await loadVideosSitemapEntries(baseUrl);
 
-      sendUrlsetXml(res, {
-        entries: rows.map((row: any) => ({
-          loc: `${baseUrl}/video/${encodeURIComponent(`${toSlug(row.title) || row.id}--${row.id}`)}`,
-          lastmod: row.createdAt,
-        })),
-      });
+      sendUrlsetXml(res, { entries });
     } catch (e) {
       console.error("sitemap-videos failed", e);
       res.status(500).send("<error>failed</error>");
@@ -1640,6 +1664,26 @@ export function registerSeoRoutes(
       );
       const advertiseSuppliers =
         supplierEntries === null || supplierEntries.length > 0;
+      // The same rule for the locations, events, and videos feeds:
+      // each is advertised only while it lists at least one entry,
+      // and a failed count keeps the line rather than dropping a feed
+      // that may have entries. Each line returns on its own as soon
+      // as its feed has content again.
+      const locationEntries = await loadLocationsSitemapEntries(baseUrl).catch(
+        () => null,
+      );
+      const advertiseLocations =
+        locationEntries === null || locationEntries.length > 0;
+      const eventEntries = await loadEventsSitemapEntries(baseUrl).catch(
+        () => null,
+      );
+      const advertiseEvents =
+        eventEntries === null || eventEntries.length > 0;
+      const videoEntries = await loadVideosSitemapEntries(baseUrl).catch(
+        () => null,
+      );
+      const advertiseVideos =
+        videoEntries === null || videoEntries.length > 0;
       const robots = [
         "User-agent: *",
         "Allow: /robots.txt",
@@ -1676,15 +1720,21 @@ export function registerSeoRoutes(
         ...(advertiseServices
           ? [`Sitemap: ${baseUrl}/sitemap-services.xml`]
           : []),
-        `Sitemap: ${baseUrl}/sitemap-locations.xml`,
+        ...(advertiseLocations
+          ? [`Sitemap: ${baseUrl}/sitemap-locations.xml`]
+          : []),
         `Sitemap: ${baseUrl}/sitemap-cities.xml`,
         `Sitemap: ${baseUrl}/sitemap-cuisines.xml`,
-        `Sitemap: ${baseUrl}/sitemap-events.xml`,
+        ...(advertiseEvents
+          ? [`Sitemap: ${baseUrl}/sitemap-events.xml`]
+          : []),
         `Sitemap: ${baseUrl}/sitemap-deals.xml`,
         ...(advertiseSuppliers
           ? [`Sitemap: ${baseUrl}/sitemap-suppliers.xml`]
           : []),
-        `Sitemap: ${baseUrl}/sitemap-videos.xml`,
+        ...(advertiseVideos
+          ? [`Sitemap: ${baseUrl}/sitemap-videos.xml`]
+          : []),
         "",
         `AI: ${baseUrl}/llms.txt`,
         ...(indexNowConfig.enabled &&

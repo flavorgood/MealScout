@@ -3,15 +3,37 @@ import { buildJsonLdScript } from "./jsonLdScript";
 
 const escapeHtml = (value: string) => value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 
+const nativePublicProfileAssetPath = (url: string) =>
+  url.startsWith(PUBLIC_PROFILE_APP_ASSET_BASE) && !url.startsWith(`${PUBLIC_PROFILE_APP_ASSET_BASE}assets/`)
+    ? `/${url.slice(PUBLIC_PROFILE_APP_ASSET_BASE.length)}`
+    : null;
+
+/**
+ * The compiled template addresses every public file through the API asset
+ * bridge, but only the compiled JS/CSS under assets/ is served there — the
+ * icons, favicon, and brand files answer at their native public paths.
+ * Rewrite those references (link/script attributes and meta image content)
+ * back to the native paths; the assets/ graph keeps the bridge.
+ */
+export function normalizePublicProfileAssetPaths(html: string) {
+  return html
+    .replace(/\b(href|src)=(['"])([^'"]+)\2/g, (attribute, name, quote, url: string) => {
+      const native = nativePublicProfileAssetPath(url);
+      return native ? `${name}=${quote}${native}${quote}` : attribute;
+    })
+    .replace(/\bcontent=(['"])([^'"]+)\1/g, (attribute, quote, url: string) => {
+      const native = nativePublicProfileAssetPath(url);
+      return native ? `content=${quote}${native}${quote}` : attribute;
+    });
+}
+
 /** Keep one native App template/asset graph for public initial documents. */
 export function renderAppDocumentHtml(template: string, page: {
   markup: string; title: string; description: string; canonical: string;
   noIndex: boolean; schema?: object;
 }) {
   if (!/<div\s+id=["']root["']\s*>\s*<\/div>/.test(template)) throw new Error("Native template has no empty application root");
-  let html = template.replace(/\b(href|src)=(['"])([^'"]+)\2/g, (attribute, name, quote, url: string) =>
-    url.startsWith(PUBLIC_PROFILE_APP_ASSET_BASE) && !url.startsWith(`${PUBLIC_PROFILE_APP_ASSET_BASE}assets/`)
-      ? `${name}=${quote}/${url.slice(PUBLIC_PROFILE_APP_ASSET_BASE.length)}${quote}` : attribute);
+  let html = normalizePublicProfileAssetPaths(template);
   html = html.replace(/<div\s+id=["']root["']\s*>\s*<\/div>/, () => `<div id="root">${page.markup}</div>`)
     .replace(/<title>[\s\S]*?<\/title>/i, () => `<title>${escapeHtml(page.title)}</title>`);
   const tags: Array<[string, string]> = [["description", page.description], ["og:title", page.title], ["og:description", page.description], ["twitter:title", page.title], ["twitter:description", page.description]];
