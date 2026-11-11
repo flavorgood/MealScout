@@ -384,6 +384,14 @@ export function registerHostPayoutAdminRoutes(app: Express) {
                     },
                     { idempotencyKey },
                   ),
+                findTransferByPayoutRequestId: async (requestId: string) => {
+                  const page = await stripe.transfers.search({
+                    query: `metadata["payoutRequestId"]:"${requestId}"`,
+                    limit: 1,
+                  });
+                  const found = page.data?.[0];
+                  return found ? { id: found.id } : null;
+                },
               }
             : null;
 
