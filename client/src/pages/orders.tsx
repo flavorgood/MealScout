@@ -4,12 +4,9 @@ import { format } from "date-fns";
 import { Link, useSearch } from "wouter";
 import {
   AlertCircle,
-  CheckCircle2,
-  Clock3,
   Loader2,
   Receipt,
   Tag,
-  XCircle,
 } from "lucide-react";
 import OwnerOrdersWorkspace, {
   isBusinessOrderOperator,
@@ -22,6 +19,8 @@ import { useAuth } from "@/hooks/useAuth";
 import { apiRequest } from "@/lib/queryClient";
 import DealClaimModal from "@/components/deal-claim-modal";
 import { dealClaimStatus, displayClaimStatus, isDealAuthenticationError, receiptDateLabel, readClaimList, type DealClaimReceipt } from "@/lib/deal-claim-state";
+
+import { countOrderActivity, orderActivityStatus } from "@/lib/order-activity-status";
 
 type ActivityTab = "orders" | "deals";
 
@@ -36,42 +35,6 @@ type ConsumerOrder = {
 };
 
 type ClaimedDeal = DealClaimReceipt;
-
-const ORDER_STATUS: Record<
-  string,
-  { label: string; className: string; icon: typeof Clock3 }
-> = {
-  pending: {
-    label: "Received",
-    className: "border-amber-200 bg-amber-50 text-amber-900",
-    icon: Clock3,
-  },
-  confirmed: {
-    label: "Confirmed",
-    className: "border-blue-200 bg-blue-50 text-blue-800",
-    icon: CheckCircle2,
-  },
-  preparing: {
-    label: "Preparing",
-    className: "border-orange-200 bg-orange-50 text-orange-800",
-    icon: Clock3,
-  },
-  ready: {
-    label: "Ready",
-    className: "border-emerald-200 bg-emerald-50 text-emerald-800",
-    icon: CheckCircle2,
-  },
-  completed: {
-    label: "Completed",
-    className: "border-stone-200 bg-stone-100 text-stone-700",
-    icon: CheckCircle2,
-  },
-  cancelled: {
-    label: "Cancelled",
-    className: "border-red-200 bg-red-50 text-red-800",
-    icon: XCircle,
-  },
-};
 
 function formatMoneyFromCents(cents: number | null | undefined) {
   return `$${(Number(cents || 0) / 100).toFixed(2)}`;
@@ -130,17 +93,7 @@ function ConsumerActivity() {
   const isLoading = activeTab === "orders" ? ordersQuery.isLoading : dealsQuery.isLoading;
   const error = activeTab === "orders" ? ordersQuery.error : dealsQuery.error;
 
-  const orderCounts = useMemo(
-    () => ({
-      active: orders.filter((order) =>
-        ["pending", "confirmed", "preparing", "ready"].includes(order.status),
-      ).length,
-      complete: orders.filter((order) =>
-        ["completed", "cancelled"].includes(order.status),
-      ).length,
-    }),
-    [orders],
-  );
+  const orderCounts = useMemo(() => countOrderActivity(orders), [orders]);
 
   return (
     <div className="min-h-screen bg-[var(--bg-layered)] lg:pt-16">
@@ -196,8 +149,9 @@ function ConsumerActivity() {
               {orderCounts.active} active
             </span>
             <span className="rounded-full bg-stone-100 px-3 py-1.5 font-semibold text-stone-700">
-              {orderCounts.complete} past
+              {orderCounts.past} past
             </span>
+            {orderCounts.unknown > 0 && <span>{orderCounts.unknown} status unavailable</span>}
           </div>
         ) : null}
 
@@ -242,7 +196,7 @@ function ConsumerActivity() {
         ) : activeTab === "orders" && orders.length > 0 ? (
           <div className="mt-6 space-y-3">
             {orders.map((order) => {
-              const details = ORDER_STATUS[order.status] || ORDER_STATUS.pending;
+              const details = orderActivityStatus(order.status);
               const Icon = details.icon;
               const createdAt = new Date(order.createdAt);
               return (
