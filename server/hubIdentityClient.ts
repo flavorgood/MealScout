@@ -43,6 +43,10 @@ export async function linkHubSignupToSharedProfile(user: HubLinkUser): Promise<v
   if (user.emailVerified !== true) return;
   const res = await fetch(`${base}/api/auth/hub/resolve`, {
     method: "POST",
+    // Bound the wait: a hanging TradeScout must not stall a MealScout
+    // signup/verification request — the abort throws and every caller
+    // already treats a resolve failure as non-fatal.
+    signal: AbortSignal.timeout(3000),
     headers: { "content-type": "application/json", "x-hub-identity-secret": secret },
     body: JSON.stringify({
       hub: "mealscout",

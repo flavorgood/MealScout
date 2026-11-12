@@ -15,7 +15,7 @@ jobs:
           github.event.pull_request.number != 380 ||
           github.event.pull_request.head.repo.full_name != 'infotradescout/MealScout' ||
           github.head_ref != 'codex/ui-ux-front-end-overhaul-20260915' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout
         uses: actions/checkout@v4
