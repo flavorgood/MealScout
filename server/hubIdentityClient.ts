@@ -13,10 +13,18 @@
 // signup; the backfill script (scripts/backfill-tradescout-id.ts) is
 // the safety net and re-runs the same rule. Inert until
 // TRADESCOUT_API_BASE + HUB_IDENTITY_SECRET are configured.
+//
+// VERIFIED EMAIL ONLY: the register handlers call this right after
+// signup, but the link itself is refused until the account's email is
+// verified — the resolver matches by email, so linking earlier would
+// let an unverified signup claim another person's TradeScout profile.
+// The verify-email handler calls this again the moment verification
+// lands, which is when the link actually happens for native signups.
 
 export interface HubLinkUser {
   id: string;
   email?: string | null;
+  emailVerified?: boolean | null;
   firstName?: string | null;
   lastName?: string | null;
   phone?: string | null;
@@ -27,6 +35,12 @@ export async function linkHubSignupToSharedProfile(user: HubLinkUser): Promise<v
   const base = process.env.TRADESCOUT_API_BASE;
   const secret = process.env.HUB_IDENTITY_SECRET;
   if (!base || !secret || !user.email) return; // unconfigured = today's behavior
+  // Link ONLY on a verified email. The resolver matches by email, so
+  // linking an unverified signup would stamp someone else's TradeScout
+  // profile id onto an account whose owner never proved they own the
+  // address. The verify-email handler calls this again once the email
+  // is proven (server/unifiedAuth.ts).
+  if (user.emailVerified !== true) return;
   const res = await fetch(`${base}/api/auth/hub/resolve`, {
     method: "POST",
     headers: { "content-type": "application/json", "x-hub-identity-secret": secret },

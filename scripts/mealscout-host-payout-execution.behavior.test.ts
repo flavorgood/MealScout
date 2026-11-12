@@ -80,7 +80,9 @@ class FakeStore implements HostPayoutStore {
 
 class FakeTransfers implements HostPayoutTransferClient {
   calls = 0;
+  findCalls = 0;
   failAll = false;
+  failFind = false;
   private byKey = new Map<string, string>();
   private seq = 0;
 
@@ -103,6 +105,17 @@ class FakeTransfers implements HostPayoutTransferClient {
     const id = `tr_${++this.seq}`;
     this.byKey.set(idempotencyKey, id);
     return { id };
+  }
+
+  async findTransferByPayoutRequestId(requestId: string) {
+    this.findCalls += 1;
+    if (this.failFind) {
+      throw new Error("stripe search unavailable");
+    }
+    // The fake keys transfers by idempotency key (host_payout_<requestId>),
+    // which is the same one-to-one identity the real metadata search uses.
+    const existing = this.byKey.get(`host_payout_${requestId}`);
+    return existing ? { id: existing } : null;
   }
 
   get uniqueTransfers() {
@@ -193,9 +206,12 @@ function execInput(
 }
 
 // ---------------------------------------------------------------------------
-// 3. Crash between transfer and finalize, then retry: the retry replays
-//    the SAME transfer through the idempotency key — one real transfer,
-//    one ledger row, paid once.
+// 3. Crash between transfer and finalize, then retry: the retry does NOT
+//    re-send. It reconciles against Stripe by the payout's metadata and
+//    finalizes from the transfer the first attempt already created —
+//    one real transfer, one ledger row, paid once. (Stripe prunes
+//    idempotency keys after 24 hours, so replay-by-key alone cannot be
+//    the guard for a late retry.)
 // ---------------------------------------------------------------------------
 {
   const store = new FakeStore(baseRequest);
@@ -216,7 +232,8 @@ function execInput(
     execInput(store), // fresh read: row is now "processing"
   );
   assert.equal(retry.outcome, "paid");
-  assert.equal(transfers.calls, 2);
+  assert.equal(transfers.findCalls, 1);
+  assert.equal(transfers.calls, 1); // reconciled — no second send
   assert.equal(transfers.uniqueTransfers, 1);
   assert.equal(store.ledger.length, 1);
   assert.equal(
@@ -227,6 +244,47 @@ function execInput(
     hostPayoutIdempotencyKey(baseRequest.id),
     "host_payout_payout-1",
   );
+}
+
+// ---------------------------------------------------------------------------
+// 3b. Processing retry where Stripe has NO transfer for the payout (the
+//     earlier attempt failed before creating one): the retry sends
+//     exactly once and pays.
+// ---------------------------------------------------------------------------
+{
+  const store = new FakeStore({ ...baseRequest, status: "processing" });
+  const transfers = new FakeTransfers();
+
+  const result = await executeHostPayout(
+    store,
+    transfers,
+    execInput(store),
+  );
+  assert.equal(result.outcome, "paid");
+  assert.equal(transfers.findCalls, 1);
+  assert.equal(transfers.calls, 1);
+  assert.equal(transfers.uniqueTransfers, 1);
+  assert.equal(store.ledger.length, 1);
+}
+
+// ---------------------------------------------------------------------------
+// 3c. Processing retry where the reconciliation search itself fails:
+//     refuse with transfer_failed and send NOTHING — never re-send blind.
+// ---------------------------------------------------------------------------
+{
+  const store = new FakeStore({ ...baseRequest, status: "processing" });
+  const transfers = new FakeTransfers();
+  transfers.failFind = true;
+
+  const result = await executeHostPayout(
+    store,
+    transfers,
+    execInput(store),
+  );
+  assert.equal(result.outcome, "transfer_failed");
+  assert.equal(transfers.calls, 0);
+  assert.equal(store.row.status, "processing");
+  assert.equal(store.ledger.length, 0);
 }
 
 // ---------------------------------------------------------------------------

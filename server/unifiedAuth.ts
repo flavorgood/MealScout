@@ -2611,6 +2611,21 @@ export async function setupUnifiedAuth(
       await storage.updateUser(user.id, { emailVerified: true });
       await storage.markEmailVerificationTokenUsed(verificationToken.id);
 
+      // The email is now proven, so the shared-identity link is safe to
+      // make: resolve the ONE shared TradeScout profile for this
+      // account and stamp its id. Non-fatal — a TradeScout outage must
+      // not fail a verification the user just completed — and a no-op
+      // until TRADESCOUT_API_BASE + HUB_IDENTITY_SECRET are configured.
+      const verifiedUser = await storage.getUser(user.id);
+      if (verifiedUser && !verifiedUser.tradescoutId) {
+        await linkHubSignupToSharedProfile(verifiedUser).catch((err) =>
+          console.error(
+            "[hub-identity] post-verification resolve failed (non-fatal)",
+            err,
+          ),
+        );
+      }
+
       const redirectBase =
         process.env.CLIENT_ORIGIN ||
         process.env.PUBLIC_BASE_URL ||

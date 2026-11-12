@@ -15,7 +15,12 @@
 //  2. Send the transfer with a deterministic idempotency key
 //     (host_payout_<requestId>). If a previous attempt created the transfer
 //     but crashed before finalizing, Stripe replays that same transfer on
-//     retry instead of paying twice.
+//     retry instead of paying twice — but ONLY within Stripe's 24-hour
+//     idempotency window. A retry of a row already in "processing"
+//     therefore first searches Stripe by the payout's metadata
+//     (findTransferByPayoutRequestId) and finalizes from a found
+//     transfer; it re-sends only when Stripe has no transfer for the
+//     payout, and refuses when the search itself fails.
 //  3. A provider failure leaves the row in "processing" and surfaces an
 //     error — never "paid", and no ledger row is written.
 //  4. Only after the transfer succeeds, finalize in ONE transaction:
@@ -99,6 +104,12 @@ export interface HostPayoutTransferClient {
     request: HostPayoutTransferRequest,
     idempotencyKey: string,
   ): Promise<{ id: string }>;
+  // Reconciliation lookup: the transfer a previous attempt may already
+  // have created for this payout request, found by the metadata stamped
+  // on every host-payout transfer. Null when Stripe has none.
+  findTransferByPayoutRequestId(
+    requestId: string,
+  ): Promise<{ id: string } | null>;
 }
 
 export type HostPayoutExecutionResult =
@@ -207,32 +218,53 @@ export async function executeHostPayout(
     if (!transferClient) {
       return { outcome: "stripe_unconfigured" };
     }
-    try {
-      const transfer = await transferClient.createTransfer(
-        {
-          amountCents,
-          destination: String(destination.stripeConnectAccountId),
-          description: `MealScout host payout — request ${request.id}`,
-          metadata: {
-            payoutRequestId: request.id,
-            hostId: request.hostId,
-            adminUserId: input.adminUserId,
+    if (request.status === "processing") {
+      // Retry of an attempt whose outcome is unknown. Stripe prunes
+      // idempotency keys after 24 hours, so re-sending under the same
+      // key is NOT safe on its own: ask Stripe first whether the
+      // earlier attempt already created this payout's transfer, and
+      // finalize from it instead of sending again. If the lookup
+      // itself fails, refuse — never re-send blind.
+      let prior: { id: string } | null;
+      try {
+        prior = await transferClient.findTransferByPayoutRequestId(request.id);
+      } catch {
+        return {
+          outcome: "transfer_failed",
+          message:
+            "Could not reconcile this processing payout against Stripe; refusing to re-send. Reconcile manually in Stripe.",
+        };
+      }
+      if (prior) transferId = prior.id;
+    }
+    if (!transferId) {
+      try {
+        const transfer = await transferClient.createTransfer(
+          {
+            amountCents,
+            destination: String(destination.stripeConnectAccountId),
+            description: `MealScout host payout — request ${request.id}`,
+            metadata: {
+              payoutRequestId: request.id,
+              hostId: request.hostId,
+              adminUserId: input.adminUserId,
+            },
           },
-        },
-        hostPayoutIdempotencyKey(request.id),
-      );
-      transferId = transfer.id;
-    } catch (transferErr: unknown) {
-      // The row stays "processing" (outcome uncertain until reconciled),
-      // no ledger row is written, and the caller surfaces the error. The
-      // payout is never silently "paid".
-      return {
-        outcome: "transfer_failed",
-        message:
-          transferErr instanceof Error
-            ? transferErr.message
-            : String(transferErr),
-      };
+          hostPayoutIdempotencyKey(request.id),
+        );
+        transferId = transfer.id;
+      } catch (transferErr: unknown) {
+        // The row stays "processing" (outcome uncertain until reconciled),
+        // no ledger row is written, and the caller surfaces the error. The
+        // payout is never silently "paid".
+        return {
+          outcome: "transfer_failed",
+          message:
+            transferErr instanceof Error
+              ? transferErr.message
+              : String(transferErr),
+        };
+      }
     }
   }
 
