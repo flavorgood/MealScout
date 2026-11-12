@@ -19,8 +19,8 @@
 //     idempotency window. A retry of a row already in "processing"
 //     therefore first searches Stripe by the payout's metadata
 //     (findTransferByPayoutRequestId) and finalizes from a found
-//     transfer; it re-sends only when Stripe has no transfer for the
-//     payout, and refuses when the search itself fails.
+//     transfer; absence, ambiguity or failed reconciliation holds the
+//     payout for manual reconciliation. No uncertain retry re-sends.
 //  3. A provider failure leaves the row in "processing" and surfaces an
 //     error — never "paid", and no ledger row is written.
 //  4. Only after the transfer succeeds, finalize in ONE transaction:
@@ -34,8 +34,8 @@
 // row itself — amount from the row, currency "usd", destination from the
 // host's connected Stripe account, idempotency key from the request id —
 // and the claim is the status transition itself. A transfer reference
-// already recorded in the row's notes means the money was already sent;
-// execution reconciles from the record and never sends again.
+// recorded in notes is only a lookup hint: execution retrieves and checks
+// the provider transfer before finalizing, and never sends again.
 //
 // Manual (out-of-band) payouts: when the host has no Stripe destination,
 // marking paid records a payment made outside Stripe. That used to happen
@@ -107,6 +107,7 @@ export interface HostPayoutTransferClient {
   // Reconciliation lookup: the transfer a previous attempt may already
   // have created for this payout request, found by the metadata stamped
   // on every host-payout transfer. Null when Stripe has none.
+  verifyRecordedTransfer(transferId: string): Promise<{ id: string }>;
   findTransferByPayoutRequestId(
     requestId: string,
   ): Promise<{ id: string } | null>;
@@ -174,14 +175,20 @@ export async function executeHostPayout(
     return { outcome: "invalid_amount" };
   }
 
-  // A transfer reference already recorded on the row means the money was
-  // already sent (a previous attempt crashed between the provider call
-  // and finalizing). Finalize from the record — never send again.
+  // A recorded transfer reference is only a lookup hint. Retrieve and
+  // validate provider proof before finalizing; never resend this branch.
   const recordedTransferId = extractHostPayoutTransferId(request.notes);
   const hasDestination = Boolean(
     destination.stripeConnectAccountId && destination.stripePayoutsEnabled,
   );
   const stripeMode = !recordedTransferId && input.stripeConfigured && hasDestination;
+
+  // A processing payout may already have moved money. Losing/changing
+  // the destination must never turn that uncertain Stripe attempt into
+  // a manual payment. Keep it held until provider proof is reconciled.
+  if (request.status === "processing" && !recordedTransferId && !stripeMode) {
+    return { outcome: "transfer_failed", message: "Processing payout has no usable original transfer proof; manual reconciliation required (no fallback payment)." };
+  }
 
   if (!recordedTransferId && !stripeMode) {
     // No transfer will be attempted on this call. Refuse to fall through
@@ -213,7 +220,19 @@ export async function executeHostPayout(
     return { outcome: "claim_conflict" };
   }
 
-  let transferId = recordedTransferId;
+  let transferId: string | null = null;
+  if (recordedTransferId) {
+    if (!input.stripeConfigured || !transferClient || !destination.stripeConnectAccountId) {
+      return { outcome: "transfer_failed", message: "Recorded transfer needs provider verification; payout remains held." };
+    }
+    try {
+      const proven = await transferClient.verifyRecordedTransfer(recordedTransferId);
+      if (proven.id !== recordedTransferId) throw new Error("Transfer identity mismatch");
+      transferId = proven.id;
+    } catch {
+      return { outcome: "transfer_failed", message: "Recorded transfer could not be verified against payout; no resend or manual fallback." };
+    }
+  }
   if (!transferId && stripeMode) {
     if (!transferClient) {
       return { outcome: "stripe_unconfigured" };
@@ -235,7 +254,8 @@ export async function executeHostPayout(
             "Could not reconcile this processing payout against Stripe; refusing to re-send. Reconcile manually in Stripe.",
         };
       }
-      if (prior) transferId = prior.id;
+      if (!prior) return { outcome: "transfer_failed", message: "No transfer proof for processing payout; manual reconciliation required (no resend)." };
+      transferId = prior.id;
     }
     if (!transferId) {
       try {

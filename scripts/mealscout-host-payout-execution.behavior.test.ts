@@ -107,6 +107,11 @@ class FakeTransfers implements HostPayoutTransferClient {
     return { id };
   }
 
+  async verifyRecordedTransfer(id: string) {
+    if (id !== "tr_recorded") throw new Error("unknown transfer");
+    return { id };
+  }
+
   async findTransferByPayoutRequestId(requestId: string) {
     this.findCalls += 1;
     if (this.failFind) {
@@ -248,8 +253,7 @@ function execInput(
 
 // ---------------------------------------------------------------------------
 // 3b. Processing retry where Stripe has NO transfer for the payout (the
-//     earlier attempt failed before creating one): the retry sends
-//     exactly once and pays.
+//     earlier attempt failed before creating one): the uncertain retry stays held; absence is not proof of failure.
 // ---------------------------------------------------------------------------
 {
   const store = new FakeStore({ ...baseRequest, status: "processing" });
@@ -260,11 +264,11 @@ function execInput(
     transfers,
     execInput(store),
   );
-  assert.equal(result.outcome, "paid");
+  assert.equal(result.outcome, "transfer_failed");
   assert.equal(transfers.findCalls, 1);
-  assert.equal(transfers.calls, 1);
-  assert.equal(transfers.uniqueTransfers, 1);
-  assert.equal(store.ledger.length, 1);
+  assert.equal(transfers.calls, 0);
+  assert.equal(transfers.uniqueTransfers, 0);
+  assert.equal(store.ledger.length, 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -289,7 +293,7 @@ function execInput(
 
 // ---------------------------------------------------------------------------
 // 4. Recorded transfer reference: a processing row whose notes already
-//    carry a transfer finalizes from the record without sending again.
+//    carry a transfer finalizes only after provider verification, no resend.
 // ---------------------------------------------------------------------------
 {
   const store = new FakeStore({

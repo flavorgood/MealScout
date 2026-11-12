@@ -13,11 +13,11 @@ const actor = (id = "synthetic-owner") => ({ id, email: `${id}@example.invalid`,
 type Mode = "ok" | "failed" | "malformed";
 type Fixture = {
   userId: string | null; legacy: boolean; statusMode: Mode; cancelMode: Mode;
-  reads: number; writes: number; delayCancel: boolean; unexpectedWrites: string[];
+  reads: number; writes: number; cancelResponseGate: Promise<void> | null; unexpectedWrites: string[];
 };
 const states = new WeakMap<Page, Fixture>();
 async function isolate(page: Page, legacy = false) {
-  const state: Fixture = { userId: "synthetic-owner", legacy, statusMode: "ok", cancelMode: "ok", reads: 0, writes: 0, delayCancel: false, unexpectedWrites: [] };
+  const state: Fixture = { userId: "synthetic-owner", legacy, statusMode: "ok", cancelMode: "ok", reads: 0, writes: 0, cancelResponseGate: null, unexpectedWrites: [] };
   states.set(page, state);
   await page.routeWebSocket("**/*", socket => socket.close());
   await page.context().route("**/*", async route => {
@@ -32,7 +32,7 @@ async function isolate(page: Page, legacy = false) {
     }
     if (key === "POST /api/subscription/cancel") {
       state.writes += 1;
-      if (state.delayCancel) await new Promise(resolve => setTimeout(resolve, 500));
+      if (state.cancelResponseGate) await state.cancelResponseGate;
       if (state.cancelMode === "failed") return route.fulfill({ status: 502, json: { message: "Synthetic legacy cancellation unavailable. Please try again." } });
       if (state.cancelMode === "malformed") return route.fulfill({ status: 200, json: { status: "active", hasAccess: true } });
       const canceled = state.legacy; state.legacy = false;
@@ -86,14 +86,24 @@ test.describe("Synthetic native Profile access and legacy billing", () => {
   });
 
   test("legacy subscription requires explicit confirmation and one acknowledged request", async ({ page }) => {
-    const state = await isolate(page, true); state.delayCancel = true; await open(page);
+    const state = await isolate(page, true);
+    let releaseCancel!: () => void;
+    state.cancelResponseGate = new Promise<void>(resolve => { releaseCancel = resolve; });
+    await open(page);
     await expect(billing(page).getByText("Legacy subscription linked", { exact: true })).toBeVisible();
     expect(state.writes).toBe(0);
     await billing(page).getByRole("button", { name: "Stop legacy subscription", exact: true }).click();
     await page.getByRole("button", { name: "Keep it for now", exact: true }).click();
     expect(state.writes).toBe(0);
-    await confirmStop(page);
-    await expect(billing(page).getByRole("button", { name: "Stopping legacy subscription…", exact: true })).toBeDisabled();
+    try {
+      await confirmStop(page);
+      // Keep the synthetic response pending until its UI is actually observed.
+      // A fixed delay can elapse before WebKit schedules the assertion.
+      await expect(billing(page).getByRole("button", { name: "Stopping legacy subscription…", exact: true })).toBeDisabled();
+      expect(state.writes).toBe(1);
+    } finally {
+      releaseCancel();
+    }
     await expect(billing(page).getByText("Legacy subscription stopped. Your complete profile access remains active.", { exact: true })).toBeVisible();
     expect(state.writes).toBe(1);
     await expect(page.getByTestId("button-open-complete-profile")).toBeEnabled();

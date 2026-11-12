@@ -1,3 +1,4 @@
+import { reconcilePayoutTransfer, verifyRecordedPayoutTransfer } from "../../reconcilePayoutTransfer";
 import type { Express } from "express";
 import { eq, and, or, sql, desc, isNull } from "drizzle-orm";
 import Stripe from "stripe";
@@ -63,8 +64,8 @@ function appendStripeTransferRef(
 // paying again, and reject refuses. The claim records its own snapshot
 // (methodDetails.executionClaim, including the Stripe idempotency key), so
 // a retry after a crash replays the SAME transfer instead of creating a
-// second one, and the recorded transfer id in notes finalizes the row
-// without any new provider call.
+// second one. A recorded transfer id is only a lookup hint: retrieve and
+// validate the provider transfer before finalizing; never resend it.
 type ApprovedExecution = {
   rail: "stripe_transfer";
   destination: string | null;
@@ -637,11 +638,21 @@ export function registerAffiliateAdminRoutes(
           });
         }
 
-        // Reconcile before sending: a transfer reference already recorded
-        // on the row means the money was already sent (a previous attempt
-        // crashed between the provider call and finalizing). Finalize from
-        // the record — never send again.
+        // Recorded references are untrusted lookup hints. Validate provider
+        // proof before finalizing; never resend a recorded-transfer branch.
         let transferId = extractStripeTransferId(working.notes);
+        if (transferId) {
+          if (!stripe) return res.status(503).json({ message: "Recorded transfer requires Stripe verification; payout remains held" });
+          try {
+            await verifyRecordedPayoutTransfer(stripe, transferId, {
+              metadataKey: "affiliateWithdrawalId", payoutId: working.id,
+              ownerMetadataKey: "affiliateUserId", ownerId: working.userId,
+              amount: claim.amountCents, currency: claim.currency, destination: claim.destination,
+            });
+          } catch {
+            return res.status(502).json({ message: "Recorded transfer could not be verified against payout; no resend or manual fallback" });
+          }
+        }
         if (!transferId) {
           if (!stripe) {
             return res.status(503).json({
@@ -657,41 +668,12 @@ export function registerAffiliateAdminRoutes(
             // transfer is finalized from the record, never re-sent; a
             // failed search refuses rather than risk a double payment.
             try {
-              // The pinned Stripe SDK types expose no transfers.search,
-              // so page the transfer list and match the
-              // affiliateWithdrawalId metadata every affiliate transfer
-              // carries. "Not found" is trusted ONLY at genuine
-              // exhaustion (Stripe reports no more pages); hitting the
-              // page cap first throws, and the catch below refuses
-              // rather than treating a truncated scan as proof that no
-              // transfer exists.
-              let startingAfter: string | undefined;
-              let exhausted = false;
-              for (let page = 0; page < 200 && !transferId; page++) {
-                const list = await stripe.transfers.list({
-                  limit: 100,
-                  ...(startingAfter
-                    ? { starting_after: startingAfter }
-                    : {}),
-                });
-                const found = list.data.find(
-                  (t) => t.metadata?.affiliateWithdrawalId === working.id,
-                );
-                if (found) {
-                  transferId = found.id;
-                  break;
-                }
-                if (!list.has_more || list.data.length === 0) {
-                  exhausted = true;
-                  break;
-                }
-                startingAfter = list.data[list.data.length - 1].id;
-              }
-              if (!transferId && !exhausted) {
-                throw new Error(
-                  "payout reconciliation scan incomplete: transfer list not exhausted within the page cap",
-                );
-              }
+              const transfer = await reconcilePayoutTransfer(stripe, {
+                metadataKey: "affiliateWithdrawalId", payoutId: working.id,
+                ownerMetadataKey: "affiliateUserId", ownerId: working.userId,
+                amount: claim.amountCents, currency: claim.currency, destination: claim.destination,
+              });
+              transferId = transfer.id;
             } catch (searchErr) {
               console.error(
                 `Error reconciling Stripe transfer for affiliate payout ${working.id}:`,
