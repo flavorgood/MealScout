@@ -147,6 +147,13 @@ test.describe("welcome and Scout routing law", () => {
     await expect(page.getByTestId("button-signup-flow-private_chef")).toBeVisible();
     await page.getByTestId("button-signup-flow-private_chef").click();
     await expect(page).toHaveURL(/\/restaurant-signup\?.*businessType=private_chef/);
+    // Account-first is the current flow; the private designer remains optional.
+    // Exercise that actual transition without weakening draft/no-write coverage.
+    await expect(page.getByTestId("guest-account-first-gate")).toBeVisible();
+    await expect(page.getByTestId("button-signup-toggle")).toBeVisible();
+    await expect(page.getByTestId("guest-business-draft")).toHaveCount(0);
+    expect(writes).toEqual([]);
+    await page.getByRole("button", { name: "Or start with my business details", exact: true }).click();
     await expect(page.getByTestId("guest-business-draft")).toBeVisible();
     await expect(page.locator("#guest-draft-businessType")).toHaveValue("private_chef");
     await expect(page.getByTestId("button-signup-toggle")).toHaveCount(0);
