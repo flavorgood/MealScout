@@ -658,17 +658,40 @@ export function registerAffiliateAdminRoutes(
             // failed search refuses rather than risk a double payment.
             try {
               // The pinned Stripe SDK types expose no transfers.search,
-              // so scan the transfer list and match the
+              // so page the transfer list and match the
               // affiliateWithdrawalId metadata every affiliate transfer
-              // carries. Processing retries are rare and admin-driven;
-              // a scan error refuses below rather than re-sending blind.
-              const transfers = await stripe.transfers
-                .list({ limit: 100 })
-                .autoPagingToArray({ limit: 10000 });
-              const found = transfers.find(
-                (t) => t.metadata?.affiliateWithdrawalId === working.id,
-              );
-              if (found) transferId = found.id;
+              // carries. "Not found" is trusted ONLY at genuine
+              // exhaustion (Stripe reports no more pages); hitting the
+              // page cap first throws, and the catch below refuses
+              // rather than treating a truncated scan as proof that no
+              // transfer exists.
+              let startingAfter: string | undefined;
+              let exhausted = false;
+              for (let page = 0; page < 200 && !transferId; page++) {
+                const list = await stripe.transfers.list({
+                  limit: 100,
+                  ...(startingAfter
+                    ? { starting_after: startingAfter }
+                    : {}),
+                });
+                const found = list.data.find(
+                  (t) => t.metadata?.affiliateWithdrawalId === working.id,
+                );
+                if (found) {
+                  transferId = found.id;
+                  break;
+                }
+                if (!list.has_more || list.data.length === 0) {
+                  exhausted = true;
+                  break;
+                }
+                startingAfter = list.data[list.data.length - 1].id;
+              }
+              if (!transferId && !exhausted) {
+                throw new Error(
+                  "payout reconciliation scan incomplete: transfer list not exhausted within the page cap",
+                );
+              }
             } catch (searchErr) {
               console.error(
                 `Error reconciling Stripe transfer for affiliate payout ${working.id}:`,
