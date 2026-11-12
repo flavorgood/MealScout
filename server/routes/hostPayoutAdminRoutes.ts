@@ -385,11 +385,18 @@ export function registerHostPayoutAdminRoutes(app: Express) {
                     { idempotencyKey },
                   ),
                 findTransferByPayoutRequestId: async (requestId: string) => {
-                  const page = await stripe.transfers.search({
-                    query: `metadata["payoutRequestId"]:"${requestId}"`,
-                    limit: 1,
-                  });
-                  const found = page.data?.[0];
+                  // The pinned Stripe SDK types expose no transfers.search,
+                  // so reconcile by scanning the transfer list and matching
+                  // the payoutRequestId metadata every host-payout transfer
+                  // carries. This runs only on a processing retry (rare,
+                  // admin-initiated); a scan error propagates and the
+                  // execution refuses rather than re-sending blind.
+                  const transfers = await stripe.transfers
+                    .list({ limit: 100 })
+                    .autoPagingToArray({ limit: 10000 });
+                  const found = transfers.find(
+                    (t) => t.metadata?.payoutRequestId === requestId,
+                  );
                   return found ? { id: found.id } : null;
                 },
               }

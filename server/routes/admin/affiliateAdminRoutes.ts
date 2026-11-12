@@ -657,11 +657,18 @@ export function registerAffiliateAdminRoutes(
             // transfer is finalized from the record, never re-sent; a
             // failed search refuses rather than risk a double payment.
             try {
-              const page = await stripe.transfers.search({
-                query: `metadata["affiliateWithdrawalId"]:"${working.id}"`,
-                limit: 1,
-              });
-              if (page.data?.[0]) transferId = page.data[0].id;
+              // The pinned Stripe SDK types expose no transfers.search,
+              // so scan the transfer list and match the
+              // affiliateWithdrawalId metadata every affiliate transfer
+              // carries. Processing retries are rare and admin-driven;
+              // a scan error refuses below rather than re-sending blind.
+              const transfers = await stripe.transfers
+                .list({ limit: 100 })
+                .autoPagingToArray({ limit: 10000 });
+              const found = transfers.find(
+                (t) => t.metadata?.affiliateWithdrawalId === working.id,
+              );
+              if (found) transferId = found.id;
             } catch (searchErr) {
               console.error(
                 `Error reconciling Stripe transfer for affiliate payout ${working.id}:`,
