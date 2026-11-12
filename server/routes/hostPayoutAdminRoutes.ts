@@ -1,3 +1,4 @@
+import { reconcilePayoutTransfer, verifyRecordedPayoutTransfer } from "../reconcilePayoutTransfer";
 import type { Express } from "express";
 import { and, desc, eq, gte, like, lt, or, sql } from "drizzle-orm";
 import Stripe from "stripe";
@@ -384,13 +385,19 @@ export function registerHostPayoutAdminRoutes(app: Express) {
                     },
                     { idempotencyKey },
                   ),
+                verifyRecordedTransfer: async (transferId: string) => verifyRecordedPayoutTransfer(stripe, transferId, {
+                  metadataKey: "payoutRequestId", payoutId: existing.id,
+                  ownerMetadataKey: "hostId", ownerId: existing.hostId,
+                  amount: Math.abs(Number(existing.amountCents)), currency: "usd",
+                  destination: String(hostRow?.stripeConnectAccountId || ""),
+                }),
                 findTransferByPayoutRequestId: async (requestId: string) => {
-                  const page = await stripe.transfers.search({
-                    query: `metadata["payoutRequestId"]:"${requestId}"`,
-                    limit: 1,
+                  return reconcilePayoutTransfer(stripe, {
+                    metadataKey: "payoutRequestId", payoutId: requestId,
+                    ownerMetadataKey: "hostId", ownerId: existing.hostId,
+                    amount: Math.abs(Number(existing.amountCents)), currency: "usd",
+                    destination: String(hostRow?.stripeConnectAccountId || ""),
                   });
-                  const found = page.data?.[0];
-                  return found ? { id: found.id } : null;
                 },
               }
             : null;

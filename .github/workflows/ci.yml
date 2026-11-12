@@ -66,6 +66,14 @@ jobs:
       - name: Typecheck
         run: npm run check
 
+      - name: Payout Reconciliation SDK and Identity Guards
+        run: |
+          node --import tsx scripts/reconcile-review.test.mjs
+          node --import tsx scripts/hub-review.test.mjs
+          node --import tsx scripts/affiliate-recorded-transfer-review.test.mjs
+          node --import tsx scripts/payout-routes-postgres-review.test.mjs
+          node --import tsx scripts/mealscout-host-payout-execution.behavior.test.ts
+
       - name: TradeScout SSO Identity Validation
         run: node --test scripts/mealscout-tradescout-sso-identity.behavior.test.cjs
 
