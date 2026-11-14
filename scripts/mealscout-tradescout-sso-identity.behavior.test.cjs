@@ -135,6 +135,9 @@ before(async () => {
     "express-session": unexpected("session store"),
     "connect-pg-simple": unexpected("Postgres session store"),
     "./storage": { storage },
+    "./hubIdentityClient": {
+      linkHubSignupToSharedProfile: async () => {},
+    },
     "./services/businessTeamAccess": {
       hasBusinessPermissionForRestaurant: unexpected("business permission"),
       getBusinessAccessContext: unexpected("business access"),
@@ -285,7 +288,14 @@ for (const [label, claims, expectedId] of validIdentities) {
     assert.equal(result.res.body.message, "TradeScout SSO login successful");
     assert.deepEqual(upserts, [{
       provider: "tradescout",
-      data: { tradescoutId: expectedId, email: "fixture@example.invalid", firstName: "Local", lastName: "Fixture", roles: null },
+      data: {
+        tradescoutId: expectedId, email: "fixture@example.invalid", firstName: "Local", lastName: "Fixture", roles: null,
+        // PR #473 (verify-once): the SSO upsert now also carries the
+        // token's standings. These fixture tokens carry neither claim,
+        // so email standing is false (stamp only when the claim is
+        // exactly true) and verification status is null.
+        emailVerified: false, verificationStatus: null,
+      },
       userType: "customer",
     }]);
     assert.deepEqual(effects, ["upsert", "resolveReferral", "regenerate", "login", "save"]);

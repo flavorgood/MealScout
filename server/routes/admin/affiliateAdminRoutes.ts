@@ -648,15 +648,72 @@ export function registerAffiliateAdminRoutes(
               message: "Stripe is not configured on this server",
             });
           }
+          if (existing.status === "processing") {
+            // Retry of an attempt whose outcome is unknown. Stripe
+            // prunes idempotency keys after 24 hours, so the stored key
+            // alone cannot prove this payout was not already sent:
+            // search Stripe by the withdrawal metadata stamped on every
+            // affiliate transfer BEFORE creating anything. A found
+            // transfer is finalized from the record, never re-sent; a
+            // failed search refuses rather than risk a double payment.
+            try {
+              // The pinned Stripe SDK types expose no transfers.search,
+              // so page the transfer list and match the
+              // affiliateWithdrawalId metadata every affiliate transfer
+              // carries. "Not found" is trusted ONLY at genuine
+              // exhaustion (Stripe reports no more pages); hitting the
+              // page cap first throws, and the catch below refuses
+              // rather than treating a truncated scan as proof that no
+              // transfer exists.
+              let startingAfter: string | undefined;
+              let exhausted = false;
+              for (let page = 0; page < 200 && !transferId; page++) {
+                const list = await stripe.transfers.list({
+                  limit: 100,
+                  ...(startingAfter
+                    ? { starting_after: startingAfter }
+                    : {}),
+                });
+                const found = list.data.find(
+                  (t) => t.metadata?.affiliateWithdrawalId === working.id,
+                );
+                if (found) {
+                  transferId = found.id;
+                  break;
+                }
+                if (!list.has_more || list.data.length === 0) {
+                  exhausted = true;
+                  break;
+                }
+                startingAfter = list.data[list.data.length - 1].id;
+              }
+              if (!transferId && !exhausted) {
+                throw new Error(
+                  "payout reconciliation scan incomplete: transfer list not exhausted within the page cap",
+                );
+              }
+            } catch (searchErr) {
+              console.error(
+                `Error reconciling Stripe transfer for affiliate payout ${working.id}:`,
+                searchErr,
+              );
+              return res.status(502).json({
+                message:
+                  "Could not reconcile this processing payout against Stripe; refusing to re-send. Reconcile manually in Stripe before retrying.",
+              });
+            }
+          }
+          if (!transferId) {
           // Send against the CLAIM snapshot only: destination, amount,
           // currency and idempotency key all come from the row, never from
           // live preferences. The idempotency key is the withdrawal id, so
-          // if a previous attempt created the transfer but crashed before
-          // recording it, Stripe replays that same transfer here instead
-          // of paying twice. A provider failure leaves the row processing
-          // (outcome uncertain): reject stays refused and a mark-paid
-          // retry reconciles — the row is never silently returned to
-          // approved.
+          // within Stripe's 24-hour idempotency window a previous attempt
+          // that created the transfer but crashed before recording it is
+          // replayed here instead of paying twice; past that window the
+          // metadata search above is the guard. A provider failure leaves
+          // the row processing (outcome uncertain): reject stays refused
+          // and a mark-paid retry reconciles — the row is never silently
+          // returned to approved.
           let transfer: Stripe.Transfer;
           try {
             transfer = await stripe.transfers.create(
@@ -683,6 +740,7 @@ export function registerAffiliateAdminRoutes(
             });
           }
           transferId = transfer.id;
+          }
         }
 
         const paidAt = new Date();

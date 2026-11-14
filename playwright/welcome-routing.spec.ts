@@ -147,6 +147,15 @@ test.describe("welcome and Scout routing law", () => {
     await expect(page.getByTestId("button-signup-flow-private_chef")).toBeVisible();
     await page.getByTestId("button-signup-flow-private_chef").click();
     await expect(page).toHaveURL(/\/restaurant-signup\?.*businessType=private_chef/);
+    // Since the 2026-11-04 walkthrough fix (commit a37ab0db, "owner sign-up
+    // starts with the account"), the account step opens first and the
+    // private draft sits one explicit click away, behind "Or start with my
+    // business details" in the account-first gate. The law this test guards
+    // is unchanged: a guest can still design a private draft, with zero
+    // server writes, before any account exists.
+    await expect(page.getByTestId("guest-account-first-gate")).toBeVisible();
+    await expect(page.getByTestId("guest-business-draft")).toHaveCount(0);
+    await page.getByRole("button", { name: "Or start with my business details" }).click();
     await expect(page.getByTestId("guest-business-draft")).toBeVisible();
     await expect(page.locator("#guest-draft-businessType")).toHaveValue("private_chef");
     await expect(page.getByTestId("button-signup-toggle")).toHaveCount(0);

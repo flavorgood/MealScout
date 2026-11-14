@@ -384,6 +384,35 @@ export function registerHostPayoutAdminRoutes(app: Express) {
                     },
                     { idempotencyKey },
                   ),
+                findTransferByPayoutRequestId: async (requestId: string) => {
+                  // The pinned Stripe SDK types expose no transfers.search,
+                  // so reconcile by paging the transfer list and matching
+                  // the payoutRequestId metadata every host-payout transfer
+                  // carries. This runs only on a processing retry (rare,
+                  // admin-initiated). The scan returns null ONLY at genuine
+                  // exhaustion (Stripe reports no more pages); hitting the
+                  // page cap first throws, and the execution refuses
+                  // rather than treating a truncated scan as proof that
+                  // no transfer exists.
+                  let startingAfter: string | undefined;
+                  for (let page = 0; page < 200; page++) {
+                    const list = await stripe.transfers.list({
+                      limit: 100,
+                      ...(startingAfter
+                        ? { starting_after: startingAfter }
+                        : {}),
+                    });
+                    const found = list.data.find(
+                      (t) => t.metadata?.payoutRequestId === requestId,
+                    );
+                    if (found) return { id: found.id };
+                    if (!list.has_more || list.data.length === 0) return null;
+                    startingAfter = list.data[list.data.length - 1].id;
+                  }
+                  throw new Error(
+                    "payout reconciliation scan incomplete: transfer list not exhausted within the page cap",
+                  );
+                },
               }
             : null;
 

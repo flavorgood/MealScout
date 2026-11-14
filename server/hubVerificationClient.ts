@@ -60,6 +60,9 @@ export async function getTradeScoutVerification(user: {
   try {
     const res = await fetch(`${base}/api/auth/hub/verification-status`, {
       method: "POST",
+      // Bound the wait like the identity client: a hanging TradeScout
+      // aborts into the catch below and reads fail-closed "unknown".
+      signal: AbortSignal.timeout(3000),
       headers: { "content-type": "application/json", "x-hub-identity-secret": secret },
       body: JSON.stringify({ tsUserId }),
     });
