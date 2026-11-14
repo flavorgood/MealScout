@@ -9,6 +9,14 @@ import { extractIdFromSlug } from "@/lib/seo-slug";
 import { generateEventSchema } from "@/lib/schema-helpers";
 import { useAuth } from "@/hooks/useAuth";
 import { resolveStoredFoodBusinessType } from "@shared/businessTypes";
+import { formatEventCalendarDate, getEventCalendarDateKey } from "@/lib/public-event-display";
+
+type EventTruck = {
+  id: string;
+  name?: string | null;
+  cuisineType?: string | null;
+  path?: string | null;
+};
 
 type PublicEvent = {
   id: string;
@@ -17,6 +25,7 @@ type PublicEvent = {
   date?: string | null;
   startTime?: string | null;
   endTime?: string | null;
+  timeZone?: string | null;
   status?: string | null;
   eventType?: string | null;
   requiresPayment?: boolean;
@@ -29,12 +38,8 @@ type PublicEvent = {
     state?: string | null;
     path?: string | null;
   };
-  truck?: {
-    id: string;
-    name?: string | null;
-    cuisineType?: string | null;
-    path?: string | null;
-  } | null;
+  truck?: EventTruck | null;
+  trucks?: EventTruck[];
   canonicalUrl?: string | null;
   noIndex?: boolean;
   ended?: boolean;
@@ -134,7 +139,22 @@ export default function EventDetailPage() {
     staleTime: 30_000,
   });
 
-  const dateText = data?.date ? new Date(data.date).toLocaleDateString() : null;
+  const dateKey = getEventCalendarDateKey(data?.date);
+  const dateText = formatEventCalendarDate(data?.date);
+  // A supplied array is authoritative, even when empty. Only older payloads
+  // without the roster may fall back to the first-truck compatibility field.
+  const confirmedTrucks = Array.isArray(data?.trucks)
+    ? data.trucks
+    : data?.truck ? [data.truck] : [];
+  const description = data?.description?.trim();
+  const publicAddress = data?.host?.address?.trim();
+  const directionsUrl = publicAddress
+    ? `https://www.google.com/maps/dir/?${new URLSearchParams({
+        api: "1",
+        destination: [publicAddress, data?.host?.city, data?.host?.state]
+          .filter(Boolean).join(", "),
+      }).toString()}`
+    : null;
   const timeText =
     data?.startTime && data?.endTime
       ? `${data.startTime}–${data.endTime}`
@@ -228,8 +248,9 @@ export default function EventDetailPage() {
             <CardContent className="flex flex-col gap-3">
               {dateText ? (
                 <div className="text-sm text-muted-foreground">
-                  {dateText}
+                  <time dateTime={dateKey || undefined}>{dateText}</time>
                   {timeText ? ` · ${timeText}` : ""}
+                  {timeText && data?.timeZone ? ` (${data.timeZone})` : ""}
                 </div>
               ) : null}
               {data?.lastConfirmedAtUtc ? (
@@ -244,9 +265,18 @@ export default function EventDetailPage() {
                 </div>
               ) : null}
 
+              {description ? (
+                <div className="text-sm">
+                  <h2 className="font-semibold">About this event</h2>
+                  <p className="whitespace-pre-line break-words text-muted-foreground mt-1">
+                    {description}
+                  </p>
+                </div>
+              ) : null}
+
               {data?.host ? (
                 <div className="text-sm">
-                  <div className="font-semibold">Location</div>
+                  <h2 className="font-semibold">Location</h2>
                   <div className="text-muted-foreground">
                     {data.host.path ? (
                       <a className="underline" href={data.host.path}>
@@ -255,33 +285,39 @@ export default function EventDetailPage() {
                     ) : (
                       <span>{data.host.name || "Host"}</span>
                     )}
-                    {data.host.city ? ` · ${data.host.city}` : ""}
-                    {data.host.state ? `, ${data.host.state}` : ""}
+                  </div>
+                  {publicAddress ? (
+                    <p className="text-muted-foreground break-words">{publicAddress}</p>
+                  ) : null}
+                  <div className="text-muted-foreground">
+                    {[data.host.city, data.host.state].filter(Boolean).join(", ")}
                   </div>
                 </div>
               ) : null}
 
-              {data?.truck ? (
-                <div className="text-sm">
-                  <div className="font-semibold">Booked truck</div>
-                  <div className="text-muted-foreground">
-                    {data.truck.path ? (
-                      <a className="underline" href={data.truck.path}>
-                        {data.truck.name || "Food truck"}
-                      </a>
-                    ) : (
-                      <span>{data.truck.name || "Food truck"}</span>
-                    )}
-                    {data.truck.cuisineType
-                      ? ` · ${data.truck.cuisineType}`
-                      : ""}
-                  </div>
-                </div>
-              ) : (
-                <div className="text-sm text-muted-foreground">
-                  No truck booked yet.
-                </div>
-              )}
+              {data ? (
+                <section className="text-sm" aria-labelledby="event-trucks-heading">
+                  <h2 id="event-trucks-heading" className="font-semibold">Booked trucks</h2>
+                  {confirmedTrucks.length ? (
+                    <ul className="mt-2 space-y-3">
+                      {confirmedTrucks.map((truck) => (
+                        <li key={truck.id} className="text-muted-foreground break-words">
+                          {truck.path ? (
+                            <a className="underline underline-offset-4 font-medium" href={truck.path}>
+                              {truck.name || "Food truck"}
+                            </a>
+                          ) : (
+                            <span>{truck.name || "Food truck"}</span>
+                          )}
+                          {truck.cuisineType ? <span> · {truck.cuisineType}</span> : null}
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <p className="text-muted-foreground mt-1">No truck booked yet.</p>
+                  )}
+                </section>
+              ) : null}
 
               <div className="flex gap-2 flex-wrap">
                 {parkingCheckoutPath ? (
@@ -297,9 +333,9 @@ export default function EventDetailPage() {
                     <a href={data.host.path}>View location</a>
                   </Button>
                 ) : null}
-                {data?.truck?.path ? (
+                {directionsUrl ? (
                   <Button variant="outline" asChild>
-                    <a href={data.truck.path}>View truck</a>
+                    <a href={directionsUrl}>Get directions</a>
                   </Button>
                 ) : null}
               </div>
